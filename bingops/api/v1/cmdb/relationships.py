@@ -34,7 +34,7 @@ async def add_belongs_to(
         id=relation.id,
         child_id=relation.child_id,
         parent_id=relation.parent_id,
-        relation_type=relation.relation_type,
+        description=relation.description,
         synced_at=relation.synced_at,
         source=relation.source,
         created_at=relation.created_at,
@@ -56,18 +56,18 @@ async def remove_belongs_to(
 @router.get("/resources/{resource_id}/children")
 async def get_children(
     resource_id: int,
-    relation_type: str | None = None,
+    description: str | None = None,
     session: AsyncSession = Depends(get_db_session),
     _user: User = require_permission("cmdb_resource:list"),
 ):
     """查询某资源的所有子资源（从属关系）。"""
-    relations = await relationship_service.get_children(session, resource_id, relation_type)
+    relations = await relationship_service.get_children(session, resource_id, description)
     items = [
         BelongsToResponse(
             id=r.id,
             child_id=r.child_id,
             parent_id=r.parent_id,
-            relation_type=r.relation_type,
+            description=r.description,
             synced_at=r.synced_at,
             source=r.source,
             created_at=r.created_at,
@@ -80,18 +80,18 @@ async def get_children(
 @router.get("/resources/{resource_id}/parents")
 async def get_parents(
     resource_id: int,
-    relation_type: str | None = None,
+    description: str | None = None,
     session: AsyncSession = Depends(get_db_session),
     _user: User = require_permission("cmdb_resource:list"),
 ):
     """查询某资源的所有父资源（从属关系）。"""
-    relations = await relationship_service.get_parents(session, resource_id, relation_type)
+    relations = await relationship_service.get_parents(session, resource_id, description)
     items = [
         BelongsToResponse(
             id=r.id,
             child_id=r.child_id,
             parent_id=r.parent_id,
-            relation_type=r.relation_type,
+            description=r.description,
             synced_at=r.synced_at,
             source=r.source,
             created_at=r.created_at,
@@ -116,7 +116,7 @@ async def add_relates_to(
         id=relation.id,
         source_id=relation.source_id,
         target_id=relation.target_id,
-        relation_type=relation.relation_type,
+        description=relation.description,
         attributes=relation.attributes,
         synced_at=relation.synced_at,
         source=relation.source,
@@ -139,18 +139,18 @@ async def remove_relates_to(
 @router.get("/resources/{resource_id}/relations-from")
 async def get_relations_from(
     resource_id: int,
-    relation_type: str | None = None,
+    description: str | None = None,
     session: AsyncSession = Depends(get_db_session),
     _user: User = require_permission("cmdb_resource:list"),
 ):
     """查询从某资源出发的所有关联关系。"""
-    relations = await relationship_service.get_relations_from(session, resource_id, relation_type)
+    relations = await relationship_service.get_relations_from(session, resource_id, description)
     items = [
         RelatesToResponse(
             id=r.id,
             source_id=r.source_id,
             target_id=r.target_id,
-            relation_type=r.relation_type,
+            description=r.description,
             attributes=r.attributes,
             synced_at=r.synced_at,
             source=r.source,
@@ -164,18 +164,18 @@ async def get_relations_from(
 @router.get("/resources/{resource_id}/relations-to")
 async def get_relations_to(
     resource_id: int,
-    relation_type: str | None = None,
+    description: str | None = None,
     session: AsyncSession = Depends(get_db_session),
     _user: User = require_permission("cmdb_resource:list"),
 ):
     """查询指向某资源的所有关联关系。"""
-    relations = await relationship_service.get_relations_to(session, resource_id, relation_type)
+    relations = await relationship_service.get_relations_to(session, resource_id, description)
     items = [
         RelatesToResponse(
             id=r.id,
             source_id=r.source_id,
             target_id=r.target_id,
-            relation_type=r.relation_type,
+            description=r.description,
             attributes=r.attributes,
             synced_at=r.synced_at,
             source=r.source,

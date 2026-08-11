@@ -38,7 +38,7 @@ async def add_belongs_to(session: AsyncSession, payload: BelongsToCreate) -> Cmd
     relation = CmdbBelongsTo(
         child_id=payload.child_id,
         parent_id=payload.parent_id,
-        relation_type=payload.relation_type,
+        description=payload.description,
         source="manual",
     )
     relation = await repo.create_belongs_to(relation)
@@ -46,7 +46,7 @@ async def add_belongs_to(session: AsyncSession, payload: BelongsToCreate) -> Cmd
 
     logger.info(
         "CMDB belongs_to relation created",
-        extra={"child_id": payload.child_id, "parent_id": payload.parent_id, "type": payload.relation_type},
+        extra={"child_id": payload.child_id, "parent_id": payload.parent_id},
     )
     return relation
 
@@ -62,19 +62,19 @@ async def remove_belongs_to(session: AsyncSession, relation_id: int) -> None:
 
 
 async def get_children(
-    session: AsyncSession, resource_id: int, relation_type: str | None = None,
+    session: AsyncSession, resource_id: int, description: str | None = None,
 ) -> list[CmdbBelongsTo]:
     """获取某资源的所有子资源关系。"""
     repo = CmdbRelationshipRepo(session)
-    return await repo.get_children(resource_id, relation_type)
+    return await repo.get_children(resource_id, description)
 
 
 async def get_parents(
-    session: AsyncSession, resource_id: int, relation_type: str | None = None,
+    session: AsyncSession, resource_id: int, description: str | None = None,
 ) -> list[CmdbBelongsTo]:
     """获取某资源的所有父资源关系。"""
     repo = CmdbRelationshipRepo(session)
-    return await repo.get_parents(resource_id, relation_type)
+    return await repo.get_parents(resource_id, description)
 
 
 # ── 关联关系 ────────────────────────────────────────────────────────────────────
@@ -92,7 +92,7 @@ async def add_relates_to(session: AsyncSession, payload: RelatesToCreate) -> Cmd
     relation = CmdbRelatesTo(
         source_id=payload.source_id,
         target_id=payload.target_id,
-        relation_type=payload.relation_type,
+        description=payload.description,
         attributes=payload.attributes,
         source="manual",
     )
@@ -101,7 +101,7 @@ async def add_relates_to(session: AsyncSession, payload: RelatesToCreate) -> Cmd
 
     logger.info(
         "CMDB relates_to relation created",
-        extra={"source_id": payload.source_id, "target_id": payload.target_id, "type": payload.relation_type},
+        extra={"source_id": payload.source_id, "target_id": payload.target_id},
     )
     return relation
 
@@ -117,16 +117,16 @@ async def remove_relates_to(session: AsyncSession, relation_id: int) -> None:
 
 
 async def get_relations_from(
-    session: AsyncSession, resource_id: int, relation_type: str | None = None,
+    session: AsyncSession, resource_id: int, description: str | None = None,
 ) -> list[CmdbRelatesTo]:
     """获取从某资源出发的所有关联关系。"""
     repo = CmdbRelationshipRepo(session)
-    return await repo.get_relations_from(resource_id, relation_type)
+    return await repo.get_relations_from(resource_id, description)
 
 
 async def get_relations_to(
-    session: AsyncSession, resource_id: int, relation_type: str | None = None,
+    session: AsyncSession, resource_id: int, description: str | None = None,
 ) -> list[CmdbRelatesTo]:
     """获取指向某资源的所有关联关系。"""
     repo = CmdbRelationshipRepo(session)
-    return await repo.get_relations_to(resource_id, relation_type)
+    return await repo.get_relations_to(resource_id, description)

@@ -24,7 +24,7 @@
 | 字段 | **154 条已录** | 8 处偏差已修 6，剩 2 见 §2 |
 | 关系约束 | **46/52 已录** | 46 条全部正确；余 3 条被 apisix_route 阻塞，见 §4 头部注 |
 | 选项库 | 0 ✅ 已清空 | API 标 deprecated 休眠 |
-| 实例/边 | 0 | 附录 B #16 消费链路重构后由同步产出 |
+| 实例/边 | 0 | K8s 链路已重构完成（附录 B #16），部署消费后即产出；云链路待第二批 |
 
 ---
 
@@ -216,7 +216,7 @@ users(json, 挂载实例列表, 同步保留)。
 | 13 | 应用关联物化（后端表，非模型） | 新增 `cmdb_app_resources` 显式关联表；tag_key='app' 自动归集写入 source='tag'，手动绑定 source='manual'；应用只绑服务级 CI（workload/中间件/RDS/入口），不绑 Pod/Node |
 | 14 | **K8s 消息契约以 cmdb-informer 为准重写** | 实测对比（`cmdb-informer/internal/message/types.go` 的 `MQMessage` vs `kafka_messages.py` 的 `K8sResourceMessage`）两边结构性不一致：字段名（cluster_id vs cluster、resource_type vs kind）、消息结构（Go 嵌套 `resource.{uid,name,labels,annotations,spec,status,raw}` vs Python 平铺）、Python 缺 `message_id`（幂等去重）/`sync_type`/`snapshot` 事件/`old_resource`。重构时照 Go 侧 `MQMessage` 重写 Python schema，Go 生产者不动；**已确认** `resource_type` 取值为小写复数（pods/services/deployments/statefulsets/daemonsets/nodes/namespaces/persistentvolumes/persistentvolumeclaims 等），消费端映射表按此格式编写 |
 | 15 | 快照对账删除（依赖 #14） | informer 有 full_sync/periodic_sync 全量快照通道（event_type=snapshot）。消费端加快照会话逻辑：识别一轮全量的起止，结束后将本轮未出现的该集群资源做差集软删——补上仅靠 watch delete 事件丢事件即漏删的缺口 |
-| 16 | 消费链路 v1→v2 重构（前置：模型/字段/约束录入完成） | k8s_consumer/cloud_consumer/relationship_builder 仍在写 `resource_type=`/`attributes=`，与 v2 ORM（model_id+fields）不兼容，属死代码。重构内容：Kind→model_code→model_id 解析（带缓存）、按 cmdb_model_fields 挑字段落 fields、labels/云标签→tags（source 隔离+小写归一）、builder 改为 cmdb_model_relations 约束驱动+先删 discovery 边再重建。建议按链路切片：K8S 分组录完先重构 K8s 链路验证闭环，云链路第二批 |
+| 16 | 消费链路 v1→v2 重构（前置：模型/字段/约束录入完成）【K8s 链路 ✅ 已完成，云链路待第二批】 | 已落地：schema 照 Go `MQMessage` 重写；`k8s_extractors.py` 按 resource_type→model_code→model_id 提取 fields（deployments/statefulsets/daemonsets 归一 k8s_workload，configmaps/secrets 跳过）；labels 差异同步 source='cloud'；builder 按库内 12 条 K8s 约束建边（description=约束 relation_name），从属边整包替换、关联边按语义槽位替换；软删除同步清边；集群实例兜底创建（#17）；pod 边不记 change_log（#21）。跨云桥接边（#37/#38/#40/#41/#46/#47/#15/#16）留待云链路重构；#15 快照差集软删未实现（依赖消息序识别，后续迭代） |
 | 17 | k8s_cluster 实例自动 upsert | 集群本身无 Watch 事件，但是建边根节点：消费端首次见到某 `cluster_id` 时自动创建 k8s_cluster 实例（cluster_type 落 fields），无需手录、无需 informer 发消息 |
 | 18 | informer 侧零开发确认 | 建模所需 9 种 Kind（nodes/namespaces/pods/services/deployments/statefulsets/daemonsets/PV/PVC）informer 已全部支持，只需改 config.yaml 资源清单+namespace 白名单；唯一例外是 #10 选 CRD 模式时需加 Watch ApisixRoute/ApisixUpstream |
 | 19 | 合成 ID / 单位换算规则汇总（consumer 实现时照抄） | `gcp_firewall.provider_id = fw:{project_id}:{vpc_name}`（每 VPC 一个合成实例）；`dns_record.provider_id`：阿里云用 RecordId，GCP 合成 `{zone}:{name}:{type}:{policy_key或value}`；`aliyun_oss.provider_id = Bucket 名`；`dns_record.name = FQDN`（@ 存裸域名，泛解析存 `*.example.com`）；`memory_gb = API 返回的 MB / 1024`（ECS/GCE，nano 规格存 0.5）；`k8s_cluster.provider` 标托管厂商（aliyun/gcp），是云与容器两个世界的桥 |

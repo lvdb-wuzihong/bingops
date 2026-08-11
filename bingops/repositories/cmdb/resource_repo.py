@@ -92,6 +92,25 @@ class CmdbResourceRepo:
 
         return resources, total
 
+    async def find_by_name(
+        self,
+        model_id: int,
+        cloud_account: str,
+        name: str,
+        namespace: str | None = None,
+    ) -> CmdbResource | None:
+        """按模型 + 集群 + 名称（可选 fields.namespace）定位资源，关系重建用。"""
+        query = select(CmdbResource).where(
+            CmdbResource.model_id == model_id,
+            CmdbResource.cloud_account == cloud_account,
+            CmdbResource.name == name,
+            CmdbResource.deleted_at.is_(None),
+        )
+        if namespace is not None:
+            query = query.where(CmdbResource.fields["namespace"].astext == namespace)
+        result = await self._session.execute(query)
+        return result.scalars().first()
+
     async def create(self, resource: CmdbResource) -> CmdbResource:
         self._session.add(resource)
         await self._session.flush()

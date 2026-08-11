@@ -1,13 +1,9 @@
-"""云资源同步消费处理器。
+"""云资源同步消费处理器（过渡态）。
 
 消费 Kafka Topic: cloud-sync-{provider}，将云资源变更同步到 CMDB。
 
-处理逻辑：
-1. 幂等校验（resource_version）
-2. Upsert / 软删除资源
-3. 同步云标签（source='cloud'，不覆盖手动标签）
-4. 重建从属 + 关联关系
-5. 记录变更审计
+注意：v2 表结构已改为 model_id + fields JSONB，本消费器的字段映射仍是
+v1 硬编码风格，仅保证可运行不报错；待附录 B #16 云链路段重写为模型定义驱动。
 """
 
 from __future__ import annotations
@@ -20,10 +16,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from bingops.models.cmdb.change_log import CmdbChangeLog
 from bingops.models.cmdb.resource import CmdbResource
 from bingops.repositories.cmdb.change_log_repo import CmdbChangeLogRepo
+from bingops.repositories.cmdb.model_repo import CmdbModelRepo
 from bingops.repositories.cmdb.resource_repo import CmdbResourceRepo
 from bingops.repositories.cmdb.sync_task_repo import CmdbSyncTaskRepo
 from bingops.schemas.cmdb.kafka_messages import CloudResourceMessage, CloudSyncEventType
-from bingops.tasks.cmdb.relationship_builder import rebuild_cloud_relationships
 
 logger = logging.getLogger(f"bingops.{__name__}")
 
@@ -62,10 +58,19 @@ def create_cloud_handler(session_factory: async_sessionmaker[AsyncSession]):
 
 
 async def _handle_upsert(session: AsyncSession, message: CloudResourceMessage) -> None:
-    """Upsert 云资源（幂等）。"""
+    """Upsert 云资源（过渡态：resource_type → 同名模型 code 直映射）。"""
     repo = CmdbResourceRepo(session)
+    model_repo = CmdbModelRepo(session)
+    model = await model_repo.get_model_by_code(message.resource_type)
+    if model is None:
+        logger.warning(
+            "Cloud resource model not defined, skipping",
+            extra={"resource_type": message.resource_type, "provider_id": message.provider_id},
+        )
+        return
+
     existing = await repo.get_by_provider_id(
-        message.provider, message.resource_type, message.provider_id, message.cloud_account,
+        model.id, message.provider, message.provider_id, message.cloud_account,
     )
 
     # 幂等校验
@@ -80,7 +85,7 @@ async def _handle_upsert(session: AsyncSession, message: CloudResourceMessage) -
         existing.region = message.region
         existing.zone = message.zone
         existing.status = message.status
-        existing.attributes = message.attributes
+        existing.fields = message.attributes
         existing.resource_version = message.resource_version
         existing.synced_at = datetime.now(timezone.utc)
         existing.source = "discovery"
@@ -88,48 +93,49 @@ async def _handle_upsert(session: AsyncSession, message: CloudResourceMessage) -
         await repo.update(existing)
         resource = existing
 
-        await _record_change(session, resource.id, message.resource_type, "update", source="kafka")
+        await _record_change(session, resource.id, model.id, "update")
         logger.info("Cloud resource updated", extra={"provider_id": message.provider_id})
     else:
         # 新建
         resource = CmdbResource(
+            model_id=model.id,
             provider=message.provider,
-            resource_type=message.resource_type,
             provider_id=message.provider_id,
             cloud_account=message.cloud_account,
             name=message.name,
             region=message.region,
             zone=message.zone,
             status=message.status,
-            attributes=message.attributes,
+            fields=message.attributes,
             resource_version=message.resource_version,
             synced_at=datetime.now(timezone.utc),
             source="discovery",
         )
         resource = await repo.create(resource)
 
-        await _record_change(session, resource.id, message.resource_type, "create", source="kafka")
+        await _record_change(session, resource.id, model.id, "create")
         logger.info("Cloud resource created", extra={"provider_id": message.provider_id})
 
     # 同步云标签（source='cloud'，不覆盖手动标签）
     await _sync_cloud_tags(session, resource, message.cloud_tags)
 
-    # 重建关系
-    await rebuild_cloud_relationships(session, resource, message)
-
 
 async def _handle_delete(session: AsyncSession, message: CloudResourceMessage) -> None:
     """软删除云资源。"""
     repo = CmdbResourceRepo(session)
+    model_repo = CmdbModelRepo(session)
+    model = await model_repo.get_model_by_code(message.resource_type)
+    if model is None:
+        return
     existing = await repo.get_by_provider_id(
-        message.provider, message.resource_type, message.provider_id, message.cloud_account,
+        model.id, message.provider, message.provider_id, message.cloud_account,
     )
     if existing is None:
         logger.debug("Cloud resource not found for delete, skipping", extra={"provider_id": message.provider_id})
         return
 
     await repo.soft_delete(existing)
-    await _record_change(session, existing.id, message.resource_type, "delete", source="kafka")
+    await _record_change(session, existing.id, model.id, "delete")
     logger.info("Cloud resource soft-deleted", extra={"provider_id": message.provider_id})
 
 
@@ -168,17 +174,16 @@ async def _sync_cloud_tags(
 async def _record_change(
     session: AsyncSession,
     resource_id: int,
-    resource_type: str,
+    model_id: int,
     change_type: str,
-    source: str = "kafka",
 ) -> None:
     """记录变更日志。"""
     log_repo = CmdbChangeLogRepo(session)
     log = CmdbChangeLog(
         resource_id=resource_id,
-        resource_type=resource_type,
+        model_id=model_id,
         change_type=change_type,
-        source=source,
+        source="discovery",
     )
     await log_repo.create(log)
 

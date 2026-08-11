@@ -106,6 +106,28 @@ class CmdbTagRepo:
         )
         return list(result.scalars().all())
 
+    async def list_cloud_tags(self, resource_id: int) -> list[CmdbResourceTag]:
+        """获取某资源的云同步标签（source='cloud'），供差异同步用。"""
+        result = await self._session.execute(
+            select(CmdbResourceTag).where(
+                CmdbResourceTag.resource_id == resource_id,
+                CmdbResourceTag.source == "cloud",
+            )
+        )
+        return list(result.scalars().all())
+
+    async def list_cloud_tags_by_resources(self, resource_ids: list[int]) -> list[CmdbResourceTag]:
+        """批量获取多个资源的云同步标签（selector 匹配用）。"""
+        if not resource_ids:
+            return []
+        result = await self._session.execute(
+            select(CmdbResourceTag).where(
+                CmdbResourceTag.resource_id.in_(resource_ids),
+                CmdbResourceTag.source == "cloud",
+            )
+        )
+        return list(result.scalars().all())
+
     async def find_resources_by_tag(
         self, tag_key: str, tag_value: str | None = None,
     ) -> list[int]:

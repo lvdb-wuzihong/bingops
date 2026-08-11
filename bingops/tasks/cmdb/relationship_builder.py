@@ -1,16 +1,27 @@
-"""CMDB 关系重建引擎。
+"""CMDB K8s 关系重建引擎（v2）。
 
-在资源 Upsert 后，根据资源元数据自动重建从属关系和关联关系。
+在资源 Upsert / 软删除后，按 cmdb_model_relations 中录入的关系约束重建实例边：
 
-K8s 关系规则：
-- Pod → ReplicaSet → Deployment → Namespace → Cluster（从属链）
-- Service → Pod（通过 selector 匹配，关联关系）
-- Node → Cluster（从属）
+从属（belongs_to）：
+- #17 namespace → cluster（集群归属）
+- #18 pv → cluster（集群归属，PV 是集群级资源）
+- #19 workload → namespace（命名空间归属）
+- #20 service → namespace（命名空间归属）
+- #21 pvc → namespace（命名空间归属）
+- #22 pod → workload（属主负载）
+- #23 pod → node（调度于）
+- #24 pod → namespace（命名空间归属，裸 Pod 兜底）
+- #52 node → cluster（集群归属）
 
-云资源关系规则：
-- Host → Subnet → VPC（从属链）
-- Database → VPC（从属）
-- Host ↔ K8sNode（通过 IP 匹配，关联关系）
+关联（relates_to）：
+- #39 service → pod（selector 匹配）
+- #43 pod → pvc（使用存储）
+- #53 pvc → pv（绑定）
+
+跨云桥接边（#15/#16/#37/#38/#40/#41/#46/#47）依赖云侧资源，由云链路 v2 重建。
+
+策略：从属边对子节点整包替换（先删后建）；关联边按语义槽位替换。
+边写入不记 change_log（附录 B #21 纪律，防高频噪音）。
 """
 
 from __future__ import annotations
@@ -23,334 +34,351 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from bingops.models.cmdb.relationship import CmdbBelongsTo, CmdbRelatesTo
 from bingops.models.cmdb.resource import CmdbResource
+from bingops.models.cmdb.tag import CmdbResourceTag
 from bingops.repositories.cmdb.relationship_repo import CmdbRelationshipRepo
 from bingops.repositories.cmdb.resource_repo import CmdbResourceRepo
-from bingops.schemas.cmdb.kafka_messages import CloudResourceMessage, K8sResourceMessage
+from bingops.repositories.cmdb.tag_repo import CmdbTagRepo
+from bingops.schemas.cmdb.kafka_messages import K8sResourceData, K8sResourceMessage
 
 logger = logging.getLogger(f"bingops.{__name__}")
+
+# 边语义描述，与 cmdb_model_relations.relation_name 保持一致
+DESC_CLUSTER_BELONG = "集群归属"
+DESC_NS_BELONG = "命名空间归属"
+DESC_OWNER_WORKLOAD = "属主负载"
+DESC_SCHEDULED_ON = "调度于"
+DESC_SELECTOR_MATCH = "selector 匹配"
+DESC_USES_STORAGE = "使用存储"
+DESC_PVC_BOUND = "绑定"
+
+# Pod 属主中可直接映射为 k8s_workload 的 Kind
+_WORKLOAD_KINDS = {"Deployment", "StatefulSet", "DaemonSet"}
 
 
 async def rebuild_k8s_relationships(
     session: AsyncSession,
     resource: CmdbResource,
     message: K8sResourceMessage,
+    model_ids: dict[str, int],
 ) -> None:
-    """重建 K8s 资源的关系链。
+    """重建单个 K8s 资源的关系边（Upsert 后调用）。"""
+    model_code_by_id = {model_id: code for code, model_id in model_ids.items()}
+    model_code = model_code_by_id.get(resource.model_id)
+    if model_code is None:
+        return
 
-    策略：先删旧关系，再根据消息数据重建。
-    """
     rel_repo = CmdbRelationshipRepo(session)
+    res_repo = CmdbResourceRepo(session)
+    cluster_id = message.cluster_id
+    namespace = message.resource.namespace
+    payload = message.resource
 
-    kind = message.kind
-    data = message.data
-    cluster = message.cluster
-    namespace = message.namespace
+    # 先清空该资源的从属边，再按约束重建（整包替换）
+    await rel_repo.delete_belongs_to_by_child(resource.id)
 
-    if kind == "Pod":
-        await _rebuild_pod_relationships(session, rel_repo, resource, data, cluster, namespace)
+    if model_code == "k8s_namespace":
+        cluster = await _find_cluster(res_repo, model_ids, cluster_id)
+        if cluster:
+            await _add_belongs_to(rel_repo, resource.id, cluster.id, DESC_CLUSTER_BELONG)
 
-    elif kind in ("Deployment", "StatefulSet", "DaemonSet"):
-        await _rebuild_workload_relationships(session, rel_repo, resource, cluster, namespace)
+    elif model_code == "k8s_node":
+        cluster = await _find_cluster(res_repo, model_ids, cluster_id)
+        if cluster:
+            await _add_belongs_to(rel_repo, resource.id, cluster.id, DESC_CLUSTER_BELONG)
 
-    elif kind == "ReplicaSet":
-        await _rebuild_replicaset_relationships(session, rel_repo, resource, data, cluster, namespace)
+    elif model_code == "k8s_pv":
+        cluster = await _find_cluster(res_repo, model_ids, cluster_id)
+        if cluster:
+            await _add_belongs_to(rel_repo, resource.id, cluster.id, DESC_CLUSTER_BELONG)
 
-    elif kind == "Service":
-        await _rebuild_service_relationships(session, rel_repo, resource, data, cluster, namespace)
+    elif model_code in ("k8s_workload", "k8s_service", "k8s_pvc"):
+        ns = await _find_namespace(res_repo, model_ids, cluster_id, namespace)
+        if ns:
+            await _add_belongs_to(rel_repo, resource.id, ns.id, DESC_NS_BELONG)
 
-    elif kind == "Node":
-        await _rebuild_node_relationships(session, rel_repo, resource, cluster)
+    elif model_code == "k8s_pod":
+        await _rebuild_pod_edges(session, rel_repo, res_repo, resource, payload, cluster_id, namespace, model_ids)
 
-    elif kind == "Namespace":
-        await _rebuild_namespace_relationships(session, rel_repo, resource, cluster)
+    # 关联边按语义槽位替换重建
+    if model_code == "k8s_service":
+        await _rebuild_service_pod_edges(session, rel_repo, resource, cluster_id, namespace, model_ids)
+    elif model_code == "k8s_pod":
+        await _rebuild_pod_pvc_edges(session, rel_repo, res_repo, resource, cluster_id, namespace, model_ids)
+        await _rebuild_pod_inbound_service_edges(session, rel_repo, resource, payload, cluster_id, namespace, model_ids)
+    elif model_code == "k8s_pvc":
+        await _rebuild_pvc_pv_edges(session, rel_repo, res_repo, resource, cluster_id, model_ids)
 
-    else:
-        # 其他类型资源：仅建立到 namespace 的从属
-        if namespace:
-            await _ensure_belongs_to_by_type(
-                session, rel_repo, resource, "k8s_namespace", cluster, namespace,
-            )
 
-
-async def rebuild_cloud_relationships(
-    session: AsyncSession,
-    resource: CmdbResource,
-    message: CloudResourceMessage,
-) -> None:
-    """重建云资源的关系链。
-
-    策略：根据消息中的 parent_provider_id 和 parent_resource_type 建立从属关系。
-    """
+async def remove_resource_edges(session: AsyncSession, resource_id: int) -> None:
+    """软删除资源时清理其全部关系边。"""
     rel_repo = CmdbRelationshipRepo(session)
-
-    # 从属关系：通过 parent 提示建立
-    if message.parent_provider_id and message.parent_resource_type:
-        parent = await _find_resource_by_provider_id(
-            session, message.provider, message.parent_resource_type,
-            message.parent_provider_id, message.cloud_account,
-        )
-        if parent:
-            await _upsert_belongs_to(rel_repo, resource.id, parent.id, "cloud_hierarchy")
-
-    # Host → VPC 关联（通过 attributes 中的 vpc_id）
-    if resource.resource_type == "host":
-        vpc_id = resource.attributes.get("vpc_id")
-        if vpc_id:
-            vpc = await _find_resource_by_provider_id(
-                session, resource.provider, "vpc", vpc_id, resource.cloud_account,
-            )
-            if vpc:
-                await _upsert_belongs_to(rel_repo, resource.id, vpc.id, "host_in_vpc")
-
-        subnet_id = resource.attributes.get("subnet_id") or resource.attributes.get("vswitch_id")
-        if subnet_id:
-            subnet = await _find_resource_by_provider_id(
-                session, resource.provider, "subnet", subnet_id, resource.cloud_account,
-            )
-            if subnet:
-                await _upsert_belongs_to(rel_repo, resource.id, subnet.id, "host_in_subnet")
-
-    # Database → VPC 关联
-    if resource.resource_type == "database":
-        vpc_id = resource.attributes.get("vpc_id")
-        if vpc_id:
-            vpc = await _find_resource_by_provider_id(
-                session, resource.provider, "vpc", vpc_id, resource.cloud_account,
-            )
-            if vpc:
-                await _upsert_belongs_to(rel_repo, resource.id, vpc.id, "db_in_vpc")
+    removed = await rel_repo.delete_relations_of(resource_id)
+    if removed:
+        logger.debug("Resource edges removed on delete", extra={"resource_id": resource_id, "count": removed})
 
 
-# ── K8s 关系重建细节 ──────────────────────────────────────────────────────────
+# ── Pod 从属边 ─────────────────────────────────────────────────────────────────
 
 
-async def _rebuild_pod_relationships(
+async def _rebuild_pod_edges(
     session: AsyncSession,
     rel_repo: CmdbRelationshipRepo,
-    resource: CmdbResource,
-    data: dict,
-    cluster: str,
+    res_repo: CmdbResourceRepo,
+    pod: CmdbResource,
+    payload: K8sResourceData,
+    cluster_id: str,
     namespace: str,
+    model_ids: dict[str, int],
 ) -> None:
-    """Pod: Pod → ReplicaSet → Namespace。"""
-    # Pod → Namespace
-    await _ensure_belongs_to_by_type(
-        session, rel_repo, resource, "k8s_namespace", cluster, namespace,
-    )
+    """Pod: #22 属主负载 + #23 调度于，无属主时 #24 命名空间兜底。"""
+    obj = payload.raw or {}
+    owner_refs = (obj.get("metadata") or {}).get("ownerReferences") or []
 
-    # Pod → ReplicaSet（通过 ownerReferences）
-    owner_refs = data.get("metadata", {}).get("ownerReferences", [])
-    for ref in owner_refs:
-        if ref.get("kind") == "ReplicaSet":
-            owner_name = ref.get("name", "")
-            await _ensure_belongs_to_by_name(
-                session, rel_repo, resource, "k8s_replicaset", cluster, namespace, owner_name,
-            )
+    has_workload_edge = False
+    if owner_refs:
+        owner = owner_refs[0]
+        workload = await _resolve_owner_workload(res_repo, owner, cluster_id, namespace, model_ids)
+        if workload:
+            await _add_belongs_to(rel_repo, pod.id, workload.id, DESC_OWNER_WORKLOAD)
+            has_workload_edge = True
+
+    node_name = ((obj.get("spec") or {}).get("nodeName"))
+    if node_name:
+        node = await res_repo.find_by_name(model_ids.get("k8s_node", 0), cluster_id, node_name)
+        if node:
+            await _add_belongs_to(rel_repo, pod.id, node.id, DESC_SCHEDULED_ON)
+
+    if not has_workload_edge and namespace:
+        ns = await _find_namespace(res_repo, model_ids, cluster_id, namespace)
+        if ns:
+            await _add_belongs_to(rel_repo, pod.id, ns.id, DESC_NS_BELONG)
 
 
-async def _rebuild_workload_relationships(
-    session: AsyncSession,
-    rel_repo: CmdbRelationshipRepo,
-    resource: CmdbResource,
-    cluster: str,
+async def _resolve_owner_workload(
+    res_repo: CmdbResourceRepo,
+    owner: dict,
+    cluster_id: str,
     namespace: str,
-) -> None:
-    """Deployment/StatefulSet/DaemonSet → Namespace。"""
-    await _ensure_belongs_to_by_type(
-        session, rel_repo, resource, "k8s_namespace", cluster, namespace,
-    )
+    model_ids: dict[str, int],
+) -> CmdbResource | None:
+    """把 Pod 的 ownerReference 解析为 k8s_workload 资源。
+
+    Deployment/StatefulSet/DaemonSet 直接按名定位；
+    ReplicaSet 无独立模型，剥离尾部 -<hash> 段回溯到 Deployment。
+    """
+    workload_model_id = model_ids.get("k8s_workload")
+    if not workload_model_id:
+        return None
+
+    kind = owner.get("kind")
+    name = owner.get("name") or ""
+    if kind in _WORKLOAD_KINDS:
+        return await res_repo.find_by_name(workload_model_id, cluster_id, name, namespace)
+    if kind == "ReplicaSet" and "-" in name:
+        deployment_name = name.rsplit("-", 1)[0]
+        return await res_repo.find_by_name(workload_model_id, cluster_id, deployment_name, namespace)
+    return None
 
 
-async def _rebuild_replicaset_relationships(
-    session: AsyncSession,
-    rel_repo: CmdbRelationshipRepo,
-    resource: CmdbResource,
-    data: dict,
-    cluster: str,
-    namespace: str,
-) -> None:
-    """ReplicaSet → Deployment → Namespace。"""
-    await _ensure_belongs_to_by_type(
-        session, rel_repo, resource, "k8s_namespace", cluster, namespace,
-    )
-
-    owner_refs = data.get("metadata", {}).get("ownerReferences", [])
-    for ref in owner_refs:
-        if ref.get("kind") == "Deployment":
-            owner_name = ref.get("name", "")
-            await _ensure_belongs_to_by_name(
-                session, rel_repo, resource, "k8s_deployment", cluster, namespace, owner_name,
-            )
+# ── Service ↔ Pod 关联边 ───────────────────────────────────────────────────────
 
 
-async def _rebuild_service_relationships(
-    session: AsyncSession,
-    rel_repo: CmdbRelationshipRepo,
-    resource: CmdbResource,
-    data: dict,
-    cluster: str,
-    namespace: str,
-) -> None:
-    """Service → Namespace（从属）+ Service → Pod（关联，通过 selector）。"""
-    await _ensure_belongs_to_by_type(
-        session, rel_repo, resource, "k8s_namespace", cluster, namespace,
-    )
-
-    # Service → Pod（通过 selector 匹配）
-    selector = data.get("spec", {}).get("selector", {})
-    if selector:
-        await _rebuild_service_pod_relations(session, rel_repo, resource, cluster, namespace, selector)
-
-
-async def _rebuild_node_relationships(
-    session: AsyncSession,
-    rel_repo: CmdbRelationshipRepo,
-    resource: CmdbResource,
-    cluster: str,
-) -> None:
-    """Node → Cluster（从属）。"""
-    cluster_resource = await _find_resource_by_provider_id(
-        session, "k8s", "k8s_cluster", cluster, cluster,
-    )
-    if cluster_resource:
-        await _upsert_belongs_to(rel_repo, resource.id, cluster_resource.id, "node_in_cluster")
-
-
-async def _rebuild_namespace_relationships(
-    session: AsyncSession,
-    rel_repo: CmdbRelationshipRepo,
-    resource: CmdbResource,
-    cluster: str,
-) -> None:
-    """Namespace → Cluster（从属）。"""
-    cluster_resource = await _find_resource_by_provider_id(
-        session, "k8s", "k8s_cluster", cluster, cluster,
-    )
-    if cluster_resource:
-        await _upsert_belongs_to(rel_repo, resource.id, cluster_resource.id, "namespace_in_cluster")
-
-
-# ── Service → Pod selector 匹配 ─────────────────────────────────────────────────
-
-
-async def _rebuild_service_pod_relations(
+async def _rebuild_service_pod_edges(
     session: AsyncSession,
     rel_repo: CmdbRelationshipRepo,
     service: CmdbResource,
-    cluster: str,
+    cluster_id: str,
     namespace: str,
-    selector: dict[str, str],
+    model_ids: dict[str, int],
 ) -> None:
-    """根据 Service selector 匹配 Pod，建立关联关系。"""
-    # 查询同 namespace 下所有 Pod
+    """Service 变更时：按 selector 重建 Service → Pod 边。"""
+    selector = service.fields.get("selector") or {}
+    await rel_repo.delete_relates_to_by_source(service.id)
+    if not selector or not namespace:
+        return
+
+    pod_labels = await _load_namespace_pod_labels(session, cluster_id, namespace, model_ids)
+    now = datetime.now(timezone.utc)
+    for pod_id, labels in pod_labels.items():
+        if labels and all(labels.get(k) == v for k, v in selector.items()):
+            await rel_repo.create_relates_to(CmdbRelatesTo(
+                source_id=service.id,
+                target_id=pod_id,
+                description=DESC_SELECTOR_MATCH,
+                synced_at=now,
+                source="discovery",
+            ))
+
+
+async def _rebuild_pod_inbound_service_edges(
+    session: AsyncSession,
+    rel_repo: CmdbRelationshipRepo,
+    pod: CmdbResource,
+    payload: K8sResourceData,
+    cluster_id: str,
+    namespace: str,
+    model_ids: dict[str, int],
+) -> None:
+    """Pod 变更时：刷新指向该 Pod 的 Service 边（入边重建）。"""
+    if not namespace:
+        return
+
+    # 清理指向该 Pod 的 selector 匹配边
+    for rel in await rel_repo.get_relations_to(pod.id, DESC_SELECTOR_MATCH):
+        await rel_repo.delete_relates_to(rel.id)
+
+    labels = payload.labels or {}
+    if not labels:
+        return
+
+    service_model_id = model_ids.get("k8s_service")
+    if not service_model_id:
+        return
+    services = await _list_model_resources(session, service_model_id, cluster_id, namespace)
+    now = datetime.now(timezone.utc)
+    for service in services:
+        selector = service.fields.get("selector") or {}
+        if selector and all(labels.get(k) == v for k, v in selector.items()):
+            await rel_repo.create_relates_to(CmdbRelatesTo(
+                source_id=service.id,
+                target_id=pod.id,
+                description=DESC_SELECTOR_MATCH,
+                synced_at=now,
+                source="discovery",
+            ))
+
+
+async def _load_namespace_pod_labels(
+    session: AsyncSession,
+    cluster_id: str,
+    namespace: str,
+    model_ids: dict[str, int],
+) -> dict[int, dict[str, str]]:
+    """加载某 namespace 下所有 Pod 的 labels（来自云标签通道，tag_key 带 k8s: 前缀）。"""
+    pod_model_id = model_ids.get("k8s_pod")
+    if not pod_model_id:
+        return {}
+    pods = await _list_model_resources(session, pod_model_id, cluster_id, namespace)
+    if not pods:
+        return {}
+
+    tag_repo = CmdbTagRepo(session)
+    tags = await tag_repo.list_cloud_tags_by_resources([pod.id for pod in pods])
+    labels_by_pod: dict[int, dict[str, str]] = {pod.id: {} for pod in pods}
+    for tag in tags:
+        if tag.tag_key.startswith("k8s:") and tag.raw_key:
+            labels_by_pod.setdefault(tag.resource_id, {})[tag.raw_key] = tag.tag_value
+    return labels_by_pod
+
+
+# ── Pod → PVC / PVC → PV 关联边 ────────────────────────────────────────────────
+
+
+async def _rebuild_pod_pvc_edges(
+    session: AsyncSession,
+    rel_repo: CmdbRelationshipRepo,
+    res_repo: CmdbResourceRepo,
+    pod: CmdbResource,
+    cluster_id: str,
+    namespace: str,
+    model_ids: dict[str, int],
+) -> None:
+    """Pod: 从 spec.volumes 提取 persistentVolumeClaim 引用（#43 使用存储）。
+
+    PVC 名称清单由提取器写入 fields['_pvc_names']（下划线前缀 = 内部元数据，
+    前端列表不渲染），此处只负责按名定位并建边。
+    """
+    await rel_repo.delete_relates_to_by_source(pod.id)
+    pvc_names = pod.fields.get("_pvc_names") or []
+    now = datetime.now(timezone.utc)
+    pvc_model_id = model_ids.get("k8s_pvc")
+    for pvc_name in pvc_names:
+        if not pvc_model_id:
+            break
+        pvc = await res_repo.find_by_name(pvc_model_id, cluster_id, pvc_name, namespace)
+        if pvc:
+            await rel_repo.create_relates_to(CmdbRelatesTo(
+                source_id=pod.id,
+                target_id=pvc.id,
+                description=DESC_USES_STORAGE,
+                synced_at=now,
+                source="discovery",
+            ))
+
+
+async def _rebuild_pvc_pv_edges(
+    session: AsyncSession,
+    rel_repo: CmdbRelationshipRepo,
+    res_repo: CmdbResourceRepo,
+    pvc: CmdbResource,
+    cluster_id: str,
+    model_ids: dict[str, int],
+) -> None:
+    """PVC: volume_name 匹配 PV（#53 绑定）。"""
+    await rel_repo.delete_relates_to_by_source(pvc.id)
+    volume_name = pvc.fields.get("volume_name")
+    pv_model_id = model_ids.get("k8s_pv")
+    if not volume_name or not pv_model_id:
+        return
+    pv = await res_repo.find_by_name(pv_model_id, cluster_id, volume_name)
+    if pv:
+        await rel_repo.create_relates_to(CmdbRelatesTo(
+            source_id=pvc.id,
+            target_id=pv.id,
+            description=DESC_PVC_BOUND,
+            synced_at=datetime.now(timezone.utc),
+            source="discovery",
+        ))
+
+
+# ── 工具函数 ───────────────────────────────────────────────────────────────────
+
+
+async def _find_cluster(
+    res_repo: CmdbResourceRepo, model_ids: dict[str, int], cluster_id: str,
+) -> CmdbResource | None:
+    cluster_model_id = model_ids.get("k8s_cluster")
+    if not cluster_model_id:
+        return None
+    return await res_repo.get_by_provider_id(cluster_model_id, "k8s", cluster_id, cluster_id)
+
+
+async def _find_namespace(
+    res_repo: CmdbResourceRepo, model_ids: dict[str, int], cluster_id: str, namespace: str,
+) -> CmdbResource | None:
+    if not namespace:
+        return None
+    ns_model_id = model_ids.get("k8s_namespace")
+    if not ns_model_id:
+        return None
+    return await res_repo.get_by_provider_id(
+        ns_model_id, "k8s", f"{cluster_id}/{namespace}", cluster_id,
+    )
+
+
+async def _list_model_resources(
+    session: AsyncSession, model_id: int, cluster_id: str, namespace: str,
+) -> list[CmdbResource]:
+    """列出某模型在指定集群 + namespace 下的资源（fields.namespace 匹配）。"""
     result = await session.execute(
         select(CmdbResource).where(
-            CmdbResource.provider == "k8s",
-            CmdbResource.resource_type == "k8s_pod",
-            CmdbResource.cloud_account == cluster,
+            CmdbResource.model_id == model_id,
+            CmdbResource.cloud_account == cluster_id,
+            CmdbResource.fields["namespace"].astext == namespace,
             CmdbResource.deleted_at.is_(None),
         )
     )
-    pods = list(result.scalars().all())
-
-    # 匹配 selector
-    for pod in pods:
-        pod_labels = pod.attributes.get("metadata", {}).get("labels", {})
-        if all(pod_labels.get(k) == v for k, v in selector.items()):
-            await _upsert_relates_to(rel_repo, service.id, pod.id, "service_selects_pod")
+    return list(result.scalars().all())
 
 
-# ── 工具函数 ─────────────────────────────────────────────────────────────────────
-
-
-async def _find_resource_by_provider_id(
-    session: AsyncSession,
-    provider: str,
-    resource_type: str,
-    provider_id: str,
-    cloud_account: str,
-) -> CmdbResource | None:
-    """通过 provider_id 查找资源。"""
-    repo = CmdbResourceRepo(session)
-    return await repo.get_by_provider_id(provider, resource_type, provider_id, cloud_account)
-
-
-async def _ensure_belongs_to_by_type(
-    session: AsyncSession,
-    rel_repo: CmdbRelationshipRepo,
-    child: CmdbResource,
-    parent_type: str,
-    cluster: str,
-    namespace: str,
+async def _add_belongs_to(
+    rel_repo: CmdbRelationshipRepo, child_id: int, parent_id: int, description: str,
 ) -> None:
-    """通过资源类型+namespace 查找父资源并建立从属关系。"""
-    parent_provider_id = f"{cluster}/{namespace}" if namespace else cluster
-    parent = await _find_resource_by_provider_id(
-        session, "k8s", parent_type, parent_provider_id, cluster,
-    )
-    if parent:
-        relation_type = f"{child.resource_type}_in_{parent_type}"
-        await _upsert_belongs_to(rel_repo, child.id, parent.id, relation_type)
-
-
-async def _ensure_belongs_to_by_name(
-    session: AsyncSession,
-    rel_repo: CmdbRelationshipRepo,
-    child: CmdbResource,
-    parent_type: str,
-    cluster: str,
-    namespace: str,
-    name: str,
-) -> None:
-    """通过资源名查找父资源并建立从属关系。"""
-    parent_provider_id = f"{cluster}/{namespace}/{name}" if namespace else f"{cluster}/{name}"
-    parent = await _find_resource_by_provider_id(
-        session, "k8s", parent_type, parent_provider_id, cluster,
-    )
-    if parent:
-        relation_type = f"{child.resource_type}_in_{parent_type}"
-        await _upsert_belongs_to(rel_repo, child.id, parent.id, relation_type)
-
-
-async def _upsert_belongs_to(
-    rel_repo: CmdbRelationshipRepo,
-    child_id: int,
-    parent_id: int,
-    relation_type: str,
-) -> None:
-    """幂等创建从属关系（已存在则跳过）。"""
-    existing = await rel_repo.get_children(parent_id, relation_type)
-    for rel in existing:
-        if rel.child_id == child_id:
-            return  # 已存在
-
-    relation = CmdbBelongsTo(
+    """创建一条从属边。"""
+    await rel_repo.create_belongs_to(CmdbBelongsTo(
         child_id=child_id,
         parent_id=parent_id,
-        relation_type=relation_type,
+        description=description,
         synced_at=datetime.now(timezone.utc),
         source="discovery",
-    )
-    await rel_repo.create_belongs_to(relation)
-
-
-async def _upsert_relates_to(
-    rel_repo: CmdbRelationshipRepo,
-    source_id: int,
-    target_id: int,
-    relation_type: str,
-) -> None:
-    """幂等创建关联关系（已存在则跳过）。"""
-    existing = await rel_repo.get_relations_from(source_id, relation_type)
-    for rel in existing:
-        if rel.target_id == target_id:
-            return  # 已存在
-
-    relation = CmdbRelatesTo(
-        source_id=source_id,
-        target_id=target_id,
-        relation_type=relation_type,
-        synced_at=datetime.now(timezone.utc),
-        source="discovery",
-    )
-    await rel_repo.create_relates_to(relation)
+    ))

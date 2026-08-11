@@ -1,4 +1,7 @@
-"""CMDB 关系数据访问层（从属关系 + 关联关系）。"""
+"""CMDB 关系数据访问层（从属关系 + 关联关系）。
+
+v2 表结构：关系语义通过 description 表达，无 relation_type 列。
+"""
 
 from __future__ import annotations
 
@@ -41,19 +44,19 @@ class CmdbRelationshipRepo:
         )
         return result.scalar_one_or_none()
 
-    async def get_children(self, parent_id: int, relation_type: str | None = None) -> list[CmdbBelongsTo]:
+    async def get_children(self, parent_id: int, description: str | None = None) -> list[CmdbBelongsTo]:
         """查询某资源的所有子资源关系。"""
         query = select(CmdbBelongsTo).where(CmdbBelongsTo.parent_id == parent_id)
-        if relation_type:
-            query = query.where(CmdbBelongsTo.relation_type == relation_type)
+        if description:
+            query = query.where(CmdbBelongsTo.description == description)
         result = await self._session.execute(query)
         return list(result.scalars().all())
 
-    async def get_parents(self, child_id: int, relation_type: str | None = None) -> list[CmdbBelongsTo]:
+    async def get_parents(self, child_id: int, description: str | None = None) -> list[CmdbBelongsTo]:
         """查询某资源的所有父资源关系。"""
         query = select(CmdbBelongsTo).where(CmdbBelongsTo.child_id == child_id)
-        if relation_type:
-            query = query.where(CmdbBelongsTo.relation_type == relation_type)
+        if description:
+            query = query.where(CmdbBelongsTo.description == description)
         result = await self._session.execute(query)
         return list(result.scalars().all())
 
@@ -84,18 +87,64 @@ class CmdbRelationshipRepo:
         )
         return result.scalar_one_or_none()
 
-    async def get_relations_from(self, source_id: int, relation_type: str | None = None) -> list[CmdbRelatesTo]:
+    async def get_relations_from(self, source_id: int, description: str | None = None) -> list[CmdbRelatesTo]:
         """查询从某资源出发的所有关联关系。"""
         query = select(CmdbRelatesTo).where(CmdbRelatesTo.source_id == source_id)
-        if relation_type:
-            query = query.where(CmdbRelatesTo.relation_type == relation_type)
+        if description:
+            query = query.where(CmdbRelatesTo.description == description)
         result = await self._session.execute(query)
         return list(result.scalars().all())
 
-    async def get_relations_to(self, target_id: int, relation_type: str | None = None) -> list[CmdbRelatesTo]:
+    async def get_relations_to(self, target_id: int, description: str | None = None) -> list[CmdbRelatesTo]:
         """查询指向某资源的所有关联关系。"""
         query = select(CmdbRelatesTo).where(CmdbRelatesTo.target_id == target_id)
-        if relation_type:
-            query = query.where(CmdbRelatesTo.relation_type == relation_type)
+        if description:
+            query = query.where(CmdbRelatesTo.description == description)
         result = await self._session.execute(query)
         return list(result.scalars().all())
+
+    # ── 批量操作（消费端关系重建用） ──────────────────────────────────────
+
+    async def delete_belongs_to_by_child(self, child_id: int) -> int:
+        """删除某资源作为子节点的全部从属关系，返回删除条数。"""
+        result = await self._session.execute(
+            select(CmdbBelongsTo).where(CmdbBelongsTo.child_id == child_id)
+        )
+        relations = list(result.scalars().all())
+        for relation in relations:
+            await self._session.delete(relation)
+        if relations:
+            await self._session.flush()
+        return len(relations)
+
+    async def delete_relates_to_by_source(self, source_id: int) -> int:
+        """删除某资源作为源节点的全部关联关系，返回删除条数。"""
+        result = await self._session.execute(
+            select(CmdbRelatesTo).where(CmdbRelatesTo.source_id == source_id)
+        )
+        relations = list(result.scalars().all())
+        for relation in relations:
+            await self._session.delete(relation)
+        if relations:
+            await self._session.flush()
+        return len(relations)
+
+    async def delete_relations_of(self, resource_id: int) -> int:
+        """删除资源相关的全部边（两个方向、两种表），软删除时清理用。"""
+        total = await self.delete_belongs_to_by_child(resource_id)
+        result = await self._session.execute(
+            select(CmdbBelongsTo).where(CmdbBelongsTo.parent_id == resource_id)
+        )
+        for relation in result.scalars().all():
+            await self._session.delete(relation)
+            total += 1
+        total += await self.delete_relates_to_by_source(resource_id)
+        result = await self._session.execute(
+            select(CmdbRelatesTo).where(CmdbRelatesTo.target_id == resource_id)
+        )
+        for relation in result.scalars().all():
+            await self._session.delete(relation)
+            total += 1
+        if total:
+            await self._session.flush()
+        return total
