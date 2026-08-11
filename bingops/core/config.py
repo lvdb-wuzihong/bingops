@@ -18,6 +18,10 @@ class Settings(BaseSettings):
     debug: bool = False
     log_level: str = "INFO"
 
+    # 日志文件输出：空字符串=不落盘（仅 stdout）；配置后按天轮转+gzip 压缩
+    log_dir: str = ""
+    log_retention_days: int = 7
+
     # 数据库
     database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/bingops"
 
