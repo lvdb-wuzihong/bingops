@@ -121,7 +121,10 @@ async def _handle_upsert(
         f"{cluster_id}/{payload.namespace}/{payload.name}"
         if payload.namespace else f"{cluster_id}/{payload.name}"
     )
-    existing = await repo.get_by_provider_id(model_id, "k8s", provider_id, cluster_id)
+    # include_deleted=True：命中软删记录时走复活路径（同名重建不撞唯一约束）
+    existing = await repo.get_by_provider_id(
+        model_id, "k8s", provider_id, cluster_id, include_deleted=True
+    )
 
     # 幂等校验：incoming version <= current version → 跳过
     if existing and existing.resource_version and payload.resource_version:
@@ -131,8 +134,13 @@ async def _handle_upsert(
 
     now = datetime.now(timezone.utc)
     if existing:
-        # 无实质变更直接跳过（快照重放去噪：不写库、不记审计）
-        if existing.fields == fields and existing.status == status and existing.name == payload.name:
+        # 无实质变更直接跳过（快照重放去噪：不写库、不记审计；软删记录除外，需复活）
+        if (
+            existing.deleted_at is None
+            and existing.fields == fields
+            and existing.status == status
+            and existing.name == payload.name
+        ):
             logger.debug("K8s event skipped (no effective change)", extra={"provider_id": provider_id})
             return
 
@@ -188,6 +196,15 @@ async def _handle_delete(
     existing = await repo.get_by_provider_id(model_id, "k8s", provider_id, cluster_id)
     if existing is None:
         logger.debug("K8s resource not found for delete, skipping", extra={"provider_id": provider_id})
+        return
+
+    # 版本守卫：库内版本更新（如资源已同名重建）时丢弃迟到的旧 delete
+    if (
+        existing.resource_version
+        and payload.resource_version
+        and not _version_lte(existing.resource_version, payload.resource_version)
+    ):
+        logger.debug("K8s delete skipped (stale version)", extra={"provider_id": provider_id})
         return
 
     await repo.soft_delete(existing)

@@ -31,17 +31,23 @@ class CmdbResourceRepo:
         provider: str,
         provider_id: str,
         cloud_account: str,
+        include_deleted: bool = False,
     ) -> CmdbResource | None:
-        """根据云厂商 ID 查询资源（用于去重/幂等）。"""
-        result = await self._session.execute(
-            select(CmdbResource).where(
-                CmdbResource.model_id == model_id,
-                CmdbResource.provider == provider,
-                CmdbResource.provider_id == provider_id,
-                CmdbResource.cloud_account == cloud_account,
-                CmdbResource.deleted_at.is_(None),
-            )
+        """根据云厂商 ID 查询资源（用于去重/幂等）。
+
+        Args:
+            include_deleted: 是否包含软删除记录（upsert 复活路径需要，
+                否则同名重建会撞 provider_id 唯一约束）。
+        """
+        stmt = select(CmdbResource).where(
+            CmdbResource.model_id == model_id,
+            CmdbResource.provider == provider,
+            CmdbResource.provider_id == provider_id,
+            CmdbResource.cloud_account == cloud_account,
         )
+        if not include_deleted:
+            stmt = stmt.where(CmdbResource.deleted_at.is_(None))
+        result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 
     async def list_resources(
