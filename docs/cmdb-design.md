@@ -618,6 +618,8 @@ K8s API Server → Informer Watch → Kafka Producer → k8s-events-{cluster_id}
 
 ### 9.2 云资源同步（定时拉取）
 
+> 实现设计以 `docs/cloud-sync-design.md` 为准（独立项目 cloud-syncer）；本节仅为机制概览，下方映射表为早期草稿，模型 code 以 `cmdb-model-presets.md` 为准。
+
 ```
 定时调度器 → 阿里云/AWS/GCP SDK → 全量资源列表 → 差异对比
                                                         ↓
