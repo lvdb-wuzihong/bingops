@@ -32,21 +32,36 @@ class KafkaClient:
         self._running = False
         self._tasks: list[asyncio.Task] = []
 
-    async def start_consumer(self, topics: list[str]) -> None:
-        """启动 Kafka Consumer。"""
+    async def start_consumer(
+        self, topics: list[str] | None = None, pattern: str | None = None,
+    ) -> None:
+        """启动 Kafka Consumer。
+
+        两种订阅方式（二选一）：
+        - topics：字面 topic 列表，启动时对每个 topic 请求 metadata；
+        - pattern：正则订阅，coordinator 按集群 metadata 动态匹配实际 topic，
+          新 topic 自动发现，无需重启。注意正则不能走 *topics 传入，
+          否则会被当字面 topic 名请求 metadata 导致 UnknownTopicOrPartitionError。
+        """
+        if bool(topics) == bool(pattern):
+            raise ValueError("Provide exactly one of `topics` or `pattern`")
+
         self._consumer = AIOKafkaConsumer(
-            *topics,
+            *(topics or []),
             bootstrap_servers=settings.kafka_bootstrap_servers,
             group_id=settings.kafka_consumer_group,
             auto_offset_reset="earliest",
             enable_auto_commit=True,
             value_deserializer=lambda m: json.loads(m.decode("utf-8")),
         )
+        if pattern:
+            self._consumer.subscribe(pattern=pattern)
+
         await self._consumer.start()
         self._running = True
         logger.info(
             "Kafka consumer started",
-            extra={"topics": topics, "group": settings.kafka_consumer_group},
+            extra={"topics": topics, "pattern": pattern, "group": settings.kafka_consumer_group},
         )
 
     async def start_producer(self) -> None:

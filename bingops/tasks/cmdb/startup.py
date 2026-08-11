@@ -50,18 +50,13 @@ async def start_cmdb_kafka_consumer(session_factory: async_sessionmaker[AsyncSes
     )
 
     # 订阅 Topic：固定正则订阅，是否处理由 cmdb_sync_tasks 数据表驱动
-    topics = _resolve_topics()
+    pattern = _resolve_pattern()
 
-    if not topics:
-        logger.warning("No Kafka topics configured, skipping consumer startup")
-        _kafka_client = client
-        return client
-
-    await client.start_consumer(topics)
+    await client.start_consumer(pattern=pattern)
     client.start_background()
 
     _kafka_client = client
-    logger.info("CMDB Kafka consumer started", extra={"topics": topics})
+    logger.info("CMDB Kafka consumer started", extra={"pattern": pattern})
     return client
 
 
@@ -74,14 +69,14 @@ async def stop_cmdb_kafka_consumer() -> None:
         logger.info("CMDB Kafka consumer stopped")
 
 
-def _resolve_topics() -> list[str]:
-    """解析需要订阅的 Kafka Topics。
+def _resolve_pattern() -> str:
+    """生成订阅正则：^(k8s-events-.*|cloud-sync-.*)。
 
-    固定正则订阅 ^(k8s-events-.*|cloud-sync-.*)：aiokafka 周期性刷新 metadata
-    自动发现新 topic，新接入集群/云厂商无需改配置、无需重启。
+    aiokafka pattern 订阅由 coordinator 按集群 metadata 动态匹配实际 topic，
+    新接入集群/云厂商无需改配置、无需重启。
     订阅层不做任何业务过滤，同步与否完全由 cmdb_sync_tasks 数据表驱动
     （未配置任务或任务禁用 → 消息直接跳过）。
     """
     k8s_prefix = settings.kafka_k8s_topic_pattern.split("{")[0]
     cloud_prefix = settings.kafka_cloud_topic_pattern.split("{")[0]
-    return [f"^({k8s_prefix}.*|{cloud_prefix}.*)"]
+    return f"^({k8s_prefix}.*|{cloud_prefix}.*)"
