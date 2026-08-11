@@ -25,7 +25,9 @@ class ChangeLogResponse(BaseModel):
 
     id: int
     resource_id: int
-    resource_type: str
+    model_id: int | None = None
+    model_code: str | None = None
+    resource_type: str = Field(description="模型名称（v2 由 model_id 解析，兼容 v1 契约字段名）")
     change_type: str
     field: str | None = None
     old_value: str | None = None
