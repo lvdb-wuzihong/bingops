@@ -1,0 +1,113 @@
+"""工单系统数据访问层。"""
+
+from __future__ import annotations
+
+from sqlalchemy import func, or_, select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
+
+from bingops.models.ticket import Ticket, TicketComment
+
+
+class TicketRepo:
+    """工单 Repository。"""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def get_by_id(self, ticket_id: int) -> Ticket | None:
+        result = await self._session.execute(
+            select(Ticket)
+            .options(selectinload(Ticket.creator), selectinload(Ticket.assignee))
+            .where(Ticket.id == ticket_id)
+        )
+        return result.scalar_one_or_none()
+
+    async def list_tickets(
+        self,
+        *,
+        status: str | None = None,
+        ticket_type: str | None = None,
+        priority: str | None = None,
+        creator_id: int | None = None,
+        assignee_id: int | None = None,
+        keyword: str | None = None,
+        page: int = 1,
+        page_size: int = 20,
+    ) -> tuple[list[Ticket], int]:
+        """分页查询工单列表。"""
+        query = select(Ticket).options(
+            selectinload(Ticket.creator), selectinload(Ticket.assignee),
+        )
+        count_query = select(Ticket.id)
+
+        if status:
+            query = query.where(Ticket.status == status)
+            count_query = count_query.where(Ticket.status == status)
+        if ticket_type:
+            query = query.where(Ticket.ticket_type == ticket_type)
+            count_query = count_query.where(Ticket.ticket_type == ticket_type)
+        if priority:
+            query = query.where(Ticket.priority == priority)
+            count_query = count_query.where(Ticket.priority == priority)
+        if creator_id is not None:
+            query = query.where(Ticket.creator_id == creator_id)
+            count_query = count_query.where(Ticket.creator_id == creator_id)
+        if assignee_id is not None:
+            query = query.where(Ticket.assignee_id == assignee_id)
+            count_query = count_query.where(Ticket.assignee_id == assignee_id)
+        if keyword:
+            like_pattern = f"%{keyword}%"
+            keyword_filter = or_(
+                Ticket.title.ilike(like_pattern),
+                Ticket.ticket_no.ilike(like_pattern),
+            )
+            query = query.where(keyword_filter)
+            count_query = count_query.where(keyword_filter)
+
+        total_result = await self._session.execute(
+            select(func.count()).select_from(count_query.subquery())
+        )
+        total = total_result.scalar() or 0
+
+        query = query.order_by(Ticket.created_at.desc())
+        query = query.offset((page - 1) * page_size).limit(page_size)
+        result = await self._session.execute(query)
+        tickets = list(result.scalars().all())
+
+        return tickets, total
+
+    async def create(self, ticket: Ticket) -> Ticket:
+        self._session.add(ticket)
+        await self._session.flush()
+        return ticket
+
+    async def update(self, ticket: Ticket) -> Ticket:
+        await self._session.flush()
+        return ticket
+
+    async def delete(self, ticket: Ticket) -> None:
+        await self._session.delete(ticket)
+        await self._session.flush()
+
+
+class TicketCommentRepo:
+    """工单流转/评论记录 Repository。"""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def list_by_ticket(self, ticket_id: int) -> list[TicketComment]:
+        """按工单查询流转记录（时间正序）。"""
+        result = await self._session.execute(
+            select(TicketComment)
+            .options(selectinload(TicketComment.user))
+            .where(TicketComment.ticket_id == ticket_id)
+            .order_by(TicketComment.created_at.asc(), TicketComment.id.asc())
+        )
+        return list(result.scalars().all())
+
+    async def create(self, comment: TicketComment) -> TicketComment:
+        self._session.add(comment)
+        await self._session.flush()
+        return comment

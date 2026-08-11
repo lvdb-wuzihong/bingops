@@ -1,0 +1,201 @@
+"""工单系统 API 路由。"""
+
+from __future__ import annotations
+
+from fastapi import APIRouter, Depends, Query
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from bingops.api.dependencies import get_db_session, require_permission
+from bingops.core.response import paginated_response, success_response
+from bingops.models.ticket import Ticket, TicketComment
+from bingops.models.user import User
+from bingops.schemas.ticket import (
+    TicketAssignRequest,
+    TicketCommentCreate,
+    TicketCommentResponse,
+    TicketCreate,
+    TicketDetailResponse,
+    TicketResponse,
+    TicketStatusRequest,
+    TicketUpdate,
+)
+from bingops.services import ticket_service
+
+router = APIRouter(prefix="/api/v1/tickets", tags=["tickets"])
+
+
+def _user_display_name(user: User | None) -> str | None:
+    """提取用户显示名（display_name 缺失时回退 username）。"""
+    if user is None:
+        return None
+    return user.display_name or user.username
+
+
+def _to_response(ticket: Ticket) -> dict:
+    """ORM 工单转响应字典。"""
+    return TicketResponse(
+        id=ticket.id,
+        ticket_no=ticket.ticket_no,
+        title=ticket.title,
+        description=ticket.description,
+        ticket_type=ticket.ticket_type,
+        status=ticket.status,
+        priority=ticket.priority,
+        creator_id=ticket.creator_id,
+        creator_name=_user_display_name(ticket.creator),
+        assignee_id=ticket.assignee_id,
+        assignee_name=_user_display_name(ticket.assignee),
+        related_resource_id=ticket.related_resource_id,
+        resolved_at=ticket.resolved_at,
+        closed_at=ticket.closed_at,
+        created_at=ticket.created_at,
+        updated_at=ticket.updated_at,
+    ).model_dump(mode="json")
+
+
+def _comment_to_response(comment: TicketComment) -> dict:
+    """ORM 流转记录转响应字典。"""
+    return TicketCommentResponse(
+        id=comment.id,
+        ticket_id=comment.ticket_id,
+        user_id=comment.user_id,
+        user_name=_user_display_name(comment.user),
+        action=comment.action,
+        content=comment.content,
+        from_value=comment.from_value,
+        to_value=comment.to_value,
+        created_at=comment.created_at,
+    ).model_dump(mode="json")
+
+
+@router.get("")
+async def list_tickets(
+    status: str | None = None,
+    ticket_type: str | None = None,
+    priority: str | None = None,
+    creator_id: int | None = None,
+    assignee_id: int | None = None,
+    keyword: str | None = None,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    session: AsyncSession = Depends(get_db_session),
+    _user: User = require_permission("ticket:list"),
+):
+    """查询工单列表（分页）。"""
+    tickets, total = await ticket_service.list_tickets(
+        session,
+        status=status,
+        ticket_type=ticket_type,
+        priority=priority,
+        creator_id=creator_id,
+        assignee_id=assignee_id,
+        keyword=keyword,
+        page=page,
+        page_size=page_size,
+    )
+    items = [_to_response(t) for t in tickets]
+    return paginated_response(items, total, page, page_size)
+
+
+@router.post("", status_code=201)
+async def create_ticket(
+    payload: TicketCreate,
+    session: AsyncSession = Depends(get_db_session),
+    current_user: User = require_permission("ticket:create"),
+):
+    """创建工单。"""
+    ticket = await ticket_service.create_ticket(session, payload, current_user)
+    return success_response(data=_to_response(ticket), message="Ticket created", http_status=201)
+
+
+@router.get("/{ticket_id}")
+async def get_ticket(
+    ticket_id: int,
+    session: AsyncSession = Depends(get_db_session),
+    _user: User = require_permission("ticket:list"),
+):
+    """获取工单详情（含流转记录）。"""
+    ticket = await ticket_service.get_ticket(session, ticket_id)
+    comments = await ticket_service.list_comments(session, ticket_id)
+    detail = TicketDetailResponse(
+        **_to_response(ticket),
+        comments=[_comment_to_response(c) for c in comments],
+    )
+    return success_response(data=detail.model_dump(mode="json"))
+
+
+@router.put("/{ticket_id}")
+async def update_ticket(
+    ticket_id: int,
+    payload: TicketUpdate,
+    session: AsyncSession = Depends(get_db_session),
+    current_user: User = require_permission("ticket:update"),
+):
+    """更新工单（仅 open 状态、创建人或管理员）。"""
+    ticket = await ticket_service.update_ticket(session, ticket_id, payload, current_user)
+    return success_response(data=_to_response(ticket))
+
+
+@router.delete("/{ticket_id}")
+async def delete_ticket(
+    ticket_id: int,
+    session: AsyncSession = Depends(get_db_session),
+    current_user: User = require_permission("ticket:delete"),
+):
+    """删除工单（仅 open 状态、创建人或管理员）。"""
+    await ticket_service.delete_ticket(session, ticket_id, current_user)
+    return success_response(message="Ticket deleted")
+
+
+@router.post("/{ticket_id}/assign")
+async def assign_ticket(
+    ticket_id: int,
+    payload: TicketAssignRequest,
+    session: AsyncSession = Depends(get_db_session),
+    current_user: User = require_permission("ticket:assign"),
+):
+    """指派/转派工单处理人。"""
+    ticket = await ticket_service.assign_ticket(
+        session, ticket_id, payload.assignee_id, current_user,
+    )
+    return success_response(data=_to_response(ticket), message="Ticket assigned")
+
+
+@router.post("/{ticket_id}/status")
+async def change_ticket_status(
+    ticket_id: int,
+    payload: TicketStatusRequest,
+    session: AsyncSession = Depends(get_db_session),
+    current_user: User = require_permission("ticket:update"),
+):
+    """推进工单状态（按流转矩阵校验）。"""
+    ticket = await ticket_service.change_ticket_status(
+        session, ticket_id, payload.status, current_user, comment=payload.comment,
+    )
+    return success_response(data=_to_response(ticket), message="Ticket status changed")
+
+
+@router.get("/{ticket_id}/comments")
+async def list_ticket_comments(
+    ticket_id: int,
+    session: AsyncSession = Depends(get_db_session),
+    _user: User = require_permission("ticket:list"),
+):
+    """获取工单流转/评论记录。"""
+    comments = await ticket_service.list_comments(session, ticket_id)
+    items = [_comment_to_response(c) for c in comments]
+    return success_response(data=items)
+
+
+@router.post("/{ticket_id}/comments", status_code=201)
+async def add_ticket_comment(
+    ticket_id: int,
+    payload: TicketCommentCreate,
+    session: AsyncSession = Depends(get_db_session),
+    current_user: User = require_permission("ticket:create"),
+):
+    """添加工单评论。"""
+    comment = await ticket_service.add_comment(session, ticket_id, payload.content, current_user)
+    return success_response(
+        data=_comment_to_response(comment), message="Ticket comment added", http_status=201,
+    )

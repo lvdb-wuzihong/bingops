@@ -1,0 +1,19 @@
+.qoder
+.ruff_cache
+venv
+.env
+sql/migrations
+.sqlite
+
+# Python 字节码与缓存
+__pycache__/
+*.py[cod]
+.mypy_cache
+.pytest_cache
+bingops.egg-info
+.logs/*
+.logs
+core/__pycache__/*
+api/__pycache__/*
+api/middleware/__pycache__/*
+core/models/__pycache__/*

@@ -1,0 +1,17 @@
+# 构建上下文裁剪：不进镜像的东西
+.git
+.gitignore
+.qoder
+venv
+.env
+.env.example
+__pycache__
+*.pyc
+.ruff_cache
+.mypy_cache
+.pytest_cache
+sql
+docs
+Dockerfile
+.dockerignore
+bingops.egg-info
