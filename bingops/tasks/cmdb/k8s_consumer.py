@@ -20,7 +20,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bingops.models.cmdb.change_log import CmdbChangeLog
-from bingops.models.cmdb.model import CmdbModel
+from bingops.models.cmdb.model import CmdbModel, CmdbModelField
 from bingops.models.cmdb.resource import CmdbResource
 from bingops.models.cmdb.tag import CmdbResourceTag
 from bingops.repositories.cmdb.change_log_repo import CmdbChangeLogRepo
@@ -59,8 +59,8 @@ def create_k8s_handler(session_factory: async_sessionmaker[AsyncSession]):
                     logger.debug("K8s sync disabled for cluster, skipping", extra={"cluster": message.cluster_id})
                     return
 
-                # 模型注册表（code → id）
-                model_ids = await _load_model_ids(session)
+                # 模型注册表（code → id）+ 字段定义（落库前白名单过滤用）
+                model_ids, field_codes = await _load_model_catalog(session)
                 model_id = model_ids.get(model_code)
                 if model_id is None:
                     logger.warning("Model not defined in registry, skipping", extra={"model_code": model_code})
@@ -72,7 +72,7 @@ def create_k8s_handler(session_factory: async_sessionmaker[AsyncSession]):
                 if message.event_type == K8sEventType.DELETE:
                     await _handle_delete(session, model_id, message)
                 else:
-                    await _handle_upsert(session, model_id, model_code, model_ids, message)
+                    await _handle_upsert(session, model_id, model_code, model_ids, field_codes, message)
 
                 await session.commit()
             except Exception:
@@ -98,6 +98,7 @@ async def _handle_upsert(
     model_id: int,
     model_code: str,
     model_ids: dict[str, int],
+    field_codes: dict[int, set[str]],
     message: K8sResourceMessage,
 ) -> None:
     """Upsert K8s 资源（幂等 + 无变更跳过）。"""
@@ -107,6 +108,14 @@ async def _handle_upsert(
 
     obj = payload.raw or {"spec": payload.spec or {}, "status": payload.status or {}}
     fields, status = k8s_extractors.extract(message.resource_type, obj)
+
+    # 按库内模型字段定义过滤：模型变更后提取器产出的死键不落库
+    fields, dropped = k8s_extractors.filter_by_model_fields(fields, field_codes.get(model_id, set()))
+    if dropped:
+        logger.warning(
+            "Extractor produced fields outside model definition, dropped",
+            extra={"model_code": model_code, "dropped_keys": dropped},
+        )
 
     provider_id = (
         f"{cluster_id}/{payload.namespace}/{payload.name}"
@@ -260,10 +269,16 @@ async def _sync_k8s_labels(
 # ── 工具函数 ───────────────────────────────────────────────────────────────────
 
 
-async def _load_model_ids(session: AsyncSession) -> dict[str, int]:
-    """加载模型注册表（code → id）。"""
+async def _load_model_catalog(session: AsyncSession) -> tuple[dict[str, int], dict[int, set[str]]]:
+    """加载模型注册表（code → id）与各模型的字段定义 code 集合。"""
     models = await session.execute(select(CmdbModel))
-    return {model.code: model.id for model in models.scalars().all()}
+    model_ids = {model.code: model.id for model in models.scalars().all()}
+
+    field_rows = await session.execute(select(CmdbModelField.model_id, CmdbModelField.code))
+    field_codes: dict[int, set[str]] = {}
+    for model_id, code in field_rows.all():
+        field_codes.setdefault(model_id, set()).add(code)
+    return model_ids, field_codes
 
 
 async def _record_change(

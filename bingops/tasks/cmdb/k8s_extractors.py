@@ -42,6 +42,29 @@ WORKLOAD_TYPE_BY_RESOURCE: dict[str, str] = {
 # 有对应模型但 Informer 会发、本端不入库的类型（静默跳过）
 UNMANAGED_RESOURCE_TYPES = {"configmaps", "secrets"}
 
+# 非模型定义但落库必需的内部键（下划线前缀键天然属于内部元数据，无需登记）
+INTERNAL_FIELD_KEYS = {"namespace"}
+
+
+def filter_by_model_fields(fields: dict, allowed_codes: set[str]) -> tuple[dict, list[str]]:
+    """按库内模型字段定义过滤提取结果。
+
+    保留规则：模型定义内的字段 code + 内部元数据键（INTERNAL_FIELD_KEYS
+    及下划线前缀键，供关系重建用）。模型定义变更后提取器产出的死键会被剔除，
+    避免脏数据落库。
+
+    Returns:
+        (filtered, dropped)：过滤后的 fields 与被剔除的键清单。
+    """
+    filtered = {}
+    dropped = []
+    for key, value in fields.items():
+        if key in allowed_codes or key in INTERNAL_FIELD_KEYS or key.startswith("_"):
+            filtered[key] = value
+        else:
+            dropped.append(key)
+    return filtered, dropped
+
 
 def extract(resource_type: str, obj: dict) -> tuple[dict, str]:
     """提取动态字段与资源状态。
