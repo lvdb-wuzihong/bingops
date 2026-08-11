@@ -36,6 +36,10 @@ from bingops.tasks.cmdb.relationship_builder import (
 
 logger = logging.getLogger(f"bingops.{__name__}")
 
+# cluster_type → 托管厂商（附录 B #19：k8s_cluster.provider 标托管厂商，
+# 是云与容器两个世界的桥；子资源继承集群 provider）。自建集群回退 k8s。
+CLUSTER_TYPE_TO_PROVIDER: dict[str, str] = {"ack": "aliyun", "gke": "gcp"}
+
 
 def create_k8s_handler(session_factory: async_sessionmaker[AsyncSession]):
     """创建 K8s 事件处理函数（闭包注入 session_factory）。"""
@@ -66,13 +70,14 @@ def create_k8s_handler(session_factory: async_sessionmaker[AsyncSession]):
                     logger.warning("Model not defined in registry, skipping", extra={"model_code": model_code})
                     return
 
-                # 集群资源兜底创建（node/namespace 等从属边的父节点）
-                await _ensure_cluster_resource(session, message, model_ids)
+                # 集群资源兜底创建（node/namespace 等从属边的父节点），
+                # 并解析本条消息应使用的 provider（托管厂商）
+                provider = await _ensure_cluster_resource(session, message, model_ids)
 
                 if message.event_type == K8sEventType.DELETE:
-                    await _handle_delete(session, model_id, message)
+                    await _handle_delete(session, model_id, provider, message)
                 else:
-                    await _handle_upsert(session, model_id, model_code, model_ids, field_codes, message)
+                    await _handle_upsert(session, model_id, model_code, model_ids, field_codes, provider, message)
 
                 await session.commit()
             except Exception:
@@ -99,6 +104,7 @@ async def _handle_upsert(
     model_code: str,
     model_ids: dict[str, int],
     field_codes: dict[int, set[str]],
+    provider: str,
     message: K8sResourceMessage,
 ) -> None:
     """Upsert K8s 资源（幂等 + 无变更跳过）。"""
@@ -123,7 +129,7 @@ async def _handle_upsert(
     )
     # include_deleted=True：命中软删记录时走复活路径（同名重建不撞唯一约束）
     existing = await repo.get_by_provider_id(
-        model_id, "k8s", provider_id, cluster_id, include_deleted=True
+        model_id, provider, provider_id, cluster_id, include_deleted=True
     )
 
     # 幂等校验：incoming version <= current version → 跳过
@@ -157,7 +163,7 @@ async def _handle_upsert(
     else:
         resource = CmdbResource(
             model_id=model_id,
-            provider="k8s",
+            provider=provider,
             provider_id=provider_id,
             cloud_account=cluster_id,
             name=payload.name,
@@ -183,6 +189,7 @@ async def _handle_upsert(
 async def _handle_delete(
     session: AsyncSession,
     model_id: int,
+    provider: str,
     message: K8sResourceMessage,
 ) -> None:
     """软删除 K8s 资源并清理关系边。"""
@@ -193,7 +200,7 @@ async def _handle_delete(
         f"{cluster_id}/{payload.namespace}/{payload.name}"
         if payload.namespace else f"{cluster_id}/{payload.name}"
     )
-    existing = await repo.get_by_provider_id(model_id, "k8s", provider_id, cluster_id)
+    existing = await repo.get_by_provider_id(model_id, provider, provider_id, cluster_id)
     if existing is None:
         logger.debug("K8s resource not found for delete, skipping", extra={"provider_id": provider_id})
         return
@@ -220,21 +227,30 @@ async def _ensure_cluster_resource(
     session: AsyncSession,
     message: K8sResourceMessage,
     model_ids: dict[str, int],
-) -> None:
-    """确保 k8s_cluster 资源存在（从属边的公共父节点）。"""
+) -> str:
+    """确保 k8s_cluster 资源存在，返回本条消息应使用的 provider。
+
+    provider 语义（附录 B #19）：托管厂商（ack→aliyun / gke→gcp，自建→k8s）。
+    集群实例是厂商的唯一事实源：已存在则沿用其 provider（保证子资源与集群一致），
+    不存在则按 cluster_type 映射创建。
+    """
+    provider = CLUSTER_TYPE_TO_PROVIDER.get(message.cluster_type, "k8s")
     cluster_model_id = model_ids.get("k8s_cluster")
     if not cluster_model_id:
-        return
+        return provider
 
     repo = CmdbResourceRepo(session)
     cluster_id = message.cluster_id
-    existing = await repo.get_by_provider_id(cluster_model_id, "k8s", cluster_id, cluster_id)
+    existing = await repo.find_by_provider_id(cluster_model_id, cluster_id, cluster_id)
     if existing:
-        return
+        if existing.deleted_at is not None:
+            existing.deleted_at = None
+            await repo.update(existing)
+        return existing.provider
 
     cluster = CmdbResource(
         model_id=cluster_model_id,
-        provider="k8s",
+        provider=provider,
         provider_id=cluster_id,
         cloud_account=cluster_id,
         name=cluster_id,
@@ -246,6 +262,7 @@ async def _ensure_cluster_resource(
     await repo.create(cluster)
     await _record_change(session, cluster.id, cluster_model_id, "create")
     logger.info("K8s cluster resource auto-created", extra={"cluster": cluster_id})
+    return provider
 
 
 # ── 标签差异同步 ───────────────────────────────────────────────────────────────

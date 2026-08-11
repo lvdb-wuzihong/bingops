@@ -50,6 +50,26 @@ class CmdbResourceRepo:
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 
+    async def find_by_provider_id(
+        self,
+        model_id: int,
+        provider_id: str,
+        cloud_account: str,
+    ) -> CmdbResource | None:
+        """按 (model_id, provider_id, cloud_account) 查找，不过滤 provider。
+
+        用于 k8s_cluster 这类 provider 本身是待解析结果的场景
+        （集群实例是厂商的唯一事实源，不能拿厂商反查）。
+        """
+        result = await self._session.execute(
+            select(CmdbResource).where(
+                CmdbResource.model_id == model_id,
+                CmdbResource.provider_id == provider_id,
+                CmdbResource.cloud_account == cloud_account,
+            )
+        )
+        return result.scalar_one_or_none()
+
     async def list_resources(
         self,
         *,
