@@ -134,9 +134,3 @@ async def toggle_sync_task(session: AsyncSession, task_id: int, enabled: bool) -
         extra={"task_id": task_id, "enabled": enabled},
     )
     return task
-
-
-async def is_sync_enabled(session: AsyncSession, task_type: str, target_id: str) -> bool:
-    """判断同步任务是否启用（供消费端调用）。"""
-    repo = CmdbSyncTaskRepo(session)
-    return await repo.is_enabled(task_type, target_id)

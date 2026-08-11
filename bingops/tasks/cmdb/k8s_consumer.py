@@ -57,10 +57,21 @@ def create_k8s_handler(session_factory: async_sessionmaker[AsyncSession]):
 
         async with session_factory() as session:
             try:
-                # 同步任务开关判断
+                # 同步任务门控：数据表驱动，未配置或禁用 → 跳过（默认拒绝）
                 sync_repo = CmdbSyncTaskRepo(session)
-                if not await sync_repo.is_enabled("k8s", message.cluster_id):
-                    logger.debug("K8s sync disabled for cluster, skipping", extra={"cluster": message.cluster_id})
+                task = await sync_repo.get_by_type_and_target("k8s", message.cluster_id)
+                if task is None or not task.enabled:
+                    logger.debug(
+                        "K8s sync task not configured or disabled, skipping",
+                        extra={"cluster": message.cluster_id},
+                    )
+                    return
+                # resource_types 白名单过滤（空列表 = 同步全部类型）
+                if task.resource_types and resource_type not in task.resource_types:
+                    logger.debug(
+                        "K8s resource type not in sync task, skipping",
+                        extra={"cluster": message.cluster_id, "resource_type": resource_type},
+                    )
                     return
 
                 # 模型注册表（code → id）+ 字段定义（落库前白名单过滤用）

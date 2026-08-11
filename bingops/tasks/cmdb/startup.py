@@ -49,9 +49,7 @@ async def start_cmdb_kafka_consumer(session_factory: async_sessionmaker[AsyncSes
         cloud_handler,
     )
 
-    # 订阅 Topic（使用 pattern 订阅）
-    # aiokafka 支持 pattern 订阅，但需要实际的 topic 名称
-    # 这里先使用通配 topic，实际部署时根据集群和云厂商配置具体 topic
+    # 订阅 Topic：固定正则订阅，是否处理由 cmdb_sync_tasks 数据表驱动
     topics = _resolve_topics()
 
     if not topics:
@@ -79,22 +77,11 @@ async def stop_cmdb_kafka_consumer() -> None:
 def _resolve_topics() -> list[str]:
     """解析需要订阅的 Kafka Topics。
 
-    两种模式（显式列表优先）：
-    1. 显式列表：BINGOPS_KAFKA_K8S_TOPICS / BINGOPS_KAFKA_CLOUD_TOPICS 任一配置时，
-       仅订阅列表内的 topic（兼容存量部署）。
-    2. 正则订阅（推荐，两者都未配时默认）：按 topic pattern 前缀订阅
-       ^(k8s-events-.*|cloud-sync-.*)，aiokafka 会周期性刷新 metadata 自动发现
-       新 topic，新接入集群无需改配置、无需重启；处理与否由 cmdb_sync_tasks 控制。
+    固定正则订阅 ^(k8s-events-.*|cloud-sync-.*)：aiokafka 周期性刷新 metadata
+    自动发现新 topic，新接入集群/云厂商无需改配置、无需重启。
+    订阅层不做任何业务过滤，同步与否完全由 cmdb_sync_tasks 数据表驱动
+    （未配置任务或任务禁用 → 消息直接跳过）。
     """
-    k8s_topics = getattr(settings, "kafka_k8s_topics", "")
-    cloud_topics = getattr(settings, "kafka_cloud_topics", "")
-
-    if k8s_topics or cloud_topics:
-        topics: list[str] = []
-        topics.extend(t.strip() for t in k8s_topics.split(",") if t.strip())
-        topics.extend(t.strip() for t in cloud_topics.split(",") if t.strip())
-        return topics
-
     k8s_prefix = settings.kafka_k8s_topic_pattern.split("{")[0]
     cloud_prefix = settings.kafka_cloud_topic_pattern.split("{")[0]
     return [f"^({k8s_prefix}.*|{cloud_prefix}.*)"]

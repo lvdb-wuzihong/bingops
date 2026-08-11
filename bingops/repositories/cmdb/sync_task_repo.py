@@ -32,18 +32,6 @@ class CmdbSyncTaskRepo:
         )
         return result.scalar_one_or_none()
 
-    async def is_enabled(self, task_type: str, target_id: str) -> bool:
-        """判断指定同步任务是否启用（消费端快速查询）。"""
-        result = await self._session.execute(
-            select(CmdbSyncTask.enabled).where(
-                CmdbSyncTask.task_type == task_type,
-                CmdbSyncTask.target_id == target_id,
-            )
-        )
-        enabled = result.scalar_one_or_none()
-        # 未配置任务时默认放行（兼容未配置场景）
-        return enabled if enabled is not None else True
-
     async def list_tasks(
         self,
         *,

@@ -41,8 +41,6 @@ class Settings(BaseSettings):
     kafka_consumer_group: str = "bingops-cmdb"
     kafka_k8s_topic_pattern: str = "k8s-events-{cluster_id}"
     kafka_cloud_topic_pattern: str = "cloud-sync-{provider}"
-    kafka_k8s_topics: str = ""
-    kafka_cloud_topics: str = ""
     kafka_enabled: bool = False
 
 
