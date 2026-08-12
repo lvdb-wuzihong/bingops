@@ -88,7 +88,10 @@ async def _handle_upsert(session: AsyncSession, message: CloudResourceMessage) -
 
     # 幂等校验：云 resource_version 是内容哈希（无序），仅当哈希相同（无实质变更）时跳过
     if existing and existing.resource_version == message.resource_version:
-        logger.debug("Cloud sync event skipped (no content change)", extra={"provider_id": message.provider_id})
+        logger.debug("Cloud sync unchanged, skip upsert but rebuild relationships",
+                     extra={"provider_id": message.provider_id})
+        # 资源内容不变，但关系边可能因对端资源入库而需要补建
+        await rebuild_cloud_relationships(session, existing, message)
         return
 
     if existing:

@@ -6,7 +6,7 @@ Delete 时调用 remove_resource_edges（复用 K8s 侧函数）清边。
 当前已覆盖：aliyun_ecs（→ VPC / VSwitch / SecurityGroup）
 待扩展：SLB、RDS、Redis 等（需对应适配器先产出资源后，在此追加 elif 块）。
 
-策略：从属边对子节点整包替换（先删后建）；关联边按语义槽位替换。
+策略：先解析预期边、与当前库内边做 diff，仅在有差异时才清空重建（避免每轮无效 I/O）。
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ async def rebuild_cloud_relationships(
     resource: CmdbResource,
     message: CloudResourceMessage,
 ) -> None:
-    """重建单个云资源的关系边（Upsert 后调用）。"""
+    """重建单个云资源的关系边（Upsert 后调用，内置 diff 跳过无变更）。"""
     model_repo = CmdbModelRepo(session)
     model = await model_repo.get_model(resource.model_id)
     if model is None:
@@ -43,10 +43,6 @@ async def rebuild_cloud_relationships(
 
     rel_repo = CmdbRelationshipRepo(session)
     res_repo = CmdbResourceRepo(session)
-
-    # 先清空该资源的出边（整包替换）
-    await rel_repo.delete_belongs_to_by_child(resource.id)
-    await rel_repo.delete_relates_to_by_source(resource.id)
 
     if model.code == "aliyun_ecs":
         await _rebuild_ecs_edges(session, rel_repo, res_repo, model_repo, resource, message)
@@ -65,28 +61,25 @@ async def _rebuild_ecs_edges(
     resource: CmdbResource,
     message: CloudResourceMessage,
 ) -> None:
-    """ECS: VPC（从属）、VSwitch（从属）、SecurityGroup（关联）。"""
+    """ECS: 先 diff 再决定是否重建（避免每轮无变更时删了又建）。"""
     fields = resource.fields or {}
     provider = message.provider
     account = message.cloud_account
-    now = datetime.now(timezone.utc)
 
-    # --- ECS → VPC（belongs_to）---
+    # ── 解析预期边 ──
+    expected_parent_ids: set[int] = set()
+    expected_relate_to_ids: set[int] = set()
+
+    # ECS → VPC
     vpc_id = fields.get("vpc_id")
     if vpc_id:
         vpc_model = await model_repo.get_model_by_code("aliyun_vpc")
         if vpc_model:
             vpc = await res_repo.get_by_provider_id(vpc_model.id, provider, vpc_id, account)
             if vpc:
-                await rel_repo.create_belongs_to(CmdbBelongsTo(
-                    child_id=resource.id,
-                    parent_id=vpc.id,
-                    description=DESC_DEPLOYED_IN,
-                    synced_at=now,
-                    source="discovery",
-                ))
+                expected_parent_ids.add(vpc.id)
 
-    # --- ECS → VSwitch（belongs_to，来自采集器的 parent 提示）---
+    # ECS → VSwitch
     if message.parent_provider_id and message.parent_resource_type:
         vswitch_model = await model_repo.get_model_by_code(message.parent_resource_type)
         if vswitch_model:
@@ -94,15 +87,9 @@ async def _rebuild_ecs_edges(
                 vswitch_model.id, provider, message.parent_provider_id, account,
             )
             if vswitch:
-                await rel_repo.create_belongs_to(CmdbBelongsTo(
-                    child_id=resource.id,
-                    parent_id=vswitch.id,
-                    description=DESC_DEPLOYED_IN,
-                    synced_at=now,
-                    source="discovery",
-                ))
+                expected_parent_ids.add(vswitch.id)
 
-    # --- ECS → SecurityGroup（relates_to）---
+    # ECS → SecurityGroup
     sg_ids = fields.get("security_group_ids") or []
     if sg_ids:
         sg_model = await model_repo.get_model_by_code("aliyun_security_group")
@@ -110,10 +97,38 @@ async def _rebuild_ecs_edges(
             for sg_id in sg_ids:
                 sg = await res_repo.get_by_provider_id(sg_model.id, provider, sg_id, account)
                 if sg:
-                    await rel_repo.create_relates_to(CmdbRelatesTo(
-                        source_id=resource.id,
-                        target_id=sg.id,
-                        description=DESC_BIND_SG,
-                        synced_at=now,
-                        source="discovery",
-                    ))
+                    expected_relate_to_ids.add(sg.id)
+
+    # ── 查询当前库内边 ──
+    current_parents = await rel_repo.get_parents(resource.id)
+    current_parent_ids = {p.parent_id for p in current_parents}
+
+    current_relations = await rel_repo.get_relations_from(resource.id)
+    current_relate_ids = {r.target_id for r in current_relations}
+
+    # ── diff：完全一致则跳过 ──
+    if expected_parent_ids == current_parent_ids and expected_relate_to_ids == current_relate_ids:
+        return
+
+    # ── 有差异：清空 + 重建 ──
+    await rel_repo.delete_belongs_to_by_child(resource.id)
+    await rel_repo.delete_relates_to_by_source(resource.id)
+    now = datetime.now(timezone.utc)
+
+    for parent_id in expected_parent_ids:
+        await rel_repo.create_belongs_to(CmdbBelongsTo(
+            child_id=resource.id,
+            parent_id=parent_id,
+            description=DESC_DEPLOYED_IN,
+            synced_at=now,
+            source="discovery",
+        ))
+
+    for sg_id in expected_relate_to_ids:
+        await rel_repo.create_relates_to(CmdbRelatesTo(
+            source_id=resource.id,
+            target_id=sg_id,
+            description=DESC_BIND_SG,
+            synced_at=now,
+            source="discovery",
+        ))
