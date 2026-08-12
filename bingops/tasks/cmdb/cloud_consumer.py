@@ -84,11 +84,10 @@ async def _handle_upsert(session: AsyncSession, message: CloudResourceMessage) -
         model.id, message.provider, message.provider_id, message.cloud_account,
     )
 
-    # 幂等校验
-    if existing and existing.resource_version:
-        if _version_lte(message.resource_version, existing.resource_version):
-            logger.debug("Cloud sync event skipped (version not newer)", extra={"provider_id": message.provider_id})
-            return
+    # 幂等校验：云 resource_version 是内容哈希（无序），仅当哈希相同（无实质变更）时跳过
+    if existing and existing.resource_version == message.resource_version:
+        logger.debug("Cloud sync event skipped (no content change)", extra={"provider_id": message.provider_id})
+        return
 
     if existing:
         # 更新
@@ -197,11 +196,3 @@ async def _record_change(
         source="discovery",
     )
     await log_repo.create(log)
-
-
-def _version_lte(v1: str, v2: str) -> bool:
-    """比较版本号。"""
-    try:
-        return int(v1) <= int(v2)
-    except (ValueError, TypeError):
-        return v1 <= v2
