@@ -20,6 +20,8 @@ from bingops.repositories.cmdb.model_repo import CmdbModelRepo
 from bingops.repositories.cmdb.resource_repo import CmdbResourceRepo
 from bingops.repositories.cmdb.sync_task_repo import CmdbSyncTaskRepo
 from bingops.schemas.cmdb.kafka_messages import CloudResourceMessage, CloudSyncEventType
+from bingops.tasks.cmdb.cloud_relationship_builder import rebuild_cloud_relationships
+from bingops.tasks.cmdb.relationship_builder import remove_resource_edges
 
 logger = logging.getLogger(f"bingops.{__name__}")
 
@@ -129,6 +131,9 @@ async def _handle_upsert(session: AsyncSession, message: CloudResourceMessage) -
     # 同步云标签（source='cloud'，不覆盖手动标签）
     await _sync_cloud_tags(session, resource, message.cloud_tags)
 
+    # 重建云资源关系（ECS→VPC/VSwitch/SG 等）
+    await rebuild_cloud_relationships(session, resource, message)
+
 
 async def _handle_delete(session: AsyncSession, message: CloudResourceMessage) -> None:
     """软删除云资源。"""
@@ -145,6 +150,7 @@ async def _handle_delete(session: AsyncSession, message: CloudResourceMessage) -
         return
 
     await repo.soft_delete(existing)
+    await remove_resource_edges(session, existing.id)
     await _record_change(session, existing.id, model.id, "delete")
     logger.info("Cloud resource soft-deleted", extra={"provider_id": message.provider_id})
 
