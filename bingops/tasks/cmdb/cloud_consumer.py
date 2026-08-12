@@ -70,6 +70,28 @@ def create_cloud_handler(session_factory: async_sessionmaker[AsyncSession]):
     return handle_cloud_sync
 
 
+# ── 字段名兼容映射 ────────────────────────────────────────────────────────────
+
+# 采集器 v1 → v2 字段名变更（aliyun_ecs）
+_ALIYUN_ECS_FIELD_ALIASES: dict[str, str] = {
+    "instance_type": "instance_class",
+    "os_name": "os",
+}
+
+
+def _normalize_attributes(resource_type: str, attributes: dict) -> dict:
+    """归一化 attributes 字段名，兼容采集器 v1/v2 差异。
+
+    采集器 v1 使用 instance_type/os_name 等内部命名，v2 已对齐 CMDB 模型 code。
+    此函数将旧字段名映射到新字段名，确保消费端无论收到哪种格式都能正确入库。
+    """
+    if resource_type == "aliyun_ecs":
+        for old_key, new_key in _ALIYUN_ECS_FIELD_ALIASES.items():
+            if old_key in attributes and new_key not in attributes:
+                attributes[new_key] = attributes.pop(old_key)
+    return attributes
+
+
 async def _handle_upsert(session: AsyncSession, message: CloudResourceMessage) -> None:
     """Upsert 云资源（过渡态：resource_type → 同名模型 code 直映射）。"""
     repo = CmdbResourceRepo(session)
@@ -86,6 +108,9 @@ async def _handle_upsert(session: AsyncSession, message: CloudResourceMessage) -
         model.id, message.provider, message.provider_id, message.cloud_account,
     )
 
+    # 归一化 attributes 字段名，兼容采集器 v1/v2 差异
+    attributes = _normalize_attributes(message.resource_type, message.attributes)
+
     # 幂等校验：云 resource_version 是内容哈希（无序），仅当哈希相同（无实质变更）时跳过
     if existing and existing.resource_version == message.resource_version:
         logger.debug("Cloud sync unchanged, skip upsert but rebuild relationships",
@@ -100,7 +125,7 @@ async def _handle_upsert(session: AsyncSession, message: CloudResourceMessage) -
         existing.region = message.region
         existing.zone = message.zone
         existing.status = message.status
-        existing.fields = message.attributes
+        existing.fields = attributes
         existing.resource_version = message.resource_version
         existing.synced_at = datetime.now(timezone.utc)
         existing.source = "discovery"
@@ -121,7 +146,7 @@ async def _handle_upsert(session: AsyncSession, message: CloudResourceMessage) -
             region=message.region,
             zone=message.zone,
             status=message.status,
-            fields=message.attributes,
+            fields=attributes,
             resource_version=message.resource_version,
             synced_at=datetime.now(timezone.utc),
             source="discovery",
