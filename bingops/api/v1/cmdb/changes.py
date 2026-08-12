@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bingops.api.dependencies import get_db_session, require_permission
 from bingops.core.response import paginated_response
 from bingops.models.cmdb.model import CmdbModel
+from bingops.models.cmdb.resource import CmdbResource
 from bingops.models.user import User
 from bingops.schemas.cmdb.change_log import ChangeLogResponse
 from bingops.services.cmdb import change_log_service
@@ -37,6 +38,15 @@ async def list_changes(
         rows = await session.execute(select(CmdbModel).where(CmdbModel.id.in_(model_ids)))
         models = {m.id: m for m in rows.scalars().all()}
 
+    # 批量解析资源名称（不滤 deleted_at，已删除资源也显示原名）
+    resource_ids = {log.resource_id for log in logs}
+    resource_names: dict[int, str] = {}
+    if resource_ids:
+        rows = await session.execute(
+            select(CmdbResource.id, CmdbResource.name).where(CmdbResource.id.in_(resource_ids))
+        )
+        resource_names = {row[0]: row[1] for row in rows.all()}
+
     items = []
     for log in logs:
         model = models.get(log.model_id) if log.model_id is not None else None
@@ -44,6 +54,7 @@ async def list_changes(
             ChangeLogResponse(
                 id=log.id,
                 resource_id=log.resource_id,
+                resource_name=resource_names.get(log.resource_id),
                 model_id=log.model_id,
                 model_code=model.code if model else None,
                 resource_type=model.name if model else "-",
