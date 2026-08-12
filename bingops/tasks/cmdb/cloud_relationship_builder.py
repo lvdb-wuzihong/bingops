@@ -46,8 +46,56 @@ async def rebuild_cloud_relationships(
 
     if model.code == "aliyun_ecs":
         await _rebuild_ecs_edges(session, rel_repo, res_repo, model_repo, resource, message)
-    # 后续扩展：elif model.code == "aliyun_slb": ...
-    # 后续扩展：elif model.code == "aliyun_rds": ...
+    else:
+        # 通用 parent 关系重建（VSwitch → VPC 等，无复杂多边场景）
+        await _rebuild_parent_edge(session, rel_repo, res_repo, model_repo, resource, message)
+
+
+# ── 通用 parent 关系重建 ───────────────────────────────────────────────────────
+
+
+async def _rebuild_parent_edge(
+    session: AsyncSession,
+    rel_repo: CmdbRelationshipRepo,
+    res_repo: CmdbResourceRepo,
+    model_repo: CmdbModelRepo,
+    resource: CmdbResource,
+    message: CloudResourceMessage,
+) -> None:
+    """通用：根据 message.parent_provider_id 建 belongs_to 边（diff 跳过无变更）。"""
+    if not message.parent_provider_id or not message.parent_resource_type:
+        return
+
+    provider = message.provider
+    account = message.cloud_account
+
+    # 查找父资源
+    parent_model = await model_repo.get_model_by_code(message.parent_resource_type)
+    if parent_model is None:
+        return
+    parent = await res_repo.get_by_provider_id(
+        parent_model.id, provider, message.parent_provider_id, account,
+    )
+    if parent is None:
+        return
+
+    # 查现有边
+    current_parents = await rel_repo.get_parents(resource.id)
+    current_parent_ids = {p.parent_id for p in current_parents}
+
+    if parent.id in current_parent_ids:
+        return  # 已存在，跳过
+
+    # 清旧建新
+    await rel_repo.delete_belongs_to_by_child(resource.id)
+    now = datetime.now(timezone.utc)
+    await rel_repo.create_belongs_to(CmdbBelongsTo(
+        child_id=resource.id,
+        parent_id=parent.id,
+        description=DESC_DEPLOYED_IN,
+        synced_at=now,
+        source="discovery",
+    ))
 
 
 # ── ECS 关系重建 ────────────────────────────────────────────────────────────────
