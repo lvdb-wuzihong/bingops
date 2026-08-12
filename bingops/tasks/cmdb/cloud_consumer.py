@@ -76,6 +76,7 @@ def create_cloud_handler(session_factory: async_sessionmaker[AsyncSession]):
 _ALIYUN_ECS_FIELD_ALIASES: dict[str, str] = {
     "instance_type": "instance_class",
     "os_name": "os",
+    "memory_mb": "memory_gb",
 }
 
 
