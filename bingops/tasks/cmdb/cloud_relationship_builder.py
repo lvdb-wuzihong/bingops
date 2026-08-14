@@ -28,6 +28,7 @@ logger = logging.getLogger(f"bingops.{__name__}")
 # 边语义描述（对齐 cmdb_model_relations.relation_name 前端展示用）
 DESC_DEPLOYED_IN = "部署于"
 DESC_BIND_SG = "绑定安全组"
+DESC_BIND_ECS = "绑定"
 
 
 async def rebuild_cloud_relationships(
@@ -46,6 +47,8 @@ async def rebuild_cloud_relationships(
 
     if model.code == "aliyun_ecs":
         await _rebuild_ecs_edges(session, rel_repo, res_repo, model_repo, resource, message)
+    elif model.code == "aliyun_eip":
+        await _rebuild_eip_edges(session, rel_repo, res_repo, model_repo, resource, message)
     else:
         # 通用 parent 关系重建（VSwitch → VPC 等，无复杂多边场景）
         await _rebuild_parent_edge(session, rel_repo, res_repo, model_repo, resource, message)
@@ -96,6 +99,49 @@ async def _rebuild_parent_edge(
         synced_at=now,
         source="discovery",
     ))
+
+
+# ── EIP 关系重建 ────────────────────────────────────────────────────────────
+
+
+async def _rebuild_eip_edges(
+    session: AsyncSession,
+    rel_repo: CmdbRelationshipRepo,
+    res_repo: CmdbResourceRepo,
+    model_repo: CmdbModelRepo,
+    resource: CmdbResource,
+    message: CloudResourceMessage,
+) -> None:
+    """EIP: 绑定 ECS 实例时建 relates_to 边（diff 跳过无变更）。"""
+    fields = resource.fields or {}
+    expected_relate_to_ids: set[int] = set()
+
+    if fields.get("bind_instance_type") == "EcsInstance":
+        ecs_id = fields.get("bind_instance_id")
+        if ecs_id:
+            ecs_model = await model_repo.get_model_by_code("aliyun_ecs")
+            if ecs_model:
+                ecs = await res_repo.get_by_provider_id(
+                    ecs_model.id, message.provider, ecs_id, message.cloud_account,
+                )
+                if ecs:
+                    expected_relate_to_ids.add(ecs.id)
+
+    current_relations = await rel_repo.get_relations_from(resource.id)
+    current_relate_ids = {r.target_id for r in current_relations}
+    if expected_relate_to_ids == current_relate_ids:
+        return
+
+    await rel_repo.delete_relates_to_by_source(resource.id)
+    now = datetime.now(timezone.utc)
+    for target_id in expected_relate_to_ids:
+        await rel_repo.create_relates_to(CmdbRelatesTo(
+            source_id=resource.id,
+            target_id=target_id,
+            description=DESC_BIND_ECS,
+            synced_at=now,
+            source="discovery",
+        ))
 
 
 # ── ECS 关系重建 ────────────────────────────────────────────────────────────────
