@@ -109,13 +109,15 @@ async def _handle_upsert(session: AsyncSession, message: CloudResourceMessage) -
 
     existing = await repo.get_by_provider_id(
         model.id, message.provider, message.provider_id, message.cloud_account,
+        include_deleted=True,
     )
 
     # 归一化 attributes 字段名，兼容采集器 v1/v2 差异
     attributes = _normalize_attributes(message.resource_type, message.attributes)
 
-    # 幂等校验：云 resource_version 是内容哈希（无序），仅当哈希相同（无实质变更）时跳过
-    if existing and existing.resource_version == message.resource_version:
+    # 幂等校验：云 resource_version 是内容哈希（无序），仅当哈希相同（无实质变更）时跳过；
+    # 软删记录不跳过（需走更新分支复活）
+    if existing and existing.deleted_at is None and existing.resource_version == message.resource_version:
         logger.debug("Cloud sync unchanged, skip upsert but rebuild relationships",
                      extra={"provider_id": message.provider_id})
         # 资源内容不变，但关系边可能因对端资源入库而需要补建
