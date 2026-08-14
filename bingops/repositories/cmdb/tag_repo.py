@@ -74,7 +74,23 @@ class CmdbTagRepo:
     # ── 资源标签 (Resource Tag) ──────────────────────────────────────────────────
 
     async def add_resource_tag(self, tag: CmdbResourceTag) -> CmdbResourceTag:
-        """为资源添加标签（upsert 语义：同 key+source 存在则更新值）。"""
+        """为资源添加标签（upsert 语义：同 resource_id+tag_key+source 存在则更新值）。"""
+        result = await self._session.execute(
+            select(CmdbResourceTag).where(
+                CmdbResourceTag.resource_id == tag.resource_id,
+                CmdbResourceTag.tag_key == tag.tag_key,
+                CmdbResourceTag.source == tag.source,
+            )
+        )
+        existing = result.scalar_one_or_none()
+        if existing is not None:
+            # 已存在则覆盖值（云同步每轮全量重发，以最新值为准）
+            existing.tag_value = tag.tag_value
+            existing.raw_key = tag.raw_key
+            existing.synced_at = tag.synced_at
+            existing.operator = tag.operator
+            await self._session.flush()
+            return existing
         self._session.add(tag)
         await self._session.flush()
         return tag
