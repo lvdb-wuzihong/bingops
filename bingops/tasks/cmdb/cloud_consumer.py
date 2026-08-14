@@ -77,6 +77,8 @@ _ALIYUN_ECS_FIELD_ALIASES: dict[str, str] = {
     "instance_type": "instance_class",
     "os_name": "os",
     "memory_mb": "memory_gb",
+    "expired_time": "expired_at",
+    "instance_charge_type": "charge_type",
 }
 
 
