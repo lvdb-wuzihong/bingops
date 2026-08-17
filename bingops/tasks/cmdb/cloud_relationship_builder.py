@@ -31,6 +31,7 @@ DESC_BIND_SG = "绑定安全组"
 DESC_BIND_ECS = "绑定"
 DESC_NETWORK_BELONG = "网络归属"
 DESC_LB_BACKEND = "负载均衡后端"
+DESC_SG_BACKEND = "服务器组后端"
 
 
 async def rebuild_cloud_relationships(
@@ -53,6 +54,8 @@ async def rebuild_cloud_relationships(
         await _rebuild_eip_edges(session, rel_repo, res_repo, model_repo, resource, message)
     elif model.code == "aliyun_clb":
         await _rebuild_clb_edges(session, rel_repo, res_repo, model_repo, resource, message)
+    elif model.code == "aliyun_nlb":
+        await _rebuild_nlb_edges(session, rel_repo, res_repo, model_repo, resource, message)
     else:
         # 通用 parent 关系重建（VSwitch → VPC 等，无复杂多边场景）
         await _rebuild_parent_edge(session, rel_repo, res_repo, model_repo, resource, message)
@@ -148,7 +151,7 @@ async def _rebuild_eip_edges(
         ))
 
 
-# ── CLB 关系重建 ────────────────────────────────────────────────────────────
+# ── CLB / NLB 关系重建 ──────────────────────────────────────────────────────
 
 
 async def _rebuild_clb_edges(
@@ -160,6 +163,35 @@ async def _rebuild_clb_edges(
     message: CloudResourceMessage,
 ) -> None:
     """CLB: → VPC belongs_to（网络归属）+ 后端 ECS relates_to（负载均衡后端）。"""
+    await _rebuild_lb_edges(
+        session, rel_repo, res_repo, model_repo, resource, message, DESC_LB_BACKEND,
+    )
+
+
+async def _rebuild_nlb_edges(
+    session: AsyncSession,
+    rel_repo: CmdbRelationshipRepo,
+    res_repo: CmdbResourceRepo,
+    model_repo: CmdbModelRepo,
+    resource: CmdbResource,
+    message: CloudResourceMessage,
+) -> None:
+    """NLB: → VPC belongs_to（网络归属）+ 服务器组后端 ECS relates_to（服务器组后端）。"""
+    await _rebuild_lb_edges(
+        session, rel_repo, res_repo, model_repo, resource, message, DESC_SG_BACKEND,
+    )
+
+
+async def _rebuild_lb_edges(
+    session: AsyncSession,
+    rel_repo: CmdbRelationshipRepo,
+    res_repo: CmdbResourceRepo,
+    model_repo: CmdbModelRepo,
+    resource: CmdbResource,
+    message: CloudResourceMessage,
+    backend_desc: str,
+) -> None:
+    """负载均衡通用：→ VPC belongs_to（网络归属）+ 后端 ECS relates_to（diff 跳过无变更）。"""
     fields = resource.fields or {}
     provider = message.provider
     account = message.cloud_account
@@ -206,7 +238,7 @@ async def _rebuild_clb_edges(
         await rel_repo.create_relates_to(CmdbRelatesTo(
             source_id=resource.id,
             target_id=ecs_id,
-            description=DESC_LB_BACKEND,
+            description=backend_desc,
             synced_at=now,
             source="discovery",
         ))
