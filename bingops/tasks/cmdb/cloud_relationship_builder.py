@@ -29,6 +29,8 @@ logger = logging.getLogger(f"bingops.{__name__}")
 DESC_DEPLOYED_IN = "部署于"
 DESC_BIND_SG = "绑定安全组"
 DESC_BIND_ECS = "绑定"
+DESC_NETWORK_BELONG = "网络归属"
+DESC_LB_BACKEND = "负载均衡后端"
 
 
 async def rebuild_cloud_relationships(
@@ -49,6 +51,8 @@ async def rebuild_cloud_relationships(
         await _rebuild_ecs_edges(session, rel_repo, res_repo, model_repo, resource, message)
     elif model.code == "aliyun_eip":
         await _rebuild_eip_edges(session, rel_repo, res_repo, model_repo, resource, message)
+    elif model.code == "aliyun_clb":
+        await _rebuild_clb_edges(session, rel_repo, res_repo, model_repo, resource, message)
     else:
         # 通用 parent 关系重建（VSwitch → VPC 等，无复杂多边场景）
         await _rebuild_parent_edge(session, rel_repo, res_repo, model_repo, resource, message)
@@ -139,6 +143,70 @@ async def _rebuild_eip_edges(
             source_id=resource.id,
             target_id=target_id,
             description=DESC_BIND_ECS,
+            synced_at=now,
+            source="discovery",
+        ))
+
+
+# ── CLB 关系重建 ────────────────────────────────────────────────────────────
+
+
+async def _rebuild_clb_edges(
+    session: AsyncSession,
+    rel_repo: CmdbRelationshipRepo,
+    res_repo: CmdbResourceRepo,
+    model_repo: CmdbModelRepo,
+    resource: CmdbResource,
+    message: CloudResourceMessage,
+) -> None:
+    """CLB: → VPC belongs_to（网络归属）+ 后端 ECS relates_to（负载均衡后端）。"""
+    fields = resource.fields or {}
+    provider = message.provider
+    account = message.cloud_account
+
+    expected_parent_ids: set[int] = set()
+    vpc_id = fields.get("vpc_id")
+    if vpc_id:
+        vpc_model = await model_repo.get_model_by_code("aliyun_vpc")
+        if vpc_model:
+            vpc = await res_repo.get_by_provider_id(vpc_model.id, provider, vpc_id, account)
+            if vpc:
+                expected_parent_ids.add(vpc.id)
+
+    expected_relate_to_ids: set[int] = set()
+    ecs_model = await model_repo.get_model_by_code("aliyun_ecs")
+    if ecs_model:
+        for ecs_id in fields.get("_backend_ecs_ids") or []:
+            ecs = await res_repo.get_by_provider_id(ecs_model.id, provider, ecs_id, account)
+            if ecs:
+                expected_relate_to_ids.add(ecs.id)
+
+    current_parents = await rel_repo.get_parents(resource.id)
+    current_parent_ids = {p.parent_id for p in current_parents}
+    current_relations = await rel_repo.get_relations_from(resource.id)
+    current_relate_ids = {r.target_id for r in current_relations}
+
+    if expected_parent_ids == current_parent_ids and expected_relate_to_ids == current_relate_ids:
+        return
+
+    await rel_repo.delete_belongs_to_by_child(resource.id)
+    await rel_repo.delete_relates_to_by_source(resource.id)
+    now = datetime.now(timezone.utc)
+
+    for parent_id in expected_parent_ids:
+        await rel_repo.create_belongs_to(CmdbBelongsTo(
+            child_id=resource.id,
+            parent_id=parent_id,
+            description=DESC_NETWORK_BELONG,
+            synced_at=now,
+            source="discovery",
+        ))
+
+    for ecs_id in expected_relate_to_ids:
+        await rel_repo.create_relates_to(CmdbRelatesTo(
+            source_id=resource.id,
+            target_id=ecs_id,
+            description=DESC_LB_BACKEND,
             synced_at=now,
             source="discovery",
         ))
