@@ -169,31 +169,86 @@ ConfigMap/Secret 待"配置影响面分析"立项再议。
 
 > charge_type 的 options 与已录模型一致：
 > `[{"label":"包年包月","value":"prepaid"},{"label":"按量付费","value":"postpaid"}]`。
+> 分组沿用已录模型约定：基础信息 / 网络配置 / 计费信息 / 同步保留。
+> 分组名若与库内已录模型不一致，**以库内同名模型的 group_name 为准**。
 
 ### aliyun_rds
 
-engine(string) / engine_version(string) / instance_class(string) / storage_gb(number) /
-connection_string(string) / port(number) / charge_type(enum) / expired_at(date) /
-vswitch_id(string, 同步保留)。从属：aliyun_rds belongs_to aliyun_vswitch (1:n)。
+| 字段名 | code | 类型 | 分组 | 必填 | 说明 |
+|--------|------|------|------|------|------|
+| 数据库引擎 | engine | string | 基础信息 | 是 | MySQL / PostgreSQL / SQLServer |
+| 引擎版本 | engine_version | string | 基础信息 | 是 | 版本审计 |
+| 实例规格 | instance_class | string | 基础信息 | 是 | |
+| 存储容量(GB) | storage_gb | number | 基础信息 | 是 | |
+| 内网连接地址 | private_connection_string | string | 网络配置 | 否 | 命名对齐 gcp_cloudsql 的 private_ip/public_ip |
+| 公网连接地址 | public_connection_string | string | 网络配置 | 否 | 公网暴露面审计依据，未开通则不填 |
+| 端口 | port | number | 网络配置 | 否 | 内外网通常同端口 |
+| 付费类型 | charge_type | enum | 计费信息 | 否 | options 同已录模型 |
+| 到期时间 | expired_at | date | 计费信息 | 否 | 包年包月续费提醒依据 |
+| VSwitch ID | vswitch_id | string | 同步保留 | 否 | 建边依据（孤儿认领） |
+
+> 采集契约：主接口 `DescribeDBInstances`/`DescribeDBInstanceAttribute` **不返回连接地址**（后者仅含内网
+> ConnectionString）；内外网地址均需逐实例调 `DescribeDBInstanceNetInfo`，按 `NetType=Private/Public`
+> 拆分填充（同 cloud-sync-design §7 ACK enrichment 的二次调用模式）。实例规模小 + 30min 档，N+1 可接受；
+> 若后续规模变大，降为仅对内容哈希变化的实例补调。
+
+从属：aliyun_rds belongs_to aliyun_vswitch (n:1，网络归属)。
 
 ### aliyun_redis
 
-engine_version(string) / instance_class(string) / capacity_mb(number) /
-connection_string(string) / port(number) / vswitch_id(string, 同步保留)。
-从属：aliyun_redis belongs_to aliyun_vswitch (1:n)。
+| 字段名 | code | 类型 | 分组 | 必填 | 说明 |
+|--------|------|------|------|------|------|
+| 引擎版本 | engine_version | string | 基础信息 | 是 | 版本审计 |
+| 实例规格 | instance_class | string | 基础信息 | 是 | |
+| 容量(MB) | capacity_mb | number | 基础信息 | 是 | |
+| 连接地址 | connection_string | string | 网络配置 | 否 | |
+| 端口 | port | number | 网络配置 | 否 | |
+| VSwitch ID | vswitch_id | string | 同步保留 | 否 | 建边依据（孤儿认领） |
+
+从属：aliyun_redis belongs_to aliyun_vswitch (n:1，网络归属)。
+
+### aliyun_amqp（阿里云 RabbitMQ）
+
+| 字段名 | code | 类型 | 分组 | 必填 | 说明 |
+|--------|------|------|------|------|------|
+| 实例系列 | instance_type | enum | 基础信息 | 是 | options：`[{"label":"专业版","value":"professional"},{"label":"企业版","value":"enterprise"},{"label":"铂金版","value":"platinum"}]` |
+| 节点数 | support_node | number | 基础信息 | 否 | 单节点/镜像/集群 |
+| 队列上限 | max_queues | number | 基础信息 | 否 | 规格容量参考 |
+| TPS 上限 | max_tps | number | 基础信息 | 否 | 规格容量参考 |
+| 接入点 | endpoint | string | 网络配置 | 否 | AMQP 接入地址 |
+| 端口 | port | number | 网络配置 | 否 | 默认 5671/5672 |
+| 付费类型 | charge_type | enum | 计费信息 | 否 | options 同已录模型 |
+| 到期时间 | expired_at | date | 计费信息 | 否 | 包年包月续费提醒依据 |
+| VSwitch ID | vswitch_id | string | 同步保留 | 否 | 建边依据（孤儿认领） |
+
+从属：aliyun_amqp belongs_to aliyun_vswitch (n:1，网络归属)。
+> 采集 API：AMQP OpenAPI `ListInstances`；实例级同步，vhost/queue 不建模（粒度过细、churn 高，同不建 ReplicaSet 的纪律）。
 
 ### gcp_cloudsql
 
-engine(string) / engine_version(string) / tier(string) / storage_gb(number) /
-private_ip(string) / public_ip(string) / vpc_id(string, 同步保留)。
-从属：gcp_cloudsql belongs_to gcp_vpc (1:n)。
+| 字段名 | code | 类型 | 分组 | 必填 | 说明 |
+|--------|------|------|------|------|------|
+| 数据库引擎 | engine | string | 基础信息 | 是 | MYSQL / POSTGRES / SQLSERVER |
+| 引擎版本 | engine_version | string | 基础信息 | 是 | 版本审计 |
+| 机器规格 | tier | string | 基础信息 | 是 | |
+| 存储容量(GB) | storage_gb | number | 基础信息 | 是 | |
+| 内网 IP | private_ip | string | 网络配置 | 否 | |
+| 公网 IP | public_ip | string | 网络配置 | 否 | |
+| VPC ID | vpc_id | string | 同步保留 | 否 | 建边依据（孤儿认领） |
+
+从属：gcp_cloudsql belongs_to gcp_vpc (n:1，网络归属)。
 
 ### gcp_disk（GKE 跑有状态服务、需 PV 桥接对端时建）
 
-disk_type(string, pd-ssd/pd-balanced) / size_gb(number) / encrypted(boolean) /
-users(json, 挂载实例列表, 同步保留)。
-从属：gcp_disk belongs_to gcp_account (1:n)；
-关联：gcp_disk relates_to gcp_compute (n:n, 挂载于)、k8s_pv relates_to gcp_disk (1:1, kind=csi)。
+| 字段名 | code | 类型 | 分组 | 必填 | 说明 |
+|--------|------|------|------|------|------|
+| 磁盘类型 | disk_type | string | 基础信息 | 是 | pd-ssd / pd-balanced |
+| 容量(GB) | size_gb | number | 基础信息 | 是 | |
+| 是否加密 | encrypted | boolean | 基础信息 | 否 | |
+| 挂载实例 | users | json | 同步保留 | 否 | 挂载实例列表，建边依据 |
+
+从属：gcp_disk belongs_to gcp_account (n:1，账号归属，游离盘无实例父)；
+关联：gcp_disk relates_to gcp_compute (n:n，挂载于)、k8s_pv relates_to gcp_disk (1:1，CSI 桥接 kind=csi)。
 
 ---
 
