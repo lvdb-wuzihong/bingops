@@ -35,6 +35,7 @@ DESC_SG_BACKEND = "服务器组后端"
 DESC_BIND_EIP = "绑定 EIP"
 DESC_ACCOUNT_BELONG = "账号归属"
 DESC_MOUNT_ECS = "挂载于"
+DESC_MOUNT_POINT = "挂载点"
 
 
 async def rebuild_cloud_relationships(
@@ -63,6 +64,8 @@ async def rebuild_cloud_relationships(
         await _rebuild_nat_edges(session, rel_repo, res_repo, model_repo, resource, message)
     elif model.code == "aliyun_disk":
         await _rebuild_disk_edges(session, rel_repo, res_repo, model_repo, resource, message)
+    elif model.code == "aliyun_nas":
+        await _rebuild_nas_edges(session, rel_repo, res_repo, model_repo, resource, message)
     elif model.code == "aliyun_oss":
         # OSS → 云账号 belongs_to（账号归属），复用通用 parent 重建
         await _rebuild_parent_edge(
@@ -385,6 +388,73 @@ async def _rebuild_disk_edges(
             source_id=resource.id,
             target_id=target_id,
             description=DESC_MOUNT_ECS,
+            synced_at=now,
+            source="discovery",
+        ))
+
+
+# ── NAS 关系重建 ───────────────────────────────────────────────────────
+
+
+async def _rebuild_nas_edges(
+    session: AsyncSession,
+    rel_repo: CmdbRelationshipRepo,
+    res_repo: CmdbResourceRepo,
+    model_repo: CmdbModelRepo,
+    resource: CmdbResource,
+    message: CloudResourceMessage,
+) -> None:
+    """NAS: → 账号 belongs_to（账号归属）+ 挂载点 VPC relates_to（挂载点）。"""
+    fields = resource.fields or {}
+    provider = message.provider
+    account = message.cloud_account
+
+    # → 云账号（账号根节点存在时才建边，不存在则静默跳过）
+    expected_parent_ids: set[int] = set()
+    if message.parent_provider_id and message.parent_resource_type:
+        parent_model = await model_repo.get_model_by_code(message.parent_resource_type)
+        if parent_model:
+            parent = await res_repo.get_by_provider_id(
+                parent_model.id, provider, message.parent_provider_id, account,
+            )
+            if parent:
+                expected_parent_ids.add(parent.id)
+
+    # → 挂载点所在 VPC（可多个，按 _mount_vpc_ids 逐个解析）
+    expected_relate_to_ids: set[int] = set()
+    vpc_model = await model_repo.get_model_by_code("aliyun_vpc")
+    if vpc_model:
+        for vpc_id in fields.get("_mount_vpc_ids") or []:
+            vpc = await res_repo.get_by_provider_id(vpc_model.id, provider, vpc_id, account)
+            if vpc:
+                expected_relate_to_ids.add(vpc.id)
+
+    current_parents = await rel_repo.get_parents(resource.id)
+    current_parent_ids = {p.parent_id for p in current_parents}
+    current_relations = await rel_repo.get_relations_from(resource.id)
+    current_relate_ids = {r.target_id for r in current_relations}
+
+    if expected_parent_ids == current_parent_ids and expected_relate_to_ids == current_relate_ids:
+        return
+
+    await rel_repo.delete_belongs_to_by_child(resource.id)
+    await rel_repo.delete_relates_to_by_source(resource.id)
+    now = datetime.now(timezone.utc)
+
+    for parent_id in expected_parent_ids:
+        await rel_repo.create_belongs_to(CmdbBelongsTo(
+            child_id=resource.id,
+            parent_id=parent_id,
+            description=DESC_ACCOUNT_BELONG,
+            synced_at=now,
+            source="discovery",
+        ))
+
+    for target_id in expected_relate_to_ids:
+        await rel_repo.create_relates_to(CmdbRelatesTo(
+            source_id=resource.id,
+            target_id=target_id,
+            description=DESC_MOUNT_POINT,
             synced_at=now,
             source="discovery",
         ))
