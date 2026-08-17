@@ -33,6 +33,7 @@ DESC_NETWORK_BELONG = "网络归属"
 DESC_LB_BACKEND = "负载均衡后端"
 DESC_SG_BACKEND = "服务器组后端"
 DESC_BIND_EIP = "绑定 EIP"
+DESC_ACCOUNT_BELONG = "账号归属"
 
 
 async def rebuild_cloud_relationships(
@@ -59,6 +60,12 @@ async def rebuild_cloud_relationships(
         await _rebuild_nlb_edges(session, rel_repo, res_repo, model_repo, resource, message)
     elif model.code == "aliyun_nat_gateway":
         await _rebuild_nat_edges(session, rel_repo, res_repo, model_repo, resource, message)
+    elif model.code == "aliyun_oss":
+        # OSS → 云账号 belongs_to（账号归属），复用通用 parent 重建
+        await _rebuild_parent_edge(
+            session, rel_repo, res_repo, model_repo, resource, message,
+            description=DESC_ACCOUNT_BELONG,
+        )
     else:
         # 通用 parent 关系重建（VSwitch → VPC 等，无复杂多边场景）
         await _rebuild_parent_edge(session, rel_repo, res_repo, model_repo, resource, message)
@@ -74,6 +81,7 @@ async def _rebuild_parent_edge(
     model_repo: CmdbModelRepo,
     resource: CmdbResource,
     message: CloudResourceMessage,
+    description: str = DESC_DEPLOYED_IN,
 ) -> None:
     """通用：根据 message.parent_provider_id 建 belongs_to 边（diff 跳过无变更）。"""
     if not message.parent_provider_id or not message.parent_resource_type:
@@ -105,7 +113,7 @@ async def _rebuild_parent_edge(
     await rel_repo.create_belongs_to(CmdbBelongsTo(
         child_id=resource.id,
         parent_id=parent.id,
-        description=DESC_DEPLOYED_IN,
+        description=description,
         synced_at=now,
         source="discovery",
     ))
