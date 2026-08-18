@@ -33,17 +33,22 @@ def create_cloud_handler(session_factory: async_sessionmaker[AsyncSession]):
         """处理单条云资源同步消息。"""
         async with session_factory() as session:
             try:
-                # 同步任务门控：数据表驱动，未配置或禁用 → 跳过（默认拒绝）
+                # 同步任务门控：数据表驱动，默认拒绝。
+                # 同一账号可拆分多个任务（按资源类型独立调度），任一启用任务命中即放行
                 sync_repo = CmdbSyncTaskRepo(session)
-                task = await sync_repo.get_by_type_and_target("cloud", message.cloud_account)
-                if task is None or not task.enabled:
+                tasks = await sync_repo.list_by_type_and_target("cloud", message.cloud_account)
+                active_tasks = [t for t in tasks if t.enabled]
+                if not active_tasks:
                     logger.debug(
                         "Cloud sync task not configured or disabled, skipping",
                         extra={"cloud_account": message.cloud_account},
                     )
                     return
                 # resource_types 白名单过滤（空列表 = 同步全部类型）
-                if task.resource_types and message.resource_type not in task.resource_types:
+                if not any(
+                    not t.resource_types or message.resource_type in t.resource_types
+                    for t in active_tasks
+                ):
                     logger.debug(
                         "Cloud resource type not in sync task, skipping",
                         extra={"cloud_account": message.cloud_account, "resource_type": message.resource_type},

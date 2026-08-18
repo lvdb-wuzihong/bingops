@@ -20,17 +20,17 @@ class CmdbSyncTaskRepo:
         )
         return result.scalar_one_or_none()
 
-    async def get_by_type_and_target(
+    async def list_by_type_and_target(
         self, task_type: str, target_id: str,
-    ) -> CmdbSyncTask | None:
-        """根据任务类型 + 目标标识查询（唯一约束）。"""
+    ) -> list[CmdbSyncTask]:
+        """同一目标可有多个任务（按资源类型拆分调度），全部返回。"""
         result = await self._session.execute(
             select(CmdbSyncTask).where(
                 CmdbSyncTask.task_type == task_type,
                 CmdbSyncTask.target_id == target_id,
             )
         )
-        return result.scalar_one_or_none()
+        return list(result.scalars().all())
 
     async def list_tasks(
         self,

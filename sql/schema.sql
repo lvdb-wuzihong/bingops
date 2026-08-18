@@ -268,6 +268,7 @@ CREATE INDEX idx_cmdb_tag_key_value ON cmdb_resource_tags (tag_key, tag_value);
 CREATE INDEX idx_cmdb_tag_source    ON cmdb_resource_tags (source);
 
 -- 同步任务配置表（同步与否的唯一事实源：未配置或禁用 → 消费端直接跳过）
+-- 同一 (task_type, target_id) 允许多个任务：按资源类型拆分独立调度（v8 放开唯一约束）
 CREATE TABLE cmdb_sync_tasks (
     id              BIGSERIAL PRIMARY KEY,
     name            VARCHAR(256) NOT NULL,               -- 任务名称（显示用）
@@ -280,8 +281,7 @@ CREATE TABLE cmdb_sync_tasks (
     description     TEXT,
     last_synced_at  TIMESTAMPTZ,                         -- 最近一次同步时间
     created_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    updated_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    UNIQUE (task_type, target_id)
+    updated_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
 
 CREATE INDEX idx_cmdb_sync_task_type    ON cmdb_sync_tasks (task_type);

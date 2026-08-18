@@ -6,7 +6,7 @@ import logging
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bingops.core.exceptions import ConflictError, NotFoundError, ValidationError
+from bingops.core.exceptions import NotFoundError, ValidationError
 from bingops.models.cmdb.sync_task import CmdbSyncTask
 from bingops.repositories.cmdb.sync_task_repo import CmdbSyncTaskRepo
 from bingops.schemas.cmdb.sync_task import SyncTaskCreate, SyncTaskUpdate
@@ -57,14 +57,8 @@ async def create_sync_task(session: AsyncSession, payload: SyncTaskCreate) -> Cm
 
     repo = CmdbSyncTaskRepo(session)
 
-    # 唯一约束检查
-    existing = await repo.get_by_type_and_target(payload.task_type, payload.target_id)
-    if existing is not None:
-        raise ConflictError(
-            "CmdbSyncTask",
-            f"sync task already exists: {payload.task_type}/{payload.target_id}",
-        )
-
+    # 同一 (task_type, target_id) 允许多个任务（按资源类型拆分独立调度），
+    # 拆分时建议白名单互不重叠，避免重复采集
     task = CmdbSyncTask(
         name=payload.name,
         task_type=payload.task_type,
