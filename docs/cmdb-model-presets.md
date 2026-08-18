@@ -15,16 +15,17 @@
 
 ---
 
-## 1. 录入进度对账（2026-08-08 库内实测）
+## 1. 录入进度对账（2026-08-18 库内实测）
 
 | 项 | 进度 | 说明 |
 |-----|------|------|
 | 分类 | 4 个 ✅ | 阿里云 / K8S / 谷歌云 / DNS；中间件分组用到再建 |
-| 模型 | 28 个 | 待建：`apisix_route`（§3.1）；**待删：`k8s_ingress`（id=34，0 字段，决策不建）**；`selfhosted_*` 在用哪个建哪个（§3.2） |
-| 字段 | **154 条已录** | 8 处偏差已修 6，剩 2 见 §2 |
-| 关系约束 | **46/52 已录** | 46 条全部正确；余 3 条被 apisix_route 阻塞，见 §4 头部注 |
+| 模型 | 31 个 | 待建：`apisix_route`（§3.1）；**待删：`k8s_ingress`（id=34，0 字段，决策不建）**；`selfhosted_*` 在用哪个建哪个（§3.2） |
+| 字段 | 154 + 云模型批次 | 剩 2 见 §2；**字段疑惑对账见 §2.5** |
+| 关系约束 | **49/52 已录** | 全部正确；余 3 条被 apisix_route 阻塞，见 §4 头部注 |
 | 选项库 | 0 ✅ 已清空 | API 标 deprecated 休眠 |
-| 实例/边 | 0 | K8s 链路已重构完成（附录 B #16），部署消费后即产出；云链路待第二批 |
+| 实例/边 | 生产产出中 | K8s 链路已产出；**云链路第二批完成**（附录 B #23）：15 类采集器 + 消费端边重建上线，含删除对账 |
+| 同步任务 | 多任务支持 | v8 迁移放开 (task_type, target_id) 唯一约束；消费端门控 = 启用任务并集（附录 B #24） |
 
 ---
 
@@ -40,6 +41,19 @@
 
 > 检查过无问题的项：全部枚举字段 options 与值域清单一致；EIP/CLB/云盘/NAS 的
 > charge_type 只放 prepaid/postpaid（无 spot）是**正确裁剪**，这些资源不存在抢占式。
+
+### 2.5 字段疑惑对账（2026-08-18，云链路落地后实测）
+
+> 原则：采集器只填 API 能给的字段；给不了的不臆造（留空待人工）。疑似字段逐条裁决：
+
+| # | 模型.字段 | 结论 | 理由 |
+|---|-----------|------|------|
+| 1 | aliyun_amqp.`support_node` | **建议删** | 预置期臆想字段：说明写「单节点/镜像/集群」却是 number 类型，自相矛盾；RabbitMQ OpenAPI（ListInstances/GetInstance，SDK 解包逐项核对）**不返回任何节点数**，产品规格只暴露系列+TPS/队列上限，节点拓扑云侧托管不可见 |
+| 2 | aliyun_amqp.`port` | **建议删**（或留人工） | API 不返回；5671/5672 是协议常识非实例规格，采集器不填 |
+| 3 | aliyun_rds.`connection_string` | **待决策** | 库内录的是单字段，附录 A 原设计是 private/public 一对；采集器现语义「内网默认、公网存在时覆盖」有歧义。二选一：接受现状并明确语义为「主连接地址」，或按附录 A 新增 `public_connection_string`（新增不违反不可变纪律） |
+| 4 | aliyun_oss.`used_size_gb` | 保留，注明 | GetBucketStat 约小时级延迟，不做实时容量监控依据 |
+| 5 | aliyun_nas.`used_size_gb` | 保留 | MeteredSize 实时计量，无延迟问题 |
+| 6 | aliyun_amqp.`instance_type` | 保留（已修映射） | 官方值域 PROFESSIONAL/ENTERPRISE/VIP/SERVERLESS；采集器 VIP→platinum、SERVERLESS→serverless（模型枚举需 UI 补 serverless option）；Edition 是部署架构不作回退 |
 
 ---
 
@@ -211,12 +225,12 @@ ConfigMap/Secret 待"配置影响面分析"立项再议。
 
 | 字段名 | code | 类型 | 分组 | 必填 | 说明 |
 |--------|------|------|------|------|------|
-| 实例系列 | instance_type | enum | 基础信息 | 是 | options：`[{"label":"专业版","value":"professional"},{"label":"企业版","value":"enterprise"},{"label":"铂金版","value":"platinum"}]` |
-| 节点数 | support_node | number | 基础信息 | 否 | 单节点/镜像/集群 |
+| 实例系列 | instance_type | enum | 基础信息 | 是 | options：`[{"label":"专业版","value":"professional"},{"label":"企业版","value":"enterprise"},{"label":"铂金版","value":"platinum"},{"label":"Serverless版","value":"serverless"}]`（**serverless option 待 UI 补录**；API 值域 PROFESSIONAL/ENTERPRISE/VIP/SERVERLESS，采集器 VIP→platinum 映射） |
+| ~~节点数~~ | ~~support_node~~ | - | - | - | **建议删**（§2.5 #1：API 不返回，臆想字段） |
 | 队列上限 | max_queues | number | 基础信息 | 否 | 规格容量参考 |
 | TPS 上限 | max_tps | number | 基础信息 | 否 | 规格容量参考 |
 | 接入点 | endpoint | string | 网络配置 | 否 | AMQP 接入地址 |
-| 端口 | port | number | 网络配置 | 否 | 默认 5671/5672 |
+| ~~端口~~ | ~~port~~ | - | - | - | **建议删**（§2.5 #2：API 不返回） |
 | 付费类型 | charge_type | enum | 计费信息 | 否 | options 同已录模型 |
 | 到期时间 | expired_at | date | 计费信息 | 否 | 包年包月续费提醒依据 |
 | VSwitch ID | vswitch_id | string | 同步保留 | 否 | 建边依据（孤儿认领） |
@@ -266,7 +280,7 @@ ConfigMap/Secret 待"配置影响面分析"立项再议。
 | 8 | 规则/条目级 diff | rules_hash（SG/防火墙）、snat_hash/dnat_hash（NAT）不变则跳过 change_log，变更按 rule_id/entry_id 对齐输出 |
 | 9 | ~~Informer 新增 Watch Kind~~ **已确认无需开发** | informer 已支持 13 种资源（含 persistentvolumes/persistentvolumeclaims），配置启用即可；endpoints 虽支持但纪律是不建模——配置里不启用；不支持 Ingress（与不建 Ingress 的决策一致） |
 | 10 | APISIX 采集通道二选一 | CRD 模式：Informer 加 Watch ApisixRoute/ApisixUpstream，走现有 Topic；Admin API 模式：轻量拉取器 5–10min，只读 Key，凭据不进 git |
-| 11 | 云采集器新增存储 API | DescribeDisks（含游离盘）/ DescribeFileSystems + 挂载点；降频策略同网络资源 1h 级 |
+| 11 | ~~云采集器新增存储 API~~ **✅ 已完成** | DescribeDisks（含游离盘）/ DescribeFileSystems + 挂载点已落地（aliyun_disk / aliyun_nas 适配器）；降频按任务拆分实现（附录 B #24） |
 | 12 | builder 新增桥接/派生规则 | volume_handle→aliyun_disk/aliyun_nas；apisix_route.upstream_ref→k8s_service；route.host↔dns_record FQDN；**NAT DNAT 条目按 internal_ip 匹配 ECS 派生 `aliyun_ecs relates_to aliyun_eip (kind=dnat)` 边**（公网暴露面审计依赖） |
 | 13 | 应用关联物化（后端表，非模型） | 新增 `cmdb_app_resources` 显式关联表；tag_key='app' 自动归集写入 source='tag'，手动绑定 source='manual'；应用只绑服务级 CI（workload/中间件/RDS/入口），不绑 Pod/Node |
 | 14 | **K8s 消息契约以 cmdb-informer 为准重写** | 实测对比（`cmdb-informer/internal/message/types.go` 的 `MQMessage` vs `kafka_messages.py` 的 `K8sResourceMessage`）两边结构性不一致：字段名（cluster_id vs cluster、resource_type vs kind）、消息结构（Go 嵌套 `resource.{uid,name,labels,annotations,spec,status,raw}` vs Python 平铺）、Python 缺 `message_id`（幂等去重）/`sync_type`/`snapshot` 事件/`old_resource`。重构时照 Go 侧 `MQMessage` 重写 Python schema，Go 生产者不动；**已确认** `resource_type` 取值为小写复数（pods/services/deployments/statefulsets/daemonsets/nodes/namespaces/persistentvolumes/persistentvolumeclaims 等），消费端映射表按此格式编写 |
@@ -278,3 +292,5 @@ ConfigMap/Secret 待"配置影响面分析"立项再议。
 | 20 | 实例关系 API 单父校验 | 手工创建 belongs_to 边时 service 层校验：该 child 已有父则拒绝（或提示替换）；边表现状只有 UNIQUE(child_id, parent_id) 防重复边，不防一子多父 |
 | 21 | 高 churn Kind（pod）边写入策略 | pod 边变更**不写 change_log**（discovery 数据审计价值≈0，防噪音淹没）；pod 删除靠边表外键 ON DELETE CASCADE 自动级联，无需主动删边；builder 对 pod 按事件增量 upsert，禁止全量重建（防死元组/VACUUM 压力） |
 | 22 | **ReplicaSet 层不建模**（决策 2026-08-11） | pod ownerRef 实际经过 RS 层，但**边扁平化为 pod→workload**（RS 名剥离尾部 `-hash` 定位 Deployment，kubectl 同款做法）；RS 痕迹保留在 `pod.owner_kind/owner_name` 字段供排障追溯。不建模理由：RS 无独立管理价值（完全被 Deployment 掌控）、每次发版新建 RS 旧 RS 僵尸留存（churn 翻倍）、informer 未 watch replicasets。发版拓扑（新旧 RS 共存）属运行时视图，归 kubectl/控制台 |
+| 23 | **云链路第二批完成**（2026-08-18） | 采集器 15 类 fetcher 全部落地：account（配置驱动零 API，建树根）/ ecs / vpc / vswitch / security_group / eip / clb / nlb / nat_gateway / oss / disk / nas / rds / redis / amqp；消费端边重建分支对齐库内关系约束描述（网络归属/账号归属/挂载于/绑定 EIP/挂载点/负载均衡后端/服务器组后端）；默认集派生自 _FETCHERS（空白名单 = 全部已实现，未实现类型不再进默认集）；SDK 方法名/响应结构以解包 wheel 核对为准（防 AttributeError 类事故）；未决：k8s_pv→disk/nas CSI 桥接、NAT DNAT 派生边（依赖 #1 kind 列）、dns_record 解析目标边 |
+| 24 | **同步任务多目标拆分**（v8 迁移，2026-08-18） | 删除 (task_type, target_id) 唯一约束：同一云账号可按资源类型拆多个任务独立调度（如计算 5min / 网络 1h）；消费端门控改为「任一启用任务白名单命中即放行」（空=全部）；拆分建议白名单互不重叠避免重复采集；同账号多任务可并发，cron 错开防限流 |

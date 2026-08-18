@@ -196,33 +196,57 @@ async def _handle_delete(session: AsyncSession, message: CloudResourceMessage) -
 async def _sync_cloud_tags(
     session: AsyncSession, resource: CmdbResource, cloud_tags: dict[str, str],
 ) -> None:
-    """同步云标签到资源标签表。
+    """差异同步云标签到资源标签表（source='cloud'）。
 
     规则：
-    - source='cloud' 的标签会被覆盖（云 API 是权威来源）
+    - 新增 / 改值 / 清除失效标签（云 API 是权威来源，空 dict = 清空云标签）
     - source='manual' 的标签不受影响（手动优先）
+    - 增/删/改各记一条 change_type='tag' 审计（云上标签变更也是变更）
     """
     from bingops.models.cmdb.tag import CmdbResourceTag
     from bingops.repositories.cmdb.tag_repo import CmdbTagRepo
 
-    if not cloud_tags:
-        return
-
     tag_repo = CmdbTagRepo(session)
     now = datetime.now(timezone.utc)
+    # 归一化：统一转小写，raw_key 保留原始大小写
+    incoming = {
+        (raw_key or "").lower(): (raw_key, value)
+        for raw_key, value in (cloud_tags or {}).items()
+    }
 
-    for raw_key, value in cloud_tags.items():
-        # 归一化：统一转小写
-        normalized_key = raw_key.lower()
-        tag = CmdbResourceTag(
-            resource_id=resource.id,
-            tag_key=normalized_key,
-            tag_value=value,
-            source="cloud",
-            raw_key=raw_key,
-            synced_at=now,
-        )
-        await tag_repo.add_resource_tag(tag)
+    existing = {t.tag_key: t for t in await tag_repo.list_cloud_tags(resource.id)}
+
+    for key, tag in existing.items():
+        if key not in incoming:
+            await session.delete(tag)
+            await _record_change(
+                session, resource.id, resource.model_id, "tag",
+                field=key, old_value=tag.tag_value, new_value=None,
+            )
+        elif tag.tag_value != incoming[key][1]:
+            old_value = tag.tag_value
+            tag.tag_value = incoming[key][1]
+            tag.raw_key = incoming[key][0]
+            tag.synced_at = now
+            await _record_change(
+                session, resource.id, resource.model_id, "tag",
+                field=key, old_value=old_value, new_value=tag.tag_value,
+            )
+
+    for key, (raw_key, value) in incoming.items():
+        if key not in existing:
+            await tag_repo.add_resource_tag(CmdbResourceTag(
+                resource_id=resource.id,
+                tag_key=key,
+                tag_value=value,
+                source="cloud",
+                raw_key=raw_key,
+                synced_at=now,
+            ))
+            await _record_change(
+                session, resource.id, resource.model_id, "tag",
+                field=key, old_value=None, new_value=value,
+            )
 
 
 async def _record_change(
@@ -230,13 +254,20 @@ async def _record_change(
     resource_id: int,
     model_id: int,
     change_type: str,
+    *,
+    field: str | None = None,
+    old_value: str | None = None,
+    new_value: str | None = None,
 ) -> None:
-    """记录变更日志。"""
+    """记录变更日志（tag 类变更携带 field/old/new 明细）。"""
     log_repo = CmdbChangeLogRepo(session)
     log = CmdbChangeLog(
         resource_id=resource_id,
         model_id=model_id,
         change_type=change_type,
         source="discovery",
+        field=field,
+        old_value=old_value,
+        new_value=new_value,
     )
     await log_repo.create(log)
