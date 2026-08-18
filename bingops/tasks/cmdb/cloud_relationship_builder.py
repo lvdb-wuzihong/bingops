@@ -90,6 +90,12 @@ async def rebuild_cloud_relationships(
             session, rel_repo, res_repo, model_repo, resource, message,
             description=DESC_ACCOUNT_BELONG,
         )
+    elif model.code == "gcp_compute":
+        # GCE → 子网 belongs_to（网络归属），复用通用 parent 重建
+        await _rebuild_parent_edge(
+            session, rel_repo, res_repo, model_repo, resource, message,
+            description=DESC_NETWORK_BELONG,
+        )
     else:
         # 通用 parent 关系重建（VSwitch → VPC 等，无复杂多边场景）
         await _rebuild_parent_edge(session, rel_repo, res_repo, model_repo, resource, message)
