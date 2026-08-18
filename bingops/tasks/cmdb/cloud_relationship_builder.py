@@ -78,6 +78,12 @@ async def rebuild_cloud_relationships(
             session, rel_repo, res_repo, model_repo, resource, message,
             description=DESC_NETWORK_BELONG,
         )
+    elif model.code == "aliyun_amqp":
+        # AMQP → VSwitch belongs_to（网络归属），复用通用 parent 重建
+        await _rebuild_parent_edge(
+            session, rel_repo, res_repo, model_repo, resource, message,
+            description=DESC_NETWORK_BELONG,
+        )
     elif model.code == "aliyun_oss":
         # OSS → 云账号 belongs_to（账号归属），复用通用 parent 重建
         await _rebuild_parent_edge(
