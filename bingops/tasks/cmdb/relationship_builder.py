@@ -17,6 +17,8 @@
 - #39 service → pod（selector 匹配）
 - #43 pod → pvc（使用存储）
 - #53 pvc → pv（绑定）
+- #35/#36 node → aliyun_ecs/gcp_compute（承载于，跨云桥接：instance_id 精确匹配优先、internal_ip 兜底；
+  云主机入库时反向孤儿认领，见 adopt_node_host_edges）
 
 跨云桥接边（#15/#16/#37/#38/#40/#41/#46/#47）依赖云侧资源，由云链路 v2 重建。
 
@@ -35,6 +37,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bingops.models.cmdb.relationship import CmdbBelongsTo, CmdbRelatesTo
 from bingops.models.cmdb.resource import CmdbResource
 from bingops.models.cmdb.tag import CmdbResourceTag
+from bingops.repositories.cmdb.model_repo import CmdbModelRepo
 from bingops.repositories.cmdb.relationship_repo import CmdbRelationshipRepo
 from bingops.repositories.cmdb.resource_repo import CmdbResourceRepo
 from bingops.repositories.cmdb.tag_repo import CmdbTagRepo
@@ -50,6 +53,7 @@ DESC_SCHEDULED_ON = "调度于"
 DESC_SELECTOR_MATCH = "selector 匹配"
 DESC_USES_STORAGE = "使用存储"
 DESC_PVC_BOUND = "绑定"
+DESC_HOSTED_ON = "承载于"
 
 # Pod 属主中可直接映射为 k8s_workload 的 Kind
 _WORKLOAD_KINDS = {"Deployment", "StatefulSet", "DaemonSet"}
@@ -85,6 +89,8 @@ async def rebuild_k8s_relationships(
         cluster = await _find_cluster(res_repo, model_ids, cluster_id)
         if cluster:
             await _add_belongs_to(rel_repo, resource.id, cluster.id, DESC_CLUSTER_BELONG)
+        # 跨云桥接：节点 → 云主机（#35/#36）
+        await rebuild_node_host_edge(session, resource)
 
     elif model_code == "k8s_pv":
         cluster = await _find_cluster(res_repo, model_ids, cluster_id)
@@ -115,6 +121,95 @@ async def remove_resource_edges(session: AsyncSession, resource_id: int) -> None
     removed = await rel_repo.delete_relations_of(resource_id)
     if removed:
         logger.debug("Resource edges removed on delete", extra={"resource_id": resource_id, "count": removed})
+
+
+# ── K8s 节点 ↔ 云主机桥接边（#35/#36 承载于）──────────────────────
+
+
+async def _resolve_host_for_node(
+    res_repo: CmdbResourceRepo, model_repo: CmdbModelRepo, node: CmdbResource,
+) -> CmdbResource | None:
+    """按 instance_id 精确匹配优先、internal_ip 兜底解析节点承载的云主机。"""
+    host_code = {"aliyun": "aliyun_ecs", "gcp": "gcp_compute"}.get(node.provider)
+    if not host_code:
+        return None  # 自建集群无云主机对端
+    model = await model_repo.get_model_by_code(host_code)
+    if model is None:
+        return None
+    fields = node.fields or {}
+    instance_id = fields.get("instance_id")
+    if instance_id:
+        if node.provider == "aliyun":
+            # ACK providerID 解析出 i-xxx，即 ECS provider_id
+            host = await res_repo.find_by_provider_id_any_account(
+                model.id, node.provider, instance_id,
+            )
+        else:
+            # GKE providerID gce://project/zone/name 解析出实例名
+            host = await res_repo.find_by_name_any_account(
+                model.id, node.provider, instance_id,
+            )
+        if host is not None:
+            return host
+    internal_ip = fields.get("internal_ip")
+    if internal_ip:
+        hosts = await res_repo.list_by_field_value(
+            model.id, node.provider, "private_ip", internal_ip,
+        )
+        if hosts:
+            return hosts[0]
+    return None
+
+
+async def rebuild_node_host_edge(session: AsyncSession, node: CmdbResource) -> None:
+    """k8s_node → aliyun_ecs/gcp_compute relates_to 承载于（槽位整包替换，diff 跳过）。"""
+    rel_repo = CmdbRelationshipRepo(session)
+    res_repo = CmdbResourceRepo(session)
+    model_repo = CmdbModelRepo(session)
+
+    host = await _resolve_host_for_node(res_repo, model_repo, node)
+    expected = {host.id} if host is not None else set()
+
+    current = [
+        r for r in await rel_repo.get_relations_from(node.id)
+        if r.description == DESC_HOSTED_ON
+    ]
+    if {r.target_id for r in current} == expected:
+        return
+    for r in current:
+        await rel_repo.delete_relates_to(r.id)
+    if host is not None:
+        await rel_repo.create_relates_to(CmdbRelatesTo(
+            source_id=node.id,
+            target_id=host.id,
+            description=DESC_HOSTED_ON,
+            synced_at=datetime.now(timezone.utc),
+            source="discovery",
+        ))
+
+
+async def adopt_node_host_edges(
+    session: AsyncSession, host: CmdbResource, instance_key: str, internal_ip: str | None,
+) -> None:
+    """云主机入库后反向孤儿认领：为已存在但还没建边的节点补承载于边。"""
+    model_repo = CmdbModelRepo(session)
+    res_repo = CmdbResourceRepo(session)
+    node_model = await model_repo.get_model_by_code("k8s_node")
+    if node_model is None:
+        return
+    nodes: list[CmdbResource] = []
+    if instance_key:
+        nodes.extend(await res_repo.list_by_field_value(
+            node_model.id, host.provider, "instance_id", instance_key,
+        ))
+    if internal_ip:
+        for n in await res_repo.list_by_field_value(
+            node_model.id, host.provider, "internal_ip", internal_ip,
+        ):
+            if n.id not in {x.id for x in nodes}:
+                nodes.append(n)
+    for node in nodes:
+        await rebuild_node_host_edge(session, node)
 
 
 # ── Pod 从属边 ─────────────────────────────────────────────────────────────────

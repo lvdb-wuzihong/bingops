@@ -22,6 +22,7 @@ from bingops.repositories.cmdb.model_repo import CmdbModelRepo
 from bingops.repositories.cmdb.relationship_repo import CmdbRelationshipRepo
 from bingops.repositories.cmdb.resource_repo import CmdbResourceRepo
 from bingops.schemas.cmdb.kafka_messages import CloudResourceMessage
+from bingops.tasks.cmdb.relationship_builder import adopt_node_host_edges
 
 logger = logging.getLogger(f"bingops.{__name__}")
 
@@ -57,6 +58,11 @@ async def rebuild_cloud_relationships(
 
     if model.code == "aliyun_ecs":
         await _rebuild_ecs_edges(session, rel_repo, res_repo, model_repo, resource, message)
+        # 反向孤儿认领：节点先于主机入库时，主机到位后补承载于边
+        # （放在分支而非 _rebuild_ecs_edges 尾部：边无变化时后者会早退）
+        await adopt_node_host_edges(
+            session, resource, resource.provider_id, (resource.fields or {}).get("private_ip"),
+        )
     elif model.code == "aliyun_eip":
         await _rebuild_eip_edges(session, rel_repo, res_repo, model_repo, resource, message)
     elif model.code == "aliyun_clb":
@@ -98,6 +104,10 @@ async def rebuild_cloud_relationships(
         await _rebuild_parent_edge(
             session, rel_repo, res_repo, model_repo, resource, message,
             description=DESC_NETWORK_BELONG,
+        )
+        # 反向孤儿认领：GKE 节点 providerID 解析出实例名，按 name + IP 补承载于边
+        await adopt_node_host_edges(
+            session, resource, resource.name, (resource.fields or {}).get("private_ip"),
         )
     elif model.code == "gcp_vpc":
         # VPC → 项目账号根节点 belongs_to（项目归属），复用通用 parent 重建

@@ -103,7 +103,7 @@ def _extract_node(obj: dict, _rt: str) -> tuple[dict, str]:
         "cpu_capacity": _parse_cpu((status_obj.get("capacity") or {}).get("cpu")),
         "memory_capacity_mb": _parse_memory_mb((status_obj.get("capacity") or {}).get("memory")),
         "instance_id": _parse_instance_id(spec.get("providerID")) or labels.get("alibabacloud.com/instance-id"),
-        "nodepool_id": labels.get("alibabacloud.com/nodepool-id"),
+        "nodepool_id": labels.get("alibabacloud.com/nodepool-id") or labels.get("cloud.google.com/gke-nodepool"),
     }
     status = "not_ready"
     for cond in status_obj.get("conditions") or []:

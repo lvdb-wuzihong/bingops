@@ -137,6 +137,48 @@ class CmdbResourceRepo:
         result = await self._session.execute(query)
         return result.scalars().first()
 
+    async def find_by_provider_id_any_account(
+        self, model_id: int, provider: str, provider_id: str,
+    ) -> CmdbResource | None:
+        """跨账号按 provider_id 查（K8s 节点→云主机桥接：节点侧不知云账号）。"""
+        result = await self._session.execute(
+            select(CmdbResource).where(
+                CmdbResource.model_id == model_id,
+                CmdbResource.provider == provider,
+                CmdbResource.provider_id == provider_id,
+                CmdbResource.deleted_at.is_(None),
+            )
+        )
+        return result.scalars().first()
+
+    async def find_by_name_any_account(
+        self, model_id: int, provider: str, name: str,
+    ) -> CmdbResource | None:
+        """跨账号按 name 查（GKE providerID 解析出的是实例名而非数字 ID）。"""
+        result = await self._session.execute(
+            select(CmdbResource).where(
+                CmdbResource.model_id == model_id,
+                CmdbResource.provider == provider,
+                CmdbResource.name == name,
+                CmdbResource.deleted_at.is_(None),
+            )
+        )
+        return result.scalars().first()
+
+    async def list_by_field_value(
+        self, model_id: int, provider: str, field_code: str, value: str,
+    ) -> list[CmdbResource]:
+        """按 fields JSONB 字段值查（internal_ip/private_ip 等桥接匹配）。"""
+        result = await self._session.execute(
+            select(CmdbResource).where(
+                CmdbResource.model_id == model_id,
+                CmdbResource.provider == provider,
+                CmdbResource.deleted_at.is_(None),
+                CmdbResource.fields[field_code].as_string() == value,
+            )
+        )
+        return list(result.scalars().all())
+
     async def create(self, resource: CmdbResource) -> CmdbResource:
         self._session.add(resource)
         await self._session.flush()
