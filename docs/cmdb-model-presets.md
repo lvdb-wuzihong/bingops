@@ -24,7 +24,7 @@
 | 字段 | 154 + 云模型批次 | 剩 2 见 §2；**字段疑惑对账见 §2.5** |
 | 关系约束 | **49/52 已录** | 全部正确；余 3 条被 apisix_route 阻塞，见 §4 头部注 |
 | 选项库 | 0 ✅ 已清空 | API 标 deprecated 休眠 |
-| 实例/边 | 生产产出中 | K8s 链路已产出；**云链路第二批完成**（附录 B #23）：15 类采集器 + 消费端边重建上线，含删除对账；**GCP 链路启动**（附录 B #25）：gcp_compute 生产跑通（代理 + compute.readonly scope），gcp_vpc 已实现 |
+| 实例/边 | 生产产出中 | K8s 链路已产出；**云链路第二批完成**（附录 B #23）；**GCP 链路启动**（附录 B #25）：compute/vpc/subnet/firewall 已实现；**DNS 链路完成**（附录 B #26）：dns_zone/dns_record 双厂商适配器 |
 | 同步任务 | 多任务支持 | v8 迁移放开 (task_type, target_id) 唯一约束；消费端门控 = 启用任务并集（附录 B #24） |
 
 ---
@@ -294,4 +294,5 @@ ConfigMap/Secret 待"配置影响面分析"立项再议。
 | 22 | **ReplicaSet 层不建模**（决策 2026-08-11） | pod ownerRef 实际经过 RS 层，但**边扁平化为 pod→workload**（RS 名剥离尾部 `-hash` 定位 Deployment，kubectl 同款做法）；RS 痕迹保留在 `pod.owner_kind/owner_name` 字段供排障追溯。不建模理由：RS 无独立管理价值（完全被 Deployment 掌控）、每次发版新建 RS 旧 RS 僵尸留存（churn 翻倍）、informer 未 watch replicasets。发版拓扑（新旧 RS 共存）属运行时视图，归 kubectl/控制台 |
 | 23 | **云链路第二批完成**（2026-08-18） | 采集器 15 类 fetcher 全部落地：account（配置驱动零 API，建树根）/ ecs / vpc / vswitch / security_group / eip / clb / nlb / nat_gateway / oss / disk / nas / rds / redis / amqp；消费端边重建分支对齐库内关系约束描述（网络归属/账号归属/挂载于/绑定 EIP/挂载点/负载均衡后端/服务器组后端）；默认集派生自 _FETCHERS（空白名单 = 全部已实现，未实现类型不再进默认集）；SDK 方法名/响应结构以解包 wheel 核对为准（防 AttributeError 类事故）；未决：k8s_pv→disk/nas CSI 桥接、NAT DNAT 派生边（依赖 #1 kind 列）、dns_record 解析目标边 |
 | 24 | **同步任务多目标拆分**（v8 迁移，2026-08-18） | 删除 (task_type, target_id) 唯一约束：同一云账号可按资源类型拆多个任务独立调度（如计算 5min / 网络 1h）；消费端门控改为「任一启用任务白名单命中即放行」（空=全部）；拆分建议白名单互不重叠避免重复采集；同账号多任务可并发，cron 错开防限流 |
-| 25 | **GCP 链路启动**（2026-08-19） | gcp_compute 生产跑通 + gcp_vpc 已实现。关键事实：① 大陆出网不通 googleapis.com，采集器部署配 HTTPS_PROXY/NO_PROXY=.aliyuncs.com 仅代理 GCP 流量；② **OAuth scope 必须 compute.readonly**（cloud-platform.read-only 会被 Compute API 拒 403，token 有效/IAM 足够也没用）；③ OS 三级推断：licenses 家族项目 slug→许可证名关键词→Disks.get 磁盘 sourceImage（GKE 节点靠第三级，如 ubuntu-gke-2404-...）；④ gcp_vpc 全局资源不受 regions 限制（同 OSS），parent=gcp_account（项目归属）；⑤ 待办：gcp_subnet / gcp_firewall / gcp_disk / gcp_cloudsql；gcp_account 根节点适配器未实现，VPC「项目归属」边暂静默跳过，根节点落地后下轮自动补边 |
+| 25 | **GCP 链路启动**（2026-08-19） | gcp_compute 生产跑通 + gcp_vpc/gcp_subnet/gcp_firewall 已实现。关键事实：① 大陆出网不通 googleapis.com，采集器部署配 HTTPS_PROXY/NO_PROXY=.aliyuncs.com 仅代理 GCP 流量；② **OAuth scope 必须 compute.readonly**（cloud-platform.read-only 会被 Compute API 拒 403），DNS 另需 ndev.clouddns.readonly（多 scope token 两边都满足）；③ OS 三级推断：licenses 家族项目 slug→许可证名关键词→Disks.get 磁盘 sourceImage；④ GCP 名称型 provider_id 约定（vpc/subnet 用名称，compute 用数字 ID）；⑤ 待办：gcp_disk / gcp_cloudsql / gcp_account 根节点 |
+| 26 | **DNS 链路完成**（2026-08-19） | dns_zone/dns_record 跨厂商共用模型 code，aliyun（alidns：DescribeDomains/DescribeDomainRecords）与 gcp（Cloud DNS：ManagedZones/ResourceRecordSets）双适配器落地。归一化约定照附录 B #19：name 存 FQDN（@→裸域、*→*.zone、GCP 尾点剥离）；aliyun provider_id=RecordId、gcp 合成 {zone}:{fqdn}:{type}:{value}；MX/SRV 优先级 GCP 嵌 rrdatas 需拆分、TXT 去引号；aliyun Line→policy_type simple/line+policy_key；raw json 保留原始数据；SOA 不建；GCP zone_type 取 visibility（public/private）。record→zone belongs_to「解析于」消费端已接；**未决**：解析目标边（#45-47，A 按 IP 匹配 EIP、CNAME 按 hostname 匹配 CLB/NLB）二期；PrivateZone（pvtz）用到再录 |

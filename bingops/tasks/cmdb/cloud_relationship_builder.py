@@ -36,6 +36,7 @@ DESC_BIND_EIP = "绑定 EIP"
 DESC_ACCOUNT_BELONG = "账号归属"
 DESC_PROJECT_BELONG = "项目归属"
 DESC_FIREWALL_BELONG = "防火墙归属"
+DESC_RESOLVED_IN = "解析于"
 DESC_MOUNT_ECS = "挂载于"
 DESC_MOUNT_POINT = "挂载点"
 
@@ -115,6 +116,12 @@ async def rebuild_cloud_relationships(
         await _rebuild_parent_edge(
             session, rel_repo, res_repo, model_repo, resource, message,
             description=DESC_FIREWALL_BELONG,
+        )
+    elif model.code == "dns_record":
+        # 解析记录 → zone belongs_to（解析于），跨厂商共用模型 code
+        await _rebuild_parent_edge(
+            session, rel_repo, res_repo, model_repo, resource, message,
+            description=DESC_RESOLVED_IN,
         )
     else:
         # 通用 parent 关系重建（VSwitch → VPC 等，无复杂多边场景）
