@@ -20,9 +20,9 @@
 | 项 | 进度 | 说明 |
 |-----|------|------|
 | 分类 | 4 个 ✅ | 阿里云 / K8S / 谷歌云 / DNS；中间件分组用到再建 |
-| 模型 | 31 个 | 待建：`apisix_route`（§3.1）；**待删：`k8s_ingress`（id=34，0 字段，决策不建）**；`selfhosted_*` 在用哪个建哪个（§3.2） |
+| 模型 | 33 个 | 待建：`apisix_route`（§3.1）、`gcp_redis`（附录 A 规格就绪待录）；**待删：`k8s_ingress`（0 字段，决策不建）**；`selfhosted_*` 在用哪个建哪个（§3.2） |
 | 字段 | 154 + 云模型批次 | 剩 2 见 §2；**字段疑惑对账见 §2.5** |
-| 关系约束 | **49/52 已录** | 全部正确；余 3 条被 apisix_route 阻塞，见 §4 头部注 |
+| 关系约束 | **53/56 已录** | 全部正确；余 3 条被 apisix_route 阻塞，见 §4 头部注 |
 | 选项库 | 0 ✅ 已清空 | API 标 deprecated 休眠 |
 | 实例/边 | 生产产出中 | K8s 链路已产出；**云链路第二批完成**（附录 B #23）；**GCP 链路启动**（附录 B #25）：compute/vpc/subnet/firewall 已实现；**DNS 链路完成**（附录 B #26）：dns_zone/dns_record 双厂商适配器 |
 | 同步任务 | 多任务支持 | v8 迁移放开 (task_type, target_id) 唯一约束；消费端门控 = 启用任务并集（附录 B #24） |
@@ -102,11 +102,11 @@ ConfigMap/Secret 待"配置影响面分析"立项再议。
 
 ---
 
-## 4. 模型关系约束（cmdb_model_relations 录入清单，45/52）
+## 4. 模型关系约束（cmdb_model_relations 录入清单，53/56）
 
 > relation_type 只有 belongs_to（从属/树）与 relates_to（关联/图）两种，业务语义写在关系名。
 >
-> 录入进度（2026-08-08）：46 条全部正确（#42 方向已修正为 `k8s_pvc→k8s_pv`）；
+> 录入进度（2026-08-19）：53 条全部正确（本轮新增 gcp_cloudsql/gcp_disk 4 条）；
 > **阻塞 3**：#20/#40/#48 等 apisix_route 建好；#49/#50/#51 按原策略缓录。
 
 ### 4.1 从属关系（belongs_to）
@@ -147,6 +147,8 @@ ConfigMap/Secret 待"配置影响面分析"立项再议。
 | 26 | k8s_pod | k8s_namespace | n:1 | 命名空间归属（裸 Pod 兜底） |
 | 27 | dns_record | dns_zone | n:1 | 域归属 |
 | 52 | aliyun_oss | aliyun_account | n:1 | 账号归属 |
+| 53 | gcp_cloudsql | gcp_vpc | n:1 | 网络归属 |
+| 54 | gcp_disk | gcp_account | n:1 | 账号归属（游离盘无实例父，挂账号） |
 
 ### 4.2 关联关系（relates_to）
 
@@ -169,6 +171,8 @@ ConfigMap/Secret 待"配置影响面分析"立项再议。
 | 42 | k8s_pvc | k8s_pv | 1:1 | 绑定（volume_name 匹配） |
 | 43 | k8s_pv | aliyun_disk | 1:1 | CSI 桥接（volume_handle = DiskId，kind=csi） |
 | 44 | k8s_pv | aliyun_nas | n:1 | CSI 桥接（volume_handle 解析文件系统 ID） |
+| 55 | gcp_disk | gcp_compute | n:n | 挂载于（users 列表匹配） |
+| 56 | k8s_pv | gcp_disk | 1:1 | CSI 桥接（kind=csi） |
 | 45 | dns_record | aliyun_eip | n:n | 解析目标（A 记录按 IP） |
 | 46 | dns_record | aliyun_clb | n:n | 解析目标（A 记录按 IP） |
 | 47 | dns_record | aliyun_nlb | n:n | 解析目标（CNAME 按 hostname） |
@@ -238,7 +242,7 @@ ConfigMap/Secret 待"配置影响面分析"立项再议。
 从属：aliyun_amqp belongs_to aliyun_vswitch (n:1，网络归属)。
 > 采集 API：AMQP OpenAPI `ListInstances`；实例级同步，vhost/queue 不建模（粒度过细、churn 高，同不建 ReplicaSet 的纪律）。
 
-### gcp_cloudsql
+### gcp_cloudsql ✅ 已录
 
 | 字段名 | code | 类型 | 分组 | 必填 | 说明 |
 |--------|------|------|------|------|------|
@@ -252,7 +256,23 @@ ConfigMap/Secret 待"配置影响面分析"立项再议。
 
 从属：gcp_cloudsql belongs_to gcp_vpc (n:1，网络归属)。
 
-### gcp_disk（GKE 跑有状态服务、需 PV 桥接对端时建）
+### gcp_redis（Memorystore for Redis）
+
+| 字段名 | code | 类型 | 分组 | 必填 | 说明 |
+|--------|------|------|------|------|------|
+| 引擎版本 | engine_version | string | 基础信息 | 是 | redisVersion `REDIS_7_2` → 存 `7.2`（剥前缀下划线转点） |
+| 部署形态 | tier | enum | 基础信息 | 是 | options：`[{"label":"基础版","value":"BASIC"},{"label":"高可用","value":"STANDARD_HA"}]` |
+| 容量(MB) | capacity_mb | number | 基础信息 | 是 | memorySizeGb×1024，**对齐 aliyun_redis 同 code** |
+| 连接地址 | connection_string | string | 网络配置 | 否 | host（仅内网 IP；Memorystore 不暴露公网） |
+| 端口 | port | number | 网络配置 | 否 | 默认 6379 |
+| VPC ID | vpc_id | string | 同步保留 | 否 | authorizedNetwork（VPC 名称），建边依据（孤儿认领） |
+
+从属：gcp_redis belongs_to gcp_vpc (n:1，网络归属)。
+> 采集 API：Cloud Redis `projects.locations.instances.list`（location 用 `-` 一次拉全）；
+> state 映射 READY→running / CREATING/UPDATING/DELETING→maintenance / SUSPENDED→stopped；
+> OAuth scope 需补 `cloud-platform.read-only`（compute.readonly 不覆盖 Redis API）。
+
+### gcp_disk ✅ 已录（GKE 跑有状态服务、需 PV 桥接对端）
 
 | 字段名 | code | 类型 | 分组 | 必填 | 说明 |
 |--------|------|------|------|------|------|
