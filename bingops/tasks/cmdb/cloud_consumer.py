@@ -169,6 +169,10 @@ async def _handle_upsert(session: AsyncSession, message: CloudResourceMessage) -
     # 同步云标签（source='cloud'，不覆盖手动标签）
     await _sync_cloud_tags(session, resource, message.cloud_tags)
 
+    # 应用关联物化（#13）：按 app 标签重算 tag 派生关联
+    from bingops.services.cmdb import business_app_service
+    await business_app_service.refresh_app_links_from_tags(session, resource)
+
     # 重建云资源关系（ECS→VPC/VSwitch/SG 等）
     await rebuild_cloud_relationships(session, resource, message)
 

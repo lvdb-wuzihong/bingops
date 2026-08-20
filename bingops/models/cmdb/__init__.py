@@ -1,5 +1,6 @@
 """CMDB ORM 模型导出。"""
 
+from bingops.models.cmdb.app_resource import CmdbAppResource
 from bingops.models.cmdb.business_app import CmdbBusinessApp
 from bingops.models.cmdb.change_log import CmdbChangeLog
 from bingops.models.cmdb.model import (
@@ -27,5 +28,6 @@ __all__ = [
     "CmdbTagDefinition",
     "CmdbResourceTag",
     "CmdbBusinessApp",
+    "CmdbAppResource",
     "CmdbChangeLog",
 ]

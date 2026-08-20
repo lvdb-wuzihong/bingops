@@ -244,6 +244,10 @@ async def _handle_upsert(
     # 差异同步 K8s labels → 资源标签
     await _sync_k8s_labels(session, resource, payload.labels)
 
+    # 应用关联物化（#13）：按 k8s:app 标签重算 tag 派生关联
+    from bingops.services.cmdb import business_app_service
+    await business_app_service.refresh_app_links_from_tags(session, resource)
+
     # 重建关系边
     await rebuild_k8s_relationships(session, resource, message, model_ids)
 

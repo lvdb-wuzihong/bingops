@@ -39,6 +39,7 @@ DESC_PROJECT_BELONG = "项目归属"
 DESC_FIREWALL_BELONG = "防火墙归属"
 DESC_RESOLVED_IN = "域归属"
 DESC_DNAT_EXPOSE = "DNAT 暴露"
+DESC_RESOLVE_TARGET = "解析目标"
 
 # relates_to kind 槽位：同对资源多种语义边共存（v9 迁移）
 KIND_BIND = "bind"
@@ -70,10 +71,28 @@ async def rebuild_cloud_relationships(
         )
     elif model.code == "aliyun_eip":
         await _rebuild_eip_edges(session, rel_repo, res_repo, model_repo, resource, message)
+        # 反向孤儿认领：A 记录指向该 EIP IP 时补解析目标边
+        await _adopt_dns_target_edges(
+            session, rel_repo, res_repo, model_repo,
+            message.provider, message.cloud_account,
+            (resource.fields or {}).get("ip_address") or "", "A",
+        )
     elif model.code == "aliyun_clb":
         await _rebuild_clb_edges(session, rel_repo, res_repo, model_repo, resource, message)
+        # 反向孤儿认领：A 记录指向该 CLB 地址时补解析目标边
+        await _adopt_dns_target_edges(
+            session, rel_repo, res_repo, model_repo,
+            message.provider, message.cloud_account,
+            (resource.fields or {}).get("address") or "", "A",
+        )
     elif model.code == "aliyun_nlb":
         await _rebuild_nlb_edges(session, rel_repo, res_repo, model_repo, resource, message)
+        # 反向孤儿认领：CNAME 指向该 NLB dns_name 时补解析目标边
+        await _adopt_dns_target_edges(
+            session, rel_repo, res_repo, model_repo,
+            message.provider, message.cloud_account,
+            (resource.fields or {}).get("dns_name") or "", "CNAME",
+        )
     elif model.code == "aliyun_nat_gateway":
         await _rebuild_nat_edges(session, rel_repo, res_repo, model_repo, resource, message)
     elif model.code == "aliyun_disk":
@@ -133,11 +152,13 @@ async def rebuild_cloud_relationships(
             description=DESC_FIREWALL_BELONG,
         )
     elif model.code == "dns_record":
-        # 解析记录 → zone belongs_to（解析于），跨厂商共用模型 code
+        # 解析记录 → zone belongs_to（域归属），跨厂商共用模型 code
         await _rebuild_parent_edge(
             session, rel_repo, res_repo, model_repo, resource, message,
             description=DESC_RESOLVED_IN,
         )
+        # 解析目标边（#45-47）：A 按 IP 匹配 EIP/CLB，CNAME 按 hostname 匹配 NLB
+        await _rebuild_record_target_edges(session, rel_repo, res_repo, model_repo, resource)
     else:
         # 通用 parent 关系重建（VSwitch → VPC 等，无复杂多边场景）
         await _rebuild_parent_edge(session, rel_repo, res_repo, model_repo, resource, message)
@@ -462,6 +483,85 @@ async def _rebuild_dnat_edges(
             synced_at=now,
             source="discovery",
         ))
+
+
+# ── DNS 解析目标边（#45-47）──────────────────────────────────────
+
+
+async def _rebuild_record_target_edges(
+    session: AsyncSession,
+    rel_repo: CmdbRelationshipRepo,
+    res_repo: CmdbResourceRepo,
+    model_repo: CmdbModelRepo,
+    record: CmdbResource,
+) -> None:
+    """dns_record → EIP/CLB（A 按 IP）/ NLB（CNAME 按 hostname）relates_to 解析目标。
+
+    槽位级管理（description=解析目标），diff 跳过无变更。
+    """
+    fields = record.fields or {}
+    record_type = fields.get("record_type")
+    value = fields.get("value") or ""
+    if not value:
+        return
+
+    expected: set[int] = set()
+    candidates: list[tuple[str, str]] = []
+    if record_type == "A":
+        candidates = [("aliyun_eip", "ip_address"), ("aliyun_clb", "address")]
+    elif record_type == "CNAME":
+        candidates = [("aliyun_nlb", "dns_name")]
+    for code, field_code in candidates:
+        model = await model_repo.get_model_by_code(code)
+        if model is None:
+            continue
+        for target in await res_repo.list_by_field_value(model.id, record.provider, field_code, value):
+            if target.cloud_account == record.cloud_account:
+                expected.add(target.id)
+
+    current = {
+        r.target_id
+        for r in await rel_repo.get_relations_from(record.id)
+        if r.description == DESC_RESOLVE_TARGET
+    }
+    if expected == current:
+        return
+    for r in [r for r in await rel_repo.get_relations_from(record.id)
+              if r.description == DESC_RESOLVE_TARGET]:
+        await rel_repo.delete_relates_to(r.id)
+    now = datetime.now(timezone.utc)
+    for target_id in sorted(expected):
+        await rel_repo.create_relates_to(CmdbRelatesTo(
+            source_id=record.id,
+            target_id=target_id,
+            description=DESC_RESOLVE_TARGET,
+            synced_at=now,
+            source="discovery",
+        ))
+
+
+async def _adopt_dns_target_edges(
+    session: AsyncSession,
+    rel_repo: CmdbRelationshipRepo,
+    res_repo: CmdbResourceRepo,
+    model_repo: CmdbModelRepo,
+    provider: str,
+    account: str,
+    value: str,
+    record_type: str,
+) -> None:
+    """目标资源（EIP/CLB/NLB）入库后反向孤儿认领：重算匹配记录的解析目标边。"""
+    if not value:
+        return
+    record_model = await model_repo.get_model_by_code("dns_record")
+    if record_model is None:
+        return
+    for record in await res_repo.list_by_field_value(record_model.id, provider, "value", value):
+        if record.cloud_account != account:
+            continue
+        if (record.fields or {}).get("record_type") != record_type:
+            continue
+        await _rebuild_record_target_edges(session, rel_repo, res_repo, model_repo, record)
 
 
 # ── 云盘关系重建 ───────────────────────────────────────────────────────

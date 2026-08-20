@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import logging
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bingops.core.exceptions import ConflictError, NotFoundError
+from bingops.core.exceptions import ConflictError, NotFoundError, ValidationError
 from bingops.models.cmdb.business_app import CmdbBusinessApp
 from bingops.repositories.cmdb.business_app_repo import CmdbBusinessAppRepo
 from bingops.schemas.cmdb.business_app import BusinessAppCreate, BusinessAppUpdate
@@ -91,3 +92,119 @@ async def delete_app(session: AsyncSession, app_id: int) -> None:
     await repo.delete(app)
     await session.commit()
     logger.info("CMDB business app deleted", extra={"app_id": app_id})
+
+
+# ── 应用-资源关联物化（附录 B #13）───────────────────────────────
+
+# 应用只绑服务级 CI（workload/中间件/RDS/入口），不绑 Pod/Node/ECS 等基础设施层
+SERVICE_LEVEL_MODEL_CODES = {
+    "k8s_workload", "k8s_service",
+    "aliyun_rds", "aliyun_redis", "aliyun_amqp", "aliyun_clb", "aliyun_nlb",
+    "gcp_cloudsql", "gcp_redis",
+}
+
+# 应用标签键：云/手动标签用 app，K8s labels 经归一化带 k8s: 前缀
+APP_TAG_KEYS = ("app", "k8s:app")
+
+
+async def refresh_app_links_from_tags(session: AsyncSession, resource) -> None:
+    """按资源当前标签重算 tag 派生应用关联（不 commit，随消费事务提交）。
+
+    仅服务级 CI 参与；manual 关联不受影响。
+    """
+    from bingops.models.cmdb.model import CmdbModel
+    from bingops.models.cmdb.tag import CmdbResourceTag
+    from bingops.repositories.cmdb.app_resource_repo import CmdbAppResourceRepo
+
+    model = await session.get(CmdbModel, resource.model_id)
+    if model is None or model.code not in SERVICE_LEVEL_MODEL_CODES:
+        return
+
+    rows = await session.execute(
+        select(CmdbResourceTag).where(
+            CmdbResourceTag.resource_id == resource.id,
+            CmdbResourceTag.tag_key.in_(APP_TAG_KEYS),
+        )
+    )
+    values = {t.tag_value for t in rows.scalars().all() if t.tag_value}
+    app_ids: set[int] = set()
+    if values:
+        result = await session.execute(
+            select(CmdbBusinessApp).where(CmdbBusinessApp.app_code.in_(values))
+        )
+        app_ids = {a.id for a in result.scalars().all()}
+
+    await CmdbAppResourceRepo(session).replace_tag_links(resource.id, app_ids)
+
+
+async def bind_resource(session: AsyncSession, app_id: int, resource_id: int) -> None:
+    """手动绑定应用与资源（service-level CI 校验）。"""
+    from bingops.models.cmdb.model import CmdbModel
+    from bingops.repositories.cmdb.app_resource_repo import CmdbAppResourceRepo
+    from bingops.repositories.cmdb.resource_repo import CmdbResourceRepo
+
+    await get_app(session, app_id)
+    resource = await CmdbResourceRepo(session).get_by_id(resource_id)
+    if resource is None:
+        raise NotFoundError("CmdbResource", str(resource_id))
+    model = await session.get(CmdbModel, resource.model_id)
+    if model is None or model.code not in SERVICE_LEVEL_MODEL_CODES:
+        raise ValidationError(
+            f"resource model '{model.code if model else '?'}' is not service-level; "
+            "apps only bind workload/service/middleware/db/entry CIs"
+        )
+    repo = CmdbAppResourceRepo(session)
+    if await repo.get_link(app_id, resource_id) is None:
+        await repo.add_manual(app_id, resource_id)
+    await session.commit()
+
+
+async def unbind_resource(session: AsyncSession, app_id: int, resource_id: int) -> None:
+    """解绑应用与资源。"""
+    from bingops.repositories.cmdb.app_resource_repo import CmdbAppResourceRepo
+
+    link = await CmdbAppResourceRepo(session).get_link(app_id, resource_id)
+    if link is not None:
+        await CmdbAppResourceRepo(session).remove_link(link)
+    await session.commit()
+
+
+async def list_app_resources(session: AsyncSession, app_id: int) -> list[dict]:
+    """应用下的资源列表（join 资源与模型 code）。"""
+    from bingops.models.cmdb.app_resource import CmdbAppResource
+    from bingops.models.cmdb.model import CmdbModel
+    from bingops.models.cmdb.resource import CmdbResource
+
+    await get_app(session, app_id)
+    rows = await session.execute(
+        select(CmdbAppResource, CmdbResource, CmdbModel)
+        .join(CmdbResource, CmdbResource.id == CmdbAppResource.resource_id)
+        .join(CmdbModel, CmdbModel.id == CmdbResource.model_id)
+        .where(CmdbAppResource.app_id == app_id)
+    )
+    return [
+        {
+            "resource_id": res.id,
+            "name": res.name,
+            "provider": res.provider,
+            "model_code": model.code,
+            "status": res.status,
+            "source": link.source,
+        }
+        for link, res, model in rows.all()
+    ]
+
+
+async def list_resource_apps(session: AsyncSession, resource_id: int) -> list[dict]:
+    """资源归属的应用列表。"""
+    from bingops.models.cmdb.app_resource import CmdbAppResource
+
+    rows = await session.execute(
+        select(CmdbAppResource, CmdbBusinessApp)
+        .join(CmdbBusinessApp, CmdbBusinessApp.id == CmdbAppResource.app_id)
+        .where(CmdbAppResource.resource_id == resource_id)
+    )
+    return [
+        {"app_id": app.id, "app_code": app.app_code, "name": app.name, "source": link.source}
+        for link, app in rows.all()
+    ]

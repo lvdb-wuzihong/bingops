@@ -201,6 +201,18 @@ CREATE TABLE cmdb_business_apps (
 CREATE INDEX idx_cmdb_app_team  ON cmdb_business_apps (team);
 CREATE INDEX idx_cmdb_app_owner ON cmdb_business_apps (owner);
 
+-- 应用-资源显式关联表（#13 物化：tag 自动归集 + manual 手动绑定）
+CREATE TABLE cmdb_app_resources (
+    id          BIGSERIAL PRIMARY KEY,
+    app_id      BIGINT       NOT NULL REFERENCES cmdb_business_apps(id) ON DELETE CASCADE,
+    resource_id BIGINT       NOT NULL REFERENCES cmdb_resources(id) ON DELETE CASCADE,
+    source      VARCHAR(16)  NOT NULL DEFAULT 'tag',
+    created_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    UNIQUE (app_id, resource_id)
+);
+
+CREATE INDEX idx_cmdb_app_resource_resource ON cmdb_app_resources (resource_id);
+
 -- 从属关系表（层级归属，树形结构）
 CREATE TABLE cmdb_belongs_to (
     id              BIGSERIAL PRIMARY KEY,

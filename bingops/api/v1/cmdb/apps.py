@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Query
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bingops.api.dependencies import get_db_session, require_permission
@@ -125,3 +126,56 @@ async def delete_app(
     """删除业务应用。"""
     await business_app_service.delete_app(session, app_id)
     return success_response(message="Business app deleted")
+
+
+# ── 应用-资源关联（#13 物化）──────────────────────────────────
+
+
+class ResourceBindRequest(BaseModel):
+    resource_id: int
+
+
+@router.get("/{app_id}/resources")
+async def list_app_resources(
+    app_id: int,
+    session: AsyncSession = Depends(get_db_session),
+    _user: User = require_permission("cmdb_app:list"),
+):
+    """应用下的资源列表。"""
+    items = await business_app_service.list_app_resources(session, app_id)
+    return success_response(data=items)
+
+
+@router.post("/{app_id}/resources", status_code=201)
+async def bind_resource(
+    app_id: int,
+    payload: ResourceBindRequest,
+    session: AsyncSession = Depends(get_db_session),
+    _user: User = require_permission("cmdb_app:update"),
+):
+    """手动绑定应用与资源（仅服务级 CI）。"""
+    await business_app_service.bind_resource(session, app_id, payload.resource_id)
+    return success_response(message="Resource bound to app", http_status=201)
+
+
+@router.delete("/{app_id}/resources/{resource_id}")
+async def unbind_resource(
+    app_id: int,
+    resource_id: int,
+    session: AsyncSession = Depends(get_db_session),
+    _user: User = require_permission("cmdb_app:update"),
+):
+    """解绑应用与资源。"""
+    await business_app_service.unbind_resource(session, app_id, resource_id)
+    return success_response(message="Resource unbound from app")
+
+
+@router.get("/by-resource/{resource_id}")
+async def list_resource_apps(
+    resource_id: int,
+    session: AsyncSession = Depends(get_db_session),
+    _user: User = require_permission("cmdb_app:list"),
+):
+    """资源归属的应用列表。"""
+    items = await business_app_service.list_resource_apps(session, resource_id)
+    return success_response(data=items)
