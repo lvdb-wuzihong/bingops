@@ -25,6 +25,18 @@ class CmdbResourceRepo:
         )
         return result.scalar_one_or_none()
 
+    async def list_by_ids(self, resource_ids: list[int]) -> list[CmdbResource]:
+        """按 ID 集合批量查资源（排除软删；拓扑子图节点装载用）。"""
+        if not resource_ids:
+            return []
+        result = await self._session.execute(
+            select(CmdbResource).where(
+                CmdbResource.id.in_(resource_ids),
+                CmdbResource.deleted_at.is_(None),
+            )
+        )
+        return list(result.scalars().all())
+
     async def get_by_provider_id(
         self,
         model_id: int,

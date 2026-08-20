@@ -184,3 +184,23 @@ async def get_relations_to(
         for r in relations
     ]
     return success_response(data=items)
+
+
+# ── 拓扑子图 ──────────────────────────────────────────────────────────────
+
+
+@router.get("/resources/{resource_id}/topology")
+async def get_topology(
+    resource_id: int,
+    depth: int = Query(default=2, ge=1, le=3, description="展开跳数，硬顶 3"),
+    session: AsyncSession = Depends(get_db_session),
+    _user: User = require_permission("cmdb_resource:list"),
+):
+    """查询以资源为中心双向展开的拓扑子图（nodes + edges 一次返回）。
+
+    节点为瘦身负载（无 fields JSONB）；边带 relation_type/description/kind，
+    belongs_to 方向为 source=child → target=parent。节点数达上限后
+    truncated=true，前端可提示缩小 depth。
+    """
+    data = await relationship_service.get_topology(session, resource_id, depth)
+    return success_response(data=data)

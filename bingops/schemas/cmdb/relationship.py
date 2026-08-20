@@ -53,3 +53,42 @@ class RelatesToResponse(BaseModel):
     synced_at: datetime | None = None
     source: str
     created_at: datetime
+
+
+# ── 拓扑子图 ─────────────────────────────────────────────────────────────────
+
+
+class TopologyNode(BaseModel):
+    """拓扑图节点（瘦身负载，不含 fields）。"""
+
+    id: int
+    name: str
+    model_id: int
+    model_code: str | None = None
+    model_name: str | None = None
+    provider: str | None = None
+    status: str
+    region: str | None = None
+    is_center: bool = False
+
+
+class TopologyEdge(BaseModel):
+    """拓扑图边（保留方向：belongs_to child→parent；relates_to source→target）。"""
+
+    id: int
+    relation_type: str = Field(description="belongs_to | relates_to")
+    source_id: int
+    target_id: int
+    description: str | None = None
+    kind: str | None = None
+    source: str | None = None
+
+
+class TopologyResponse(BaseModel):
+    """拓扑子图响应。"""
+
+    center_id: int
+    depth: int
+    truncated: bool = Field(default=False, description="高扇出截断标记")
+    nodes: list[TopologyNode]
+    edges: list[TopologyEdge]

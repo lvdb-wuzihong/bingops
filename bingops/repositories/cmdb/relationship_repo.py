@@ -5,7 +5,7 @@ v2 表结构：关系语义通过 description 表达，无 relation_type 列。
 
 from __future__ import annotations
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bingops.models.cmdb.relationship import CmdbBelongsTo, CmdbRelatesTo
@@ -162,3 +162,37 @@ class CmdbRelationshipRepo:
         if total:
             await self._session.flush()
         return total
+
+    # ── 拓扑子图批量查询 ───────────────────────────────────────────────────────
+
+    async def list_belongs_to_involving(
+        self, resource_ids: list[int],
+    ) -> list[CmdbBelongsTo]:
+        """批量查任一端点在给定集合内的 belongs_to 边（拓扑 BFS 展开用）。"""
+        if not resource_ids:
+            return []
+        result = await self._session.execute(
+            select(CmdbBelongsTo).where(
+                or_(
+                    CmdbBelongsTo.child_id.in_(resource_ids),
+                    CmdbBelongsTo.parent_id.in_(resource_ids),
+                )
+            )
+        )
+        return list(result.scalars().all())
+
+    async def list_relates_to_involving(
+        self, resource_ids: list[int],
+    ) -> list[CmdbRelatesTo]:
+        """批量查任一端点在给定集合内的 relates_to 边（拓扑 BFS 展开用）。"""
+        if not resource_ids:
+            return []
+        result = await self._session.execute(
+            select(CmdbRelatesTo).where(
+                or_(
+                    CmdbRelatesTo.source_id.in_(resource_ids),
+                    CmdbRelatesTo.target_id.in_(resource_ids),
+                )
+            )
+        )
+        return list(result.scalars().all())
