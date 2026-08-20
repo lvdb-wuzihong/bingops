@@ -8,6 +8,7 @@ v1 硬编码风格，仅保证可运行不报错；待附录 B #16 云链路段�
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timezone
 
@@ -130,7 +131,9 @@ async def _handle_upsert(session: AsyncSession, message: CloudResourceMessage) -
         return
 
     if existing:
-        # 更新
+        # 更新：先算字段级 diff 记审计，再覆盖
+        was_revived = existing.deleted_at is not None
+        changes = _diff_resource(existing, message, attributes)
         existing.name = message.name
         existing.region = message.region
         existing.zone = message.zone
@@ -143,8 +146,19 @@ async def _handle_upsert(session: AsyncSession, message: CloudResourceMessage) -
         await repo.update(existing)
         resource = existing
 
-        await _record_change(session, resource.id, model.id, "update")
-        logger.info("Cloud resource updated", extra={"provider_id": message.provider_id})
+        if was_revived:
+            await _record_change(
+                session, resource.id, model.id, "update",
+                field="deleted_at", old_value="soft-deleted", new_value=None,
+            )
+        for field_name, old_v, new_v in changes:
+            await _record_change(
+                session, resource.id, model.id, "update",
+                field=field_name, old_value=old_v, new_value=new_v,
+            )
+        # 仅云标签变化时字段 diff 为空（tag 审计另行记录），不写空 update 行
+        logger.info("Cloud resource updated",
+                    extra={"provider_id": message.provider_id, "changed_fields": len(changes)})
     else:
         # 新建
         resource = CmdbResource(
@@ -251,6 +265,34 @@ async def _sync_cloud_tags(
                 session, resource.id, resource.model_id, "tag",
                 field=key, old_value=None, new_value=value,
             )
+
+
+def _fmt_value(value) -> str | None:
+    """审计值序列化：标量原样，复合类型 JSON。"""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+
+
+def _diff_resource(
+    existing: CmdbResource, message: CloudResourceMessage, new_fields: dict,
+) -> list[tuple[str, str | None, str | None]]:
+    """通用列 + fields JSONB 逐键 diff（变更审计明细）。"""
+    changes: list[tuple[str, str | None, str | None]] = []
+    for col in ("name", "region", "zone", "status"):
+        old = getattr(existing, col) or None
+        new = getattr(message, col) or None
+        if old != new:
+            changes.append((col, old, new))
+    old_fields = existing.fields or {}
+    for key in sorted(set(old_fields) | set(new_fields)):
+        old_v = old_fields.get(key)
+        new_v = new_fields.get(key)
+        if old_v != new_v:
+            changes.append((key, _fmt_value(old_v), _fmt_value(new_v)))
+    return changes
 
 
 async def _record_change(

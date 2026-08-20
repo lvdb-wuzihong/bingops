@@ -20,7 +20,7 @@
 | 项 | 进度 | 说明 |
 |-----|------|------|
 | 分类 | 4 个 ✅ | 阿里云 / K8S / 谷歌云 / DNS；中间件分组用到再建 |
-| 模型 | 33 个 | 待建：`apisix_route`（§3.1）、`gcp_redis`（附录 A 规格就绪待录）；**待删：`k8s_ingress`（0 字段，决策不建）**；`selfhosted_*` 在用哪个建哪个（§3.2） |
+| 模型 | 33 个 | 待建：`k8s_ingress`（**在用，决策反转 2026-08-20**：保留建模，前置 cmdb-informer 加 Ingress watch）、`gcp_redis`（附录 A 规格就绪待录）；`apisix_route` 缓做（§3.1）；`selfhosted_*` 在用哪个建哪个（§3.2） |
 | 字段 | 154 + 云模型批次 | 剩 2 见 §2；**字段疑惑对账见 §2.5** |
 | 关系约束 | **53/56 已录** | 全部正确；余 3 条被 apisix_route 阻塞，见 §4 头部注 |
 | 选项库 | 0 ✅ 已清空 | API 标 deprecated 休眠 |
@@ -59,9 +59,11 @@
 
 ## 3. 待建模型字段表
 
-### 3.1 APISIX路由 `apisix_route`（K8S 分组，替代 k8s_ingress）
+### 3.1 APISIX路由 `apisix_route`（K8S 分组）——**缓做**
 
-> 流量链路第三跳：dns_record → NLB → APISIX(k8s_service) → apisix_route → 后端 k8s_service。
+> **决策反转（2026-08-20）**：ingress 仍在用，apisix 未铺开 → 流量入口跳先建 `k8s_ingress`，apisix_route 及其 3 条关系（#20/#40/#48）缓做。
+> k8s_ingress 建模前置：cmdb-informer（Go）加 Ingress watch；bingops 侧字段规格/extractor/关系分支可先备。
+> 原 APISIX 设计保留：流量链路第三跳 dns_record → NLB → APISIX(k8s_service) → apisix_route → 后端 k8s_service；
 > 数据来源二选一（附录 B #10）：CRD 模式或 Admin API 模式，模型与关系两种模式通用。
 
 | 字段名 | code | 类型 | 分组 | 必填 | 说明 |
