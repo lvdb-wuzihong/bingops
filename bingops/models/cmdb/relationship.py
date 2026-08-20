@@ -50,6 +50,8 @@ class CmdbRelatesTo(Base):
         BigInteger, ForeignKey("cmdb_resources.id", ondelete="CASCADE"), nullable=False,
     )
     description: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    # 边语义槽位：同一对资源可共存多种语义边（如 EIP→ECS 直绑 bind / DNAT 暴露 dnat）
+    kind: Mapped[str] = mapped_column(String(32), nullable=False, default="")
     attributes: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     source: Mapped[str] = mapped_column(String(32), nullable=False, default="discovery")

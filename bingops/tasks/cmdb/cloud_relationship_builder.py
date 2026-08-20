@@ -38,6 +38,11 @@ DESC_ACCOUNT_BELONG = "账号归属"
 DESC_PROJECT_BELONG = "项目归属"
 DESC_FIREWALL_BELONG = "防火墙归属"
 DESC_RESOLVED_IN = "域归属"
+DESC_DNAT_EXPOSE = "DNAT 暴露"
+
+# relates_to kind 槽位：同对资源多种语义边共存（v9 迁移）
+KIND_BIND = "bind"
+KIND_DNAT = "dnat"
 DESC_MOUNT_ECS = "挂载于"
 DESC_MOUNT_POINT = "挂载点"
 
@@ -213,17 +218,20 @@ async def _rebuild_eip_edges(
                     expected_relate_to_ids.add(ecs.id)
 
     current_relations = await rel_repo.get_relations_from(resource.id)
-    current_relate_ids = {r.target_id for r in current_relations}
+    current_relate_ids = {
+        r.target_id for r in current_relations if r.kind == KIND_BIND
+    }
     if expected_relate_to_ids == current_relate_ids:
         return
 
-    await rel_repo.delete_relates_to_by_source(resource.id)
+    await rel_repo.delete_relates_to_by_source_kind(resource.id, KIND_BIND)
     now = datetime.now(timezone.utc)
     for target_id in expected_relate_to_ids:
         await rel_repo.create_relates_to(CmdbRelatesTo(
             source_id=resource.id,
             target_id=target_id,
             description=DESC_BIND_ECS,
+            kind=KIND_BIND,
             synced_at=now,
             source="discovery",
         ))
@@ -381,6 +389,76 @@ async def _rebuild_nat_edges(
             source_id=resource.id,
             target_id=eip_id,
             description=DESC_BIND_EIP,
+            synced_at=now,
+            source="discovery",
+        ))
+
+    # DNAT 派生边：公网暴露面审计依赖（#12/#31，kind=dnat）
+    await _rebuild_dnat_edges(session, rel_repo, res_repo, model_repo, resource, message)
+
+
+async def _rebuild_dnat_edges(
+    session: AsyncSession,
+    rel_repo: CmdbRelationshipRepo,
+    res_repo: CmdbResourceRepo,
+    model_repo: CmdbModelRepo,
+    resource: CmdbResource,
+    message: CloudResourceMessage,
+) -> None:
+    """NAT DNAT 条目派生 aliyun_eip → aliyun_ecs relates_to（kind=dnat）。
+
+    匹配：dnat.public_ip → EIP.ip_address；dnat.private_ip → ECS.private_ip。
+    管理范围限定本 NAT 的 eip_ids，避免跨 NAT 互踩；diff 跳过无变更。
+    """
+    fields = resource.fields or {}
+    provider = message.provider
+    account = message.cloud_account
+    eip_model = await model_repo.get_model_by_code("aliyun_eip")
+    ecs_model = await model_repo.get_model_by_code("aliyun_ecs")
+    if eip_model is None or ecs_model is None:
+        return
+
+    owned_eip_ids: set[int] = set()
+    for eip_provider_id in fields.get("eip_ids") or []:
+        eip = await res_repo.get_by_provider_id(eip_model.id, provider, eip_provider_id, account)
+        if eip is not None:
+            owned_eip_ids.add(eip.id)
+
+    expected: set[tuple[int, int]] = set()
+    for entry in fields.get("dnat_entries") or []:
+        public_ip = entry.get("public_ip")
+        private_ip = entry.get("private_ip")
+        if not public_ip or not private_ip:
+            continue
+        eips = [
+            e for e in await res_repo.list_by_field_value(eip_model.id, provider, "ip_address", public_ip)
+            if e.cloud_account == account
+        ]
+        ecs_list = [
+            e for e in await res_repo.list_by_field_value(ecs_model.id, provider, "private_ip", private_ip)
+            if e.cloud_account == account
+        ]
+        for eip in eips:
+            for ecs in ecs_list:
+                expected.add((eip.id, ecs.id))
+
+    current: set[tuple[int, int]] = set()
+    for eip_id in owned_eip_ids:
+        for r in await rel_repo.get_relations_from(eip_id):
+            if r.kind == KIND_DNAT:
+                current.add((r.source_id, r.target_id))
+    if expected == current:
+        return
+
+    for eip_id in owned_eip_ids:
+        await rel_repo.delete_relates_to_by_source_kind(eip_id, KIND_DNAT)
+    now = datetime.now(timezone.utc)
+    for eip_id, ecs_id in sorted(expected):
+        await rel_repo.create_relates_to(CmdbRelatesTo(
+            source_id=eip_id,
+            target_id=ecs_id,
+            description=DESC_DNAT_EXPOSE,
+            kind=KIND_DNAT,
             synced_at=now,
             source="discovery",
         ))

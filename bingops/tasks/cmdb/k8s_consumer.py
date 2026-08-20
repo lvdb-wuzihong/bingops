@@ -13,7 +13,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
+from collections import OrderedDict
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from sqlalchemy import select
@@ -27,7 +31,11 @@ from bingops.repositories.cmdb.change_log_repo import CmdbChangeLogRepo
 from bingops.repositories.cmdb.resource_repo import CmdbResourceRepo
 from bingops.repositories.cmdb.sync_task_repo import CmdbSyncTaskRepo
 from bingops.repositories.cmdb.tag_repo import CmdbTagRepo
-from bingops.schemas.cmdb.kafka_messages import K8sEventType, K8sResourceMessage
+from bingops.schemas.cmdb.kafka_messages import (
+    K8sEventType,
+    K8sResourceMessage,
+    K8sSyncType,
+)
 from bingops.tasks.cmdb import k8s_extractors
 from bingops.tasks.cmdb.relationship_builder import (
     rebuild_k8s_relationships,
@@ -40,12 +48,37 @@ logger = logging.getLogger(f"bingops.{__name__}")
 # 是云与容器两个世界的桥；子资源继承集群 provider）。自建集群回退 k8s。
 CLUSTER_TYPE_TO_PROVIDER: dict[str, str] = {"ack": "aliyun", "gke": "gcp"}
 
+# ── 快照对账（附录 B #15）─────────────────────────────────────────────
+# 快照消息（full_sync/periodic_sync）成批到达；空闲超过 GAP 视为一轮结束，
+# 对 covered 模型做差集软删（补 watch 丢事件导致的漏删）。
+SNAPSHOT_IDLE_GAP = 120.0
+SWEEP_INTERVAL = 60.0
+
+# message_id 去重（Kafka at-least-once 重放去噪）
+DEDUP_CAP = 5000
+
+
+@dataclass
+class _SnapshotSession:
+    """一轮快照的可见集（cluster 级）。"""
+
+    seen: set[tuple[int, str]] = field(default_factory=set)
+    covered_models: set[int] = field(default_factory=set)
+    last_active: float = field(default_factory=time.monotonic)
+
+
+_snapshot_sessions: dict[str, _SnapshotSession] = {}
+_message_dedup: dict[str, OrderedDict[str, None]] = {}
+
 
 def create_k8s_handler(session_factory: async_sessionmaker[AsyncSession]):
     """创建 K8s 事件处理函数（闭包注入 session_factory）。"""
 
     async def handle_k8s_event(message: K8sResourceMessage) -> None:
         """处理单条 K8s 资源变更消息。"""
+        if _is_duplicate(message):
+            logger.debug("Duplicate message_id, skipping", extra={"message_id": message.message_id})
+            return
         resource_type = message.resource_type
         model_code = k8s_extractors.RESOURCE_TYPE_TO_MODEL.get(resource_type)
         if model_code is None:
@@ -89,6 +122,19 @@ def create_k8s_handler(session_factory: async_sessionmaker[AsyncSession]):
                 # 集群资源兜底创建（node/namespace 等从属边的父节点），
                 # 并解析本条消息应使用的 provider（托管厂商）
                 provider = await _ensure_cluster_resource(session, message, model_ids)
+
+                # 快照对账记账（#15）：seen 记录必须在 upsert 跳过路径之前，
+                # 保证「无变更跳过」的资源也计入本轮可见集
+                provider_id = (
+                    f"{message.cluster_id}/{message.resource.namespace}/{message.resource.name}"
+                    if message.resource.namespace
+                    else f"{message.cluster_id}/{message.resource.name}"
+                )
+                is_snapshot = (
+                    message.sync_type in (K8sSyncType.FULL_SYNC, K8sSyncType.PERIODIC_SYNC)
+                    or message.event_type == K8sEventType.SNAPSHOT
+                )
+                await _snapshot_bookkeeping(session, message.cluster_id, is_snapshot, model_id, provider_id)
 
                 if message.event_type == K8sEventType.DELETE:
                     await _handle_delete(session, model_id, provider, message)
@@ -316,7 +362,96 @@ async def _sync_k8s_labels(
     await session.flush()
 
 
-# ── 工具函数 ───────────────────────────────────────────────────────────────────
+# ── 工具函数 ─────────────────────────────────────────────────────────────
+
+
+def _is_duplicate(message: K8sResourceMessage) -> bool:
+    """message_id 去重（有界 LRU，防 Kafka 重放重复建/审）。"""
+    bucket = _message_dedup.setdefault(message.cluster_id, OrderedDict())
+    if message.message_id in bucket:
+        return True
+    bucket[message.message_id] = None
+    while len(bucket) > DEDUP_CAP:
+        bucket.popitem(last=False)
+    return False
+
+
+async def _snapshot_bookkeeping(
+    session: AsyncSession,
+    cluster_id: str,
+    is_snapshot: bool,
+    model_id: int,
+    provider_id: str,
+) -> None:
+    """快照会话记账：快照消息累加可见集；watch 消息触发空闲会话终结。"""
+    now = time.monotonic()
+    sess = _snapshot_sessions.get(cluster_id)
+    if is_snapshot:
+        if sess is None or now - sess.last_active > SNAPSHOT_IDLE_GAP:
+            if sess is not None:
+                # 上一轮已空闲超时（两轮 periodic 之间的间隙），先终结再开新轮
+                await _finalize_snapshot_session(session, cluster_id, sess)
+            sess = _SnapshotSession()
+            _snapshot_sessions[cluster_id] = sess
+        sess.last_active = now
+        sess.covered_models.add(model_id)
+        sess.seen.add((model_id, provider_id))
+    elif sess is not None and now - sess.last_active > SNAPSHOT_IDLE_GAP:
+        # 快照轮已结束且后续来了 watch 事件：懒终结
+        _snapshot_sessions.pop(cluster_id, None)
+        await _finalize_snapshot_session(session, cluster_id, sess)
+
+
+async def _finalize_snapshot_session(
+    session: AsyncSession, cluster_id: str, sess: _SnapshotSession,
+) -> None:
+    """一轮快照结束：covered 模型中本轮未出现的 discovery 资源差集软删。"""
+    repo = CmdbResourceRepo(session)
+    deleted = 0
+    for model_id in sess.covered_models:
+        rows = await session.execute(
+            select(CmdbResource).where(
+                CmdbResource.model_id == model_id,
+                CmdbResource.cloud_account == cluster_id,
+                CmdbResource.source == "discovery",
+                CmdbResource.deleted_at.is_(None),
+            )
+        )
+        for res in rows.scalars().all():
+            if (res.model_id, res.provider_id) in sess.seen:
+                continue
+            await repo.soft_delete(res)
+            await remove_resource_edges(session, res.id)
+            await _record_change(session, res.id, model_id, "delete")
+            deleted += 1
+    logger.info(
+        "Snapshot reconciliation completed",
+        extra={"cluster": cluster_id, "deleted": deleted,
+               "covered_models": len(sess.covered_models)},
+    )
+
+
+async def snapshot_sweep_loop(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """周期扫尾：空闲超时的快照会话即使无新消息也终结对账。"""
+    while True:
+        await asyncio.sleep(SWEEP_INTERVAL)
+        now = time.monotonic()
+        idle = [
+            (cid, sess)
+            for cid, sess in list(_snapshot_sessions.items())
+            if now - sess.last_active > SNAPSHOT_IDLE_GAP
+        ]
+        for cid, sess in idle:
+            _snapshot_sessions.pop(cid, None)
+            async with session_factory() as session:
+                try:
+                    await _finalize_snapshot_session(session, cid, sess)
+                    await session.commit()
+                except Exception:
+                    await session.rollback()
+                    logger.exception("Snapshot reconciliation failed", extra={"cluster": cid})
 
 
 async def _load_model_catalog(session: AsyncSession) -> tuple[dict[str, int], dict[int, set[str]]]:

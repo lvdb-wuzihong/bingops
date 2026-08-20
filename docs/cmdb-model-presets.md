@@ -290,7 +290,7 @@ ConfigMap/Secret 待"配置影响面分析"立项再议。
 
 | # | 事项 | 说明 |
 |---|------|------|
-| 1 | `cmdb_relates_to` 加 `kind` 列 | 唯一键改为 `UNIQUE(source_id, target_id, kind)`；EIP 直绑与 DNAT 暴露共存依赖它，做 NAT 同步前落地 |
+| 1 | ~~`cmdb_relates_to` 加 `kind` 列~~ **✅ 已完成** | v9 迁移：kind VARCHAR(32) 默认空串，唯一键改 `UNIQUE(source_id, target_id, kind)`；存量边语义不变 |
 | 2 | Kind → model_code 映射更新 | Deployment/StatefulSet/DaemonSet → k8s_workload（写 fields.workload_type）；不 Watch RS/Endpoints/EndpointSlice |
 | 3 | Pod 属主两级解析 | ownerReferences Pod→RS→Deployment，直接建 pod belongs_to workload。**已确认 informer 不 Watch ReplicaSet**：消费端用 RS 名去掉末段 pod-template-hash 后缀得到 Deployment 名，无需 Go 侧改动 |
 | 4 | Service↔Pod 双向触发 | Service 事件与 Pod 事件都要重算 selector 匹配边 |
@@ -301,10 +301,10 @@ ConfigMap/Secret 待"配置影响面分析"立项再议。
 | 9 | ~~Informer 新增 Watch Kind~~ **已确认无需开发** | informer 已支持 13 种资源（含 persistentvolumes/persistentvolumeclaims），配置启用即可；endpoints 虽支持但纪律是不建模——配置里不启用；不支持 Ingress（与不建 Ingress 的决策一致） |
 | 10 | APISIX 采集通道二选一 | CRD 模式：Informer 加 Watch ApisixRoute/ApisixUpstream，走现有 Topic；Admin API 模式：轻量拉取器 5–10min，只读 Key，凭据不进 git |
 | 11 | ~~云采集器新增存储 API~~ **✅ 已完成** | DescribeDisks（含游离盘）/ DescribeFileSystems + 挂载点已落地（aliyun_disk / aliyun_nas 适配器）；降频按任务拆分实现（附录 B #24） |
-| 12 | builder 新增桥接/派生规则 | volume_handle→aliyun_disk/aliyun_nas；apisix_route.upstream_ref→k8s_service；route.host↔dns_record FQDN；**NAT DNAT 条目按 internal_ip 匹配 ECS 派生 `aliyun_ecs relates_to aliyun_eip (kind=dnat)` 边**（公网暴露面审计依赖） |
+| 12 | ~~builder 新增桥接/派生规则~~ **部分完成** | 已落地：node→云主机承载于（#27）、**NAT DNAT 派生边**（dnat.public_ip→EIP.ip_address、dnat.private_ip→ECS.private_ip，kind=dnat 描述「DNAT 暴露」，管理范围限定本 NAT eip_ids）；EIP 直绑边 kind=bind。未决：volume_handle→disk/nas CSI 桥接、apisix/dns 相关（依赖 #10/#48） |
 | 13 | 应用关联物化（后端表，非模型） | 新增 `cmdb_app_resources` 显式关联表；tag_key='app' 自动归集写入 source='tag'，手动绑定 source='manual'；应用只绑服务级 CI（workload/中间件/RDS/入口），不绑 Pod/Node |
 | 14 | **K8s 消息契约以 cmdb-informer 为准重写** | 实测对比（`cmdb-informer/internal/message/types.go` 的 `MQMessage` vs `kafka_messages.py` 的 `K8sResourceMessage`）两边结构性不一致：字段名（cluster_id vs cluster、resource_type vs kind）、消息结构（Go 嵌套 `resource.{uid,name,labels,annotations,spec,status,raw}` vs Python 平铺）、Python 缺 `message_id`（幂等去重）/`sync_type`/`snapshot` 事件/`old_resource`。重构时照 Go 侧 `MQMessage` 重写 Python schema，Go 生产者不动；**已确认** `resource_type` 取值为小写复数（pods/services/deployments/statefulsets/daemonsets/nodes/namespaces/persistentvolumes/persistentvolumeclaims 等），消费端映射表按此格式编写 |
-| 15 | 快照对账删除（依赖 #14） | informer 有 full_sync/periodic_sync 全量快照通道（event_type=snapshot）。消费端加快照会话逻辑：识别一轮全量的起止，结束后将本轮未出现的该集群资源做差集软删——补上仅靠 watch delete 事件丢事件即漏删的缺口 |
+| 15 | ~~快照对账删除（依赖 #14）~~ **✅ 已完成** | 消费端快照会话机制：full_sync/periodic_sync 消息累加可见集（seen 记录在 upsert 跳过路径之前），空闲 120s 视为轮终（懒终结 + 60s 扫尾任务双保险），covered 模型差集软删 + 清边 + 记 delete 审计；仅对账快照覆盖的模型（k8s_cluster 等自动创建资源不误伤）；顺带 message_id 有界去重防 Kafka 重放 |
 | 16 | 消费链路 v1→v2 重构（前置：模型/字段/约束录入完成）【K8s 链路 ✅ 已完成，云链路待第二批】 | 已落地：schema 照 Go `MQMessage` 重写；`k8s_extractors.py` 按 resource_type→model_code→model_id 提取 fields（deployments/statefulsets/daemonsets 归一 k8s_workload，configmaps/secrets 跳过）；labels 差异同步 source='cloud'；builder 按库内 12 条 K8s 约束建边（description=约束 relation_name），从属边整包替换、关联边按语义槽位替换；软删除同步清边；集群实例兜底创建（#17）；pod 边不记 change_log（#21）。跨云桥接边（#37/#38/#40/#41/#46/#47/#15/#16）留待云链路重构；#15 快照差集软删未实现（依赖消息序识别，后续迭代） |
 | 17 | k8s_cluster 实例自动 upsert | 集群本身无 Watch 事件，但是建边根节点：消费端首次见到某 `cluster_id` 时自动创建 k8s_cluster 实例（cluster_type 落 fields，provider 按 #19 映射托管厂商 ack→aliyun/gke→gcp/自建→k8s），**子资源继承集群 provider**（集群实例是厂商唯一事实源）；无需手录、无需 informer 发消息 |
 | 18 | informer 侧零开发确认 | 建模所需 9 种 Kind（nodes/namespaces/pods/services/deployments/statefulsets/daemonsets/PV/PVC）informer 已全部支持，只需改 config.yaml 资源清单+namespace 白名单；唯一例外是 #10 选 CRD 模式时需加 Watch ApisixRoute/ApisixUpstream |

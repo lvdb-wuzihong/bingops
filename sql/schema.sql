@@ -222,11 +222,12 @@ CREATE TABLE cmdb_relates_to (
     source_id       BIGINT       NOT NULL REFERENCES cmdb_resources(id) ON DELETE CASCADE,
     target_id       BIGINT       NOT NULL REFERENCES cmdb_resources(id) ON DELETE CASCADE,
     description     VARCHAR(256),
+    kind            VARCHAR(32)  NOT NULL DEFAULT '',
     attributes      JSONB        NOT NULL DEFAULT '{}',
     synced_at       TIMESTAMPTZ,
     source          VARCHAR(32)  NOT NULL DEFAULT 'discovery',
     created_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    UNIQUE (source_id, target_id)
+    UNIQUE (source_id, target_id, kind)
 );
 
 CREATE INDEX idx_cmdb_relates_source ON cmdb_relates_to (source_id);

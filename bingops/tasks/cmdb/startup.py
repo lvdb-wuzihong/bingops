@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -14,12 +15,13 @@ from bingops.core.config import settings
 from bingops.kafka.client import KafkaClient
 from bingops.schemas.cmdb.kafka_messages import CloudResourceMessage, K8sResourceMessage
 from bingops.tasks.cmdb.cloud_consumer import create_cloud_handler
-from bingops.tasks.cmdb.k8s_consumer import create_k8s_handler
+from bingops.tasks.cmdb.k8s_consumer import create_k8s_handler, snapshot_sweep_loop
 
 logger = logging.getLogger(f"bingops.{__name__}")
 
 # 全局 Kafka 客户端实例
 _kafka_client: KafkaClient | None = None
+_sweep_task: asyncio.Task | None = None
 
 
 async def start_cmdb_kafka_consumer(session_factory: async_sessionmaker[AsyncSession]) -> KafkaClient:
@@ -55,6 +57,10 @@ async def start_cmdb_kafka_consumer(session_factory: async_sessionmaker[AsyncSes
     await client.start_consumer(pattern=pattern)
     client.start_background()
 
+    # 快照对账扫尾任务（#15）：空闲快照会话定时终结差集软删
+    global _sweep_task
+    _sweep_task = asyncio.create_task(snapshot_sweep_loop(session_factory))
+
     _kafka_client = client
     logger.info("CMDB Kafka consumer started", extra={"pattern": pattern})
     return client
@@ -62,7 +68,10 @@ async def start_cmdb_kafka_consumer(session_factory: async_sessionmaker[AsyncSes
 
 async def stop_cmdb_kafka_consumer() -> None:
     """停止 CMDB Kafka 消费者。"""
-    global _kafka_client
+    global _kafka_client, _sweep_task
+    if _sweep_task is not None:
+        _sweep_task.cancel()
+        _sweep_task = None
     if _kafka_client is not None:
         await _kafka_client.stop()
         _kafka_client = None
