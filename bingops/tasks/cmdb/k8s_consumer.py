@@ -228,6 +228,11 @@ async def _handle_upsert(
             and existing.name == payload.name
         ):
             await _heal_missing_belongs_to(session, existing, message, model_ids)
+            # labels 不参与 fields 对比，仅改标签的变更也会走到这里；
+            # 跳过前补跑标签差同步 + 应用关联重算，否则标签变更丢失
+            await _sync_k8s_labels(session, existing, payload.labels)
+            from bingops.services.cmdb import business_app_service
+            await business_app_service.refresh_app_links_from_tags(session, existing)
             logger.debug("K8s event skipped (no effective change)", extra={"provider_id": provider_id})
             return
 
