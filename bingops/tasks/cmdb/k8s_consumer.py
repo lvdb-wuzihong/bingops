@@ -20,7 +20,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bingops.models.cmdb.change_log import CmdbChangeLog
@@ -48,6 +48,10 @@ logger = logging.getLogger(f"bingops.{__name__}")
 # cluster_type → 托管厂商（附录 B #19：k8s_cluster.provider 标托管厂商，
 # 是云与容器两个世界的桥；子资源继承集群 provider）。自建集群回退 k8s。
 CLUSTER_TYPE_TO_PROVIDER: dict[str, str] = {"ack": "aliyun", "gke": "gcp"}
+
+# K8s 标准拓扑标签（kubelet/cloud-provider 写入，值为厂商原生 region/zone，附录 B #28）
+NODE_LABEL_REGION = "topology.kubernetes.io/region"
+NODE_LABEL_ZONE = "topology.kubernetes.io/zone"
 
 # ── 快照对账（附录 B #15）─────────────────────────────────────────────
 # 快照消息（full_sync/periodic_sync）成批到达；空闲超过 GAP 视为一轮结束，
@@ -121,8 +125,8 @@ def create_k8s_handler(session_factory: async_sessionmaker[AsyncSession]):
                     return
 
                 # 集群资源兜底创建（node/namespace 等从属边的父节点），
-                # 并解析本条消息应使用的 provider（托管厂商）
-                provider = await _ensure_cluster_resource(session, message, model_ids)
+                # 并解析本条消息应使用的 provider（托管厂商）与 region/zone（集群为唯一事实源）
+                provider, region, zone = await _ensure_cluster_resource(session, message, model_ids)
 
                 # 快照对账记账（#15）：seen 记录必须在 upsert 跳过路径之前，
                 # 保证「无变更跳过」的资源也计入本轮可见集
@@ -140,7 +144,10 @@ def create_k8s_handler(session_factory: async_sessionmaker[AsyncSession]):
                 if message.event_type == K8sEventType.DELETE:
                     await _handle_delete(session, model_id, provider, message)
                 else:
-                    await _handle_upsert(session, model_id, model_code, model_ids, field_codes, provider, message)
+                    await _handle_upsert(
+                        session, model_id, model_code, model_ids, field_codes,
+                        provider, region, zone, message,
+                    )
 
                 await session.commit()
             except Exception:
@@ -200,6 +207,8 @@ async def _handle_upsert(
     model_ids: dict[str, int],
     field_codes: dict[int, set[str]],
     provider: str,
+    region: str | None,
+    zone: str | None,
     message: K8sResourceMessage,
 ) -> None:
     """Upsert K8s 资源（幂等 + 无变更跳过）。"""
@@ -251,6 +260,9 @@ async def _handle_upsert(
         existing.name = payload.name
         existing.status = status
         existing.fields = fields
+        if region is not None:
+            existing.region = region
+            existing.zone = zone
         existing.resource_version = payload.resource_version or None
         existing.synced_at = now
         existing.source = "discovery"
@@ -265,6 +277,8 @@ async def _handle_upsert(
             provider_id=provider_id,
             cloud_account=cluster_id,
             name=payload.name,
+            region=region,
+            zone=zone,
             status=status,
             fields=fields,
             resource_version=payload.resource_version or None,
@@ -329,17 +343,22 @@ async def _ensure_cluster_resource(
     session: AsyncSession,
     message: K8sResourceMessage,
     model_ids: dict[str, int],
-) -> str:
-    """确保 k8s_cluster 资源存在，返回本条消息应使用的 provider。
+) -> tuple[str, str | None, str | None]:
+    """确保 k8s_cluster 资源存在，返回本条消息应使用的 (provider, region, zone)。
 
     provider 语义（附录 B #19）：托管厂商（ack→aliyun / gke→gcp，自建→k8s）。
     集群实例是厂商的唯一事实源：已存在则沿用其 provider（保证子资源与集群一致），
     不存在则按 cluster_type 映射创建。
+
+    region/zone 语义（附录 B #28）：集群实例同为地域唯一事实源，由 node 消息的
+    标准拓扑标签首次识别写入（仅首次，防多 zone 集群 zone 值抖动）；
+    子资源 upsert 时继承集群 region/zone。
     """
     provider = CLUSTER_TYPE_TO_PROVIDER.get(message.cluster_type, "k8s")
+    node_region, node_zone = _node_topology(message)
     cluster_model_id = model_ids.get("k8s_cluster")
     if not cluster_model_id:
-        return provider
+        return provider, node_region, node_zone
 
     repo = CmdbResourceRepo(session)
     cluster_id = message.cluster_id
@@ -348,7 +367,13 @@ async def _ensure_cluster_resource(
         if existing.deleted_at is not None:
             existing.deleted_at = None
             await repo.update(existing)
-        return existing.provider
+        # node 消息首次带来 region：写集群实例并批量回填存量空白地域
+        if node_region and existing.region is None:
+            existing.region = node_region
+            existing.zone = node_zone
+            await repo.update(existing)
+            await _backfill_cluster_region(session, cluster_id, node_region, node_zone)
+        return existing.provider, existing.region, existing.zone
 
     cluster = CmdbResource(
         model_id=cluster_model_id,
@@ -357,6 +382,8 @@ async def _ensure_cluster_resource(
         cloud_account=cluster_id,
         name=cluster_id,
         status="running",
+        region=node_region,
+        zone=node_zone,
         fields={"cluster_type": message.cluster_type} if message.cluster_type else {},
         synced_at=datetime.now(timezone.utc),
         source="discovery",
@@ -364,7 +391,42 @@ async def _ensure_cluster_resource(
     await repo.create(cluster)
     await _record_change(session, cluster.id, cluster_model_id, "create")
     logger.info("K8s cluster resource auto-created", extra={"cluster": cluster_id})
-    return provider
+    return provider, node_region, node_zone
+
+
+def _node_topology(message: K8sResourceMessage) -> tuple[str | None, str | None]:
+    """提取 node 消息标准拓扑标签中的 region/zone；非 node 消息返回 (None, None)。
+
+    标签缺失（如自建集群无 cloud-provider）时返回 None，地域留空，优雅降级。
+    """
+    if message.resource_type != "nodes":
+        return None, None
+    labels = message.resource.labels or {}
+    return labels.get(NODE_LABEL_REGION), labels.get(NODE_LABEL_ZONE)
+
+
+async def _backfill_cluster_region(
+    session: AsyncSession, cluster_id: str, region: str, zone: str | None,
+) -> None:
+    """集群 region 首次识别时，批量回填该集群 discovery 资源的历史空白地域。
+
+    无变更跳过分支只比对 fields/status/name，空白 region 不会随自然更新自愈，
+    需一次性批量回填；manual 资源与软删资源不受影响。
+    """
+    result = await session.execute(
+        update(CmdbResource)
+        .where(
+            CmdbResource.cloud_account == cluster_id,
+            CmdbResource.source == "discovery",
+            CmdbResource.deleted_at.is_(None),
+            CmdbResource.region.is_(None),
+        )
+        .values(region=region, zone=zone)
+    )
+    logger.info(
+        "Cluster region backfilled",
+        extra={"cluster": cluster_id, "rows": result.rowcount},
+    )
 
 
 # ── 标签差异同步 ───────────────────────────────────────────────────────────────
