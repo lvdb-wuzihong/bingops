@@ -193,14 +193,23 @@ async def get_relations_to(
 async def get_topology(
     resource_id: int,
     depth: int = Query(default=2, ge=1, le=3, description="展开跳数，硬顶 3"),
+    include_children: bool = Query(
+        default=False,
+        description="是否向下展开子树；默认只沿从属链向上（pod→workload→...）+ 各级关联",
+    ),
     session: AsyncSession = Depends(get_db_session),
     _user: User = require_permission("cmdb_resource:list"),
 ):
-    """查询以资源为中心双向展开的拓扑子图（nodes + edges 一次返回）。
+    """查询以资源为中心展开的拓扑子图（nodes + edges 一次返回）。
 
+    默认层级追溯模式：belongs_to 只向上、relates_to 双向，适合
+    pod 带出关联后逐级向上展示 workload/namespace/cluster；
+    include_children=true 退回全向 BFS（含下级子树）。
     节点为瘦身负载（无 fields JSONB）；边带 relation_type/description/kind，
     belongs_to 方向为 source=child → target=parent。节点数达上限后
     truncated=true，前端可提示缩小 depth。
     """
-    data = await relationship_service.get_topology(session, resource_id, depth)
+    data = await relationship_service.get_topology(
+        session, resource_id, depth, include_children,
+    )
     return success_response(data=data)

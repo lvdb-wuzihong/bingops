@@ -163,6 +163,25 @@ class CmdbResourceRepo:
         )
         return result.scalars().first()
 
+    async def find_by_provider_id_any_provider(
+        self, model_id: int, provider_id: str, cloud_account: str,
+    ) -> CmdbResource | None:
+        """不按 provider 过滤的 provider_id 查找（K8s 层级边建边用）。
+
+        子资源继承集群托管厂商 provider（ACK=aliyun / GKE=gcp / 自建=k8s），
+        硬编码 provider 会漏匹配；provider_id 带集群前缀 + cloud_account
+        在同模型内已唯一。
+        """
+        result = await self._session.execute(
+            select(CmdbResource).where(
+                CmdbResource.model_id == model_id,
+                CmdbResource.provider_id == provider_id,
+                CmdbResource.cloud_account == cloud_account,
+                CmdbResource.deleted_at.is_(None),
+            )
+        )
+        return result.scalars().first()
+
     async def find_by_name_any_account(
         self, model_id: int, provider: str, name: str,
     ) -> CmdbResource | None:

@@ -28,6 +28,7 @@ from bingops.models.cmdb.model import CmdbModel, CmdbModelField
 from bingops.models.cmdb.resource import CmdbResource
 from bingops.models.cmdb.tag import CmdbResourceTag
 from bingops.repositories.cmdb.change_log_repo import CmdbChangeLogRepo
+from bingops.repositories.cmdb.relationship_repo import CmdbRelationshipRepo
 from bingops.repositories.cmdb.resource_repo import CmdbResourceRepo
 from bingops.repositories.cmdb.sync_task_repo import CmdbSyncTaskRepo
 from bingops.repositories.cmdb.tag_repo import CmdbTagRepo
@@ -157,7 +158,22 @@ def create_k8s_handler(session_factory: async_sessionmaker[AsyncSession]):
     return handle_k8s_event
 
 
-# ── Upsert / 删除 ──────────────────────────────────────────────────────────────
+# ── Upsert / 删除 ──────────────────────────────────────────────────────────
+
+
+async def _heal_missing_belongs_to(
+    session: AsyncSession,
+    resource: CmdbResource,
+    message: K8sResourceMessage,
+    model_ids: dict[str, int],
+) -> None:
+    """跳过路径的边自愈：父资源后于本资源出现（如 cluster 兜底创建、namespace
+    晚到）时首轮 belongs_to 建边失败，内容不变则永不修复。仅在无任何
+    belongs_to 边时才补，避免高频无谓重建。
+    """
+    parents = await CmdbRelationshipRepo(session).get_parents(resource.id)
+    if not parents:
+        await rebuild_k8s_relationships(session, resource, message, model_ids)
 
 
 async def _handle_upsert(
@@ -197,6 +213,8 @@ async def _handle_upsert(
     # 幂等校验：incoming version <= current version → 跳过
     if existing and existing.resource_version and payload.resource_version:
         if _version_lte(payload.resource_version, existing.resource_version):
+            if existing.deleted_at is None:
+                await _heal_missing_belongs_to(session, existing, message, model_ids)
             logger.debug("K8s event skipped (version not newer)", extra={"provider_id": provider_id})
             return
 
@@ -209,6 +227,7 @@ async def _handle_upsert(
             and existing.status == status
             and existing.name == payload.name
         ):
+            await _heal_missing_belongs_to(session, existing, message, model_ids)
             logger.debug("K8s event skipped (no effective change)", extra={"provider_id": provider_id})
             return
 

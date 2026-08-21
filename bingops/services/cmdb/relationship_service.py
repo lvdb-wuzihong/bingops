@@ -144,13 +144,19 @@ async def get_relations_to(
 
 async def get_topology(
     session: AsyncSession, resource_id: int, depth: int,
+    include_children: bool = False,
 ) -> dict:
-    """以资源为中心双向 BFS 展开拓扑子图（nodes + edges 一次返回）。
+    """以资源为中心展开拓扑子图（nodes + edges 一次返回）。
 
-    - 三种边全走：belongs_to 向上/向下、relates_to 双向
+    默认展开方向（层级追溯模式，适配 pod→workload→namespace→cluster 场景）：
+    - belongs_to 只向上（frontier 作为 child 时收 parent），不向下挖兄弟/下级
+    - relates_to 双向（每级节点各自的关联都带出）
+    include_children=True 时退回全向 BFS（含下级子树，注意账号根扇出）。
+
     - 节点只返渲染必需字段（不带 fields JSONB）
-    - 节点数达 TOPOLOGY_MAX_NODES 后停止扩张并置 truncated
-    - 边的两端必须都在节点集内（软删资源/截断丢弃的节点对应边不返）
+    - 单跳邻居超限（TOPOLOGY_MAX_FANOUT）或总量超限（TOPOLOGY_MAX_NODES）
+      时整跳丢弃并置 truncated
+    - 边的两端必须都在节点集内（未展开方向的边、软删资源对应边不返）
     """
     resource_repo = CmdbResourceRepo(session)
     center = await resource_repo.get_by_id(resource_id)
@@ -177,11 +183,17 @@ async def get_topology(
             next_frontier.append(nid)
 
         for edge in bt_batch:
-            _visit(edge.child_id)
-            _visit(edge.parent_id)
+            # 向上：frontier 是 child → 收 parent（层级追溯链）
+            if edge.child_id in visited:
+                _visit(edge.parent_id)
+            # 向下：仅 include_children 时展开子树（默认不挖兄弟/下级）
+            if include_children and edge.parent_id in visited:
+                _visit(edge.child_id)
         for edge in rt_batch:
-            _visit(edge.source_id)
-            _visit(edge.target_id)
+            if edge.source_id in visited:
+                _visit(edge.target_id)
+            if edge.target_id in visited:
+                _visit(edge.source_id)
 
         # 高扇出防御：本跳邻居超限则整跳丢弃（本跳边也不计入结果）
         if len(visited) + len(next_frontier) > TOPOLOGY_MAX_NODES or len(next_frontier) > TOPOLOGY_MAX_FANOUT:
@@ -254,6 +266,7 @@ async def get_topology(
         "CMDB topology subgraph built",
         extra={
             "resource_id": resource_id, "depth": depth,
+            "include_children": include_children,
             "node_count": len(nodes), "edge_count": len(edges),
             "truncated": truncated,
         },
@@ -261,6 +274,7 @@ async def get_topology(
     return {
         "center_id": resource_id,
         "depth": depth,
+        "include_children": include_children,
         "truncated": truncated,
         "nodes": nodes,
         "edges": edges,

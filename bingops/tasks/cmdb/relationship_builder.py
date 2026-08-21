@@ -435,7 +435,10 @@ async def _find_cluster(
     cluster_model_id = model_ids.get("k8s_cluster")
     if not cluster_model_id:
         return None
-    return await res_repo.get_by_provider_id(cluster_model_id, "k8s", cluster_id, cluster_id)
+    # 集群 provider 是托管厂商（ACK=aliyun / GKE=gcp / 自建=k8s），不能硬编码
+    return await res_repo.find_by_provider_id_any_provider(
+        cluster_model_id, cluster_id, cluster_id,
+    )
 
 
 async def _find_namespace(
@@ -446,8 +449,9 @@ async def _find_namespace(
     ns_model_id = model_ids.get("k8s_namespace")
     if not ns_model_id:
         return None
-    return await res_repo.get_by_provider_id(
-        ns_model_id, "k8s", f"{cluster_id}/{namespace}", cluster_id,
+    # namespace 继承集群托管厂商 provider，同样不能硬编码
+    return await res_repo.find_by_provider_id_any_provider(
+        ns_model_id, f"{cluster_id}/{namespace}", cluster_id,
     )
 
 
