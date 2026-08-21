@@ -138,11 +138,12 @@ class ResourceBindRequest(BaseModel):
 @router.get("/{app_id}/resources")
 async def list_app_resources(
     app_id: int,
+    env: str | None = Query(default=None, description="按环境标签过滤（env/k8s:env）"),
     session: AsyncSession = Depends(get_db_session),
     _user: User = require_permission("cmdb_app:list"),
 ):
-    """应用下的资源列表。"""
-    items = await business_app_service.list_app_resources(session, app_id)
+    """应用下的资源列表。每项含 env/region，前端可按环境分组展示。"""
+    items = await business_app_service.list_app_resources(session, app_id, env)
     return success_response(data=items)
 
 

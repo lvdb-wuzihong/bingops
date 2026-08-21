@@ -105,6 +105,8 @@ SERVICE_LEVEL_MODEL_CODES = {
 
 # 应用标签键：云/手动标签用 app，K8s labels 经归一化带 k8s: 前缀
 APP_TAG_KEYS = ("app", "k8s:app")
+# 环境标签键（应用资源列表的 env 维度，同双键约定）
+ENV_TAG_KEYS = ("env", "k8s:env")
 
 
 async def refresh_app_links_from_tags(session: AsyncSession, resource) -> None:
@@ -169,11 +171,18 @@ async def unbind_resource(session: AsyncSession, app_id: int, resource_id: int) 
     await session.commit()
 
 
-async def list_app_resources(session: AsyncSession, app_id: int) -> list[dict]:
-    """应用下的资源列表（join 资源与模型 code）。"""
+async def list_app_resources(
+    session: AsyncSession, app_id: int, env: str | None = None,
+) -> list[dict]:
+    """应用下的资源列表（join 资源与模型 code）。
+
+    每项附带 env（取自 env/k8s:env 标签）与 region，供前端按环境分组；
+    env 参数非空时服务端过滤。
+    """
     from bingops.models.cmdb.app_resource import CmdbAppResource
     from bingops.models.cmdb.model import CmdbModel
     from bingops.models.cmdb.resource import CmdbResource
+    from bingops.models.cmdb.tag import CmdbResourceTag
 
     await get_app(session, app_id)
     rows = await session.execute(
@@ -182,17 +191,36 @@ async def list_app_resources(session: AsyncSession, app_id: int) -> list[dict]:
         .join(CmdbModel, CmdbModel.id == CmdbResource.model_id)
         .where(CmdbAppResource.app_id == app_id)
     )
-    return [
-        {
+    items = rows.all()
+
+    resource_ids = [res.id for _, res, _ in items]
+    env_map: dict[int, str] = {}
+    if resource_ids:
+        tag_rows = await session.execute(
+            select(CmdbResourceTag.resource_id, CmdbResourceTag.tag_value).where(
+                CmdbResourceTag.resource_id.in_(resource_ids),
+                CmdbResourceTag.tag_key.in_(ENV_TAG_KEYS),
+            )
+        )
+        for rid, value in tag_rows.all():
+            env_map.setdefault(rid, value)
+
+    result = []
+    for link, res, model in items:
+        res_env = env_map.get(res.id)
+        if env is not None and res_env != env:
+            continue
+        result.append({
             "resource_id": res.id,
             "name": res.name,
             "provider": res.provider,
             "model_code": model.code,
             "status": res.status,
+            "region": res.region,
+            "env": res_env,
             "source": link.source,
-        }
-        for link, res, model in rows.all()
-    ]
+        })
+    return result
 
 
 async def list_resource_apps(session: AsyncSession, resource_id: int) -> list[dict]:
