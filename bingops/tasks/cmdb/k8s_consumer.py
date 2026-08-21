@@ -176,6 +176,23 @@ async def _heal_missing_belongs_to(
         await rebuild_k8s_relationships(session, resource, message, model_ids)
 
 
+async def _skip_side_effects(
+    session: AsyncSession,
+    resource: CmdbResource,
+    message: K8sResourceMessage,
+    model_ids: dict[str, int],
+) -> None:
+    """跳过路径的统一副作用：边自愈 + 标签差同步 + 应用关联重算。
+
+    两个跳过分支（版本不新 / 无实质变更）都必须跑：应用主数据可能
+    后于标签事件创建，靠每轮快照重算自愈，不要求操作先后顺序。
+    """
+    await _heal_missing_belongs_to(session, resource, message, model_ids)
+    await _sync_k8s_labels(session, resource, message.resource.labels)
+    from bingops.services.cmdb import business_app_service
+    await business_app_service.refresh_app_links_from_tags(session, resource)
+
+
 async def _handle_upsert(
     session: AsyncSession,
     model_id: int,
@@ -214,7 +231,7 @@ async def _handle_upsert(
     if existing and existing.resource_version and payload.resource_version:
         if _version_lte(payload.resource_version, existing.resource_version):
             if existing.deleted_at is None:
-                await _heal_missing_belongs_to(session, existing, message, model_ids)
+                await _skip_side_effects(session, existing, message, model_ids)
             logger.debug("K8s event skipped (version not newer)", extra={"provider_id": provider_id})
             return
 
@@ -227,12 +244,7 @@ async def _handle_upsert(
             and existing.status == status
             and existing.name == payload.name
         ):
-            await _heal_missing_belongs_to(session, existing, message, model_ids)
-            # labels 不参与 fields 对比，仅改标签的变更也会走到这里；
-            # 跳过前补跑标签差同步 + 应用关联重算，否则标签变更丢失
-            await _sync_k8s_labels(session, existing, payload.labels)
-            from bingops.services.cmdb import business_app_service
-            await business_app_service.refresh_app_links_from_tags(session, existing)
+            await _skip_side_effects(session, existing, message, model_ids)
             logger.debug("K8s event skipped (no effective change)", extra={"provider_id": provider_id})
             return
 
