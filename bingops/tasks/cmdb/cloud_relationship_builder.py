@@ -158,6 +158,12 @@ async def rebuild_cloud_relationships(
             description=DESC_ACCOUNT_BELONG,
         )
         await _rebuild_gcp_disk_edges(session, rel_repo, res_repo, model_repo, resource, message)
+    elif model.code in ("gcp_cloudsql", "gcp_redis"):
+        # 托管数据库/缓存 → VPC belongs_to（网络归属），复用通用 parent 重建
+        await _rebuild_parent_edge(
+            session, rel_repo, res_repo, model_repo, resource, message,
+            description=DESC_NETWORK_BELONG,
+        )
     elif model.code == "dns_record":
         # 解析记录 → zone belongs_to（域归属），跨厂商共用模型 code
         await _rebuild_parent_edge(
