@@ -20,7 +20,7 @@
 | 项 | 进度 | 说明 |
 |-----|------|------|
 | 分类 | 4 个 ✅ | 阿里云 / K8S / 谷歌云 / DNS；中间件分组用到再建 |
-| 模型 | 33 个 | 待建：`k8s_ingress`（**在用，决策反转 2026-08-20**：保留建模，前置 cmdb-informer 加 Ingress watch）、`gcp_redis`（附录 A 规格就绪待录）；`apisix_route` 缓做（§3.1）；`selfhosted_*` 在用哪个建哪个（§3.2） |
+| 模型 | 33 个 | 待建：`k8s_ingress`（**模型已建 id=34，字段/关系待录**，见 §3.3；extractor/边分支已落地 2026-08-24）、`gcp_redis`（附录 A 规格就绪待录）；`apisix_route` 缓做（§3.1）；`selfhosted_*` 在用哪个建哪个（§3.2） |
 | 字段 | 154 + 云模型批次 | 剩 2 见 §2；**字段疑惑对账见 §2.5** |
 | 关系约束 | **53/56 已录** | 全部正确；余 3 条被 apisix_route 阻塞，见 §4 头部注 |
 | 选项库 | 0 ✅ 已清空 | API 标 deprecated 休眠 |
@@ -97,10 +97,24 @@
 > 承载关系用 relates_to 不用 belongs_to（集群跨多台机器，挂从属树会重复显示），
 > 见 §4 #50/#51。与 k8s_workload 不重复：workload 是运行形态，本分组是逻辑服务资产。
 
-### 3.3 不建模型的 Kind（纪律）
+### 3.3 Ingress `k8s_ingress`（K8S 分组）——**模型已建，字段待录**
 
-ReplicaSet、Endpoints、EndpointSlice、Event、Lease、Ingress（未使用，入口为 APISIX）；
-ConfigMap/Secret 待"配置影响面分析"立项再议。
+> 决策反转（2026-08-20）：ingress 在用 → 保留建模；cmdb-informer 已加 Ingress watch（2026-08-24 消息在流）。
+> extractor 与关系分支已落地（附录 B #30）；字段/关系按下表 UI 录入后即生效。
+> 关系：k8s_ingress → k8s_namespace belongs_to「命名空间归属」；k8s_ingress → k8s_service relates_to「路由上游」（backend service 名同 ns 匹配，service 事件反向重算）。
+
+| 字段名 | code | 类型 | 分组 | 必填 | 说明 |
+|--------|------|------|------|------|------|
+| Ingress类 | ingress_class | string | 路由配置 | 否 | spec.ingressClassName |
+| 域名 | hosts | json | 路由配置 | 是 | host 排序数组（关系/解析匹配锚点） |
+| 路由规则 | rules | json | 路由配置 | 是 | `[{host,path,path_type,service_name,service_port}]` 排序保哈希稳定 |
+| TLS域名 | tls_hosts | json | 路由配置 | 否 | spec.tls hosts 排序数组 |
+| LB入口 | lb_ingress | json | 同步保留 | 否 | `[{ip,hostname}]`，status.loadBalancer，解析目标边二期锚点 |
+
+### 3.4 不建模型的 Kind（纪律）
+
+ReplicaSet、Endpoints、EndpointSlice、Event、Lease；
+ConfigMap/Secret 待“配置影响面分析”立项再议。
 
 ---
 
@@ -173,6 +187,8 @@ ConfigMap/Secret 待"配置影响面分析"立项再议。
 | 42 | k8s_pvc | k8s_pv | 1:1 | 绑定（volume_name 匹配） |
 | 43 | k8s_pv | aliyun_disk | 1:1 | CSI 桥接（volume_handle = DiskId，kind=csi） |
 | 44 | k8s_pv | aliyun_nas | n:1 | CSI 桥接（volume_handle 解析文件系统 ID） |
+| 57 | k8s_ingress | k8s_namespace | n:1 | 命名空间归属 |
+| 58 | k8s_ingress | k8s_service | n:n | 路由上游（backend service 名匹配） |
 | 55 | gcp_disk | gcp_compute | n:n | 挂载于（users 列表匹配） |
 | 56 | k8s_pv | gcp_disk | 1:1 | CSI 桥接（kind=csi） |
 | 45 | dns_record | aliyun_eip | n:n | 解析目标（A 记录按 IP） |
@@ -321,3 +337,4 @@ ConfigMap/Secret 待"配置影响面分析"立项再议。
 | 27 | **K8s 节点↔云主机桥接边完成**（2026-08-19） | #35/#36 承载于：节点 upsert 时按 fields.instance_id 精确匹配（ACK providerID 解析 i-xxx=ECS provider_id；GKE gce://proj/zone/name 解析实例名=gcp_compute.name）优先、internal_ip==private_ip 兜底；云主机 upsert 时反向孤儿认领（adopt_node_host_edges）补边；槽位整包替换 diff 跳过；自建集群（provider=k8s）无对端静默跳过 |
 | 28 | **K8s 资源地域消费端推导**（2026-08-21） | informer 契约不改；消费端从 node 消息 labels 提取 `topology.kubernetes.io/region/zone` 写 k8s_cluster 实例 region/zone 通用列（集群实例为地域唯一事实源，同 #17/#19 模式；仅首次识别写入，防多 zone 集群 zone 值抖动）；所有 K8s 资源 upsert 时继承集群 region/zone；region 首次识别时批量回填该集群 discovery 资源历史空白地域（无变更跳过分支不自愈 region）；标签缺失（自建集群无 cloud-provider）优雅降级留空。ACK 实测 `cn-guangzhou`/`cn-guangzhou-a|b`，与云侧表达一致；GKE 待接入后验收 |
 | 29 | **gcp_disk + gcp_account 根节点完成**（2026-08-24） | disk.py：DisksClient.aggregated_list（scope zones/{zone}，zone→region 地图过滤 accounts.yaml regions）；provider_id={zone}/{name}（盘名仅 zone 内唯一，同 subnet 撞键教训）；字段 disk_type=type_ URL 末段（proto 属性带下划线）/size_gb/encrypted=三类加密钥存在性/users=[{name,zone}]（实例 URL 解析）；labels→cloud_tags。account.py：零 API 配置驱动根节点（同 aliyun account），provider_id=项目 ID，顺带修复 gcp_vpc 账号归属悬空边。消费端：gcp_disk→gcp_account 账号归属 + _rebuild_gcp_disk_edges 挂载于（users name+zone+账号 精确匹配 gcp_compute，GCE 名仅 zone 内唯一）；k8s_pv→gcp_disk CSI 桥接仍待办 |
+| 30 | **k8s_ingress 消费端落地**（2026-08-24） | informer 已发 ingresses 消息；k8s_extractors 加 _extract_ingress（rules/hosts/tls_hosts/lb_ingress 归一化排序，_backend_services 下划线内部键供建边）；relationship_builder：ingress→namespace 命名空间归属 + _rebuild_ingress_service_edges 路由上游（backend 名按 provider_id {cluster}/{ns}/{name} 精确匹配）+ service 事件反向重算引用它的 ingress（_rebuild_ingress_inbound_edges）。模型字段/关系待 UI 录入（§3.3）；字段未录期间 _backend_services 仍存活（下划线键豁免过滤），路由上游边先行可用 |

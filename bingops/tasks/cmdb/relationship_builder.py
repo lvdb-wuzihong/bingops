@@ -54,6 +54,7 @@ DESC_SELECTOR_MATCH = "selector 匹配"
 DESC_USES_STORAGE = "使用存储"
 DESC_PVC_BOUND = "绑定"
 DESC_HOSTED_ON = "承载于"
+DESC_ROUTE_UPSTREAM = "路由上游"
 
 # Pod 属主中可直接映射为 k8s_workload 的 Kind
 _WORKLOAD_KINDS = {"Deployment", "StatefulSet", "DaemonSet"}
@@ -105,14 +106,93 @@ async def rebuild_k8s_relationships(
     elif model_code == "k8s_pod":
         await _rebuild_pod_edges(session, rel_repo, res_repo, resource, payload, cluster_id, namespace, model_ids)
 
+    elif model_code == "k8s_ingress":
+        ns = await _find_namespace(res_repo, model_ids, cluster_id, namespace)
+        if ns:
+            await _add_belongs_to(rel_repo, resource.id, ns.id, DESC_NS_BELONG)
+
     # 关联边按语义槽位替换重建
     if model_code == "k8s_service":
         await _rebuild_service_pod_edges(session, rel_repo, resource, cluster_id, namespace, model_ids)
+        # 反向：引用该 service 的 ingress 重算路由上游边
+        await _rebuild_ingress_inbound_edges(
+            session, rel_repo, res_repo, resource.name, cluster_id, namespace, model_ids,
+        )
     elif model_code == "k8s_pod":
         await _rebuild_pod_pvc_edges(session, rel_repo, res_repo, resource, cluster_id, namespace, model_ids)
         await _rebuild_pod_inbound_service_edges(session, rel_repo, resource, payload, cluster_id, namespace, model_ids)
     elif model_code == "k8s_pvc":
         await _rebuild_pvc_pv_edges(session, rel_repo, res_repo, resource, cluster_id, model_ids)
+    elif model_code == "k8s_ingress":
+        await _rebuild_ingress_service_edges(
+            session, rel_repo, res_repo, resource, cluster_id, namespace, model_ids,
+        )
+
+
+# ── Ingress 路由上游边 ─────────────────────────────────────────────
+
+
+async def _rebuild_ingress_service_edges(
+    session: AsyncSession,
+    rel_repo: CmdbRelationshipRepo,
+    res_repo: CmdbResourceRepo,
+    ingress: CmdbResource,
+    cluster_id: str,
+    namespace: str,
+    model_ids: dict[str, int],
+) -> None:
+    """Ingress 变更时：按 _backend_services 重建 Ingress → Service 路由上游边。"""
+    await rel_repo.delete_relates_to_by_source(ingress.id)
+    backends = ingress.fields.get("_backend_services") or []
+    if not backends or not namespace:
+        return
+    svc_model_id = model_ids.get("k8s_service")
+    if not svc_model_id:
+        return
+    now = datetime.now(timezone.utc)
+    for name in backends:
+        svc = await res_repo.get_by_provider_id(
+            svc_model_id, ingress.provider,
+            f"{cluster_id}/{namespace}/{name}", cluster_id,
+        )
+        if svc is not None:
+            await rel_repo.create_relates_to(CmdbRelatesTo(
+                source_id=ingress.id,
+                target_id=svc.id,
+                description=DESC_ROUTE_UPSTREAM,
+                synced_at=now,
+                source="discovery",
+            ))
+
+
+async def _rebuild_ingress_inbound_edges(
+    session: AsyncSession,
+    rel_repo: CmdbRelationshipRepo,
+    res_repo: CmdbResourceRepo,
+    service_name: str,
+    cluster_id: str,
+    namespace: str,
+    model_ids: dict[str, int],
+) -> None:
+    """Service 变更时：重算引用它的 Ingress 的路由上游边（孤儿认领）。"""
+    if not namespace or not service_name:
+        return
+    ing_model_id = model_ids.get("k8s_ingress")
+    if not ing_model_id:
+        return
+    rows = await session.execute(
+        select(CmdbResource).where(
+            CmdbResource.model_id == ing_model_id,
+            CmdbResource.cloud_account == cluster_id,
+            CmdbResource.deleted_at.is_(None),
+        )
+    )
+    for ingress in rows.scalars().all():
+        if service_name in (ingress.fields.get("_backend_services") or []):
+            await _rebuild_ingress_service_edges(
+                session, rel_repo, res_repo, ingress, cluster_id,
+                ingress.fields.get("namespace") or namespace, model_ids,
+            )
 
 
 async def remove_resource_edges(session: AsyncSession, resource_id: int) -> None:

@@ -30,6 +30,7 @@ RESOURCE_TYPE_TO_MODEL: dict[str, str] = {
     "daemonsets": "k8s_workload",
     "persistentvolumes": "k8s_pv",
     "persistentvolumeclaims": "k8s_pvc",
+    "ingresses": "k8s_ingress",
 }
 
 # 归一到 k8s_workload 时的 workload_type 枚举值
@@ -244,6 +245,54 @@ def _extract_pvc(obj: dict, _rt: str) -> tuple[dict, str]:
     return _clean(fields), phase
 
 
+def _extract_ingress(obj: dict, _rt: str) -> tuple[dict, str]:
+    """Ingress 路由规则归一化（host/paths/backend 排序保哈希稳定）。
+
+    _backend_services 为下划线前缀内部键（不登记模型字段），
+    供关系重建 Ingress → Service 路由上游边。
+    """
+    spec = obj.get("spec") or {}
+    metadata = obj.get("metadata") or {}
+    status_obj = obj.get("status") or {}
+
+    rules: list[dict] = []
+    hosts: set[str] = set()
+    for rule in spec.get("rules") or []:
+        host = rule.get("host") or ""
+        if host:
+            hosts.add(host)
+        for path_item in ((rule.get("http") or {}).get("paths")) or []:
+            backend = ((path_item.get("backend") or {}).get("service")) or {}
+            port = backend.get("port") or {}
+            rules.append({
+                "host": host,
+                "path": path_item.get("path") or "",
+                "path_type": path_item.get("pathType") or "",
+                "service_name": backend.get("name") or "",
+                "service_port": port.get("number") or port.get("name") or "",
+            })
+    rules.sort(key=lambda r: (r["host"], r["path"], r["service_name"]))
+
+    lb: list[dict] = []
+    for item in ((status_obj.get("loadBalancer") or {}).get("ingress")) or []:
+        if item.get("ip") or item.get("hostname"):
+            lb.append({"ip": item.get("ip") or "", "hostname": item.get("hostname") or ""})
+    lb.sort(key=lambda e: (e["ip"], e["hostname"]))
+
+    fields = {
+        "ingress_class": spec.get("ingressClassName"),
+        "hosts": sorted(hosts) or None,
+        "rules": rules or None,
+        "tls_hosts": sorted({
+            h for tls in spec.get("tls") or [] for h in tls.get("hosts") or []
+        }) or None,
+        "lb_ingress": lb or None,
+        "namespace": metadata.get("namespace") or None,
+        "_backend_services": sorted({r["service_name"] for r in rules if r["service_name"]}),
+    }
+    return _clean(fields), "active"
+
+
 _EXTRACTORS = {
     "nodes": _extract_node,
     "namespaces": _extract_namespace,
@@ -254,6 +303,7 @@ _EXTRACTORS = {
     "daemonsets": _extract_workload,
     "persistentvolumes": _extract_pv,
     "persistentvolumeclaims": _extract_pvc,
+    "ingresses": _extract_ingress,
 }
 
 
