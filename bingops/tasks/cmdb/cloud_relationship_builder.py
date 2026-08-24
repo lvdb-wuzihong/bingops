@@ -22,7 +22,7 @@ from bingops.repositories.cmdb.model_repo import CmdbModelRepo
 from bingops.repositories.cmdb.relationship_repo import CmdbRelationshipRepo
 from bingops.repositories.cmdb.resource_repo import CmdbResourceRepo
 from bingops.schemas.cmdb.kafka_messages import CloudResourceMessage
-from bingops.tasks.cmdb.relationship_builder import adopt_node_host_edges
+from bingops.tasks.cmdb.relationship_builder import adopt_node_host_edges, adopt_pv_csi_edges, adopt_service_lb_edges
 
 logger = logging.getLogger(f"bingops.{__name__}")
 
@@ -85,6 +85,8 @@ async def rebuild_cloud_relationships(
             message.provider, message.cloud_account,
             (resource.fields or {}).get("address") or "", "A",
         )
+        # 反向孤儿认领：LoadBalancer service 按 IP 补 LB 桥接边
+        await adopt_service_lb_edges(session, (resource.fields or {}).get("address") or "")
     elif model.code == "aliyun_nlb":
         await _rebuild_nlb_edges(session, rel_repo, res_repo, model_repo, resource, message)
         # 反向孤儿认领：CNAME 指向该 NLB dns_name 时补解析目标边
@@ -93,12 +95,17 @@ async def rebuild_cloud_relationships(
             message.provider, message.cloud_account,
             (resource.fields or {}).get("dns_name") or "", "CNAME",
         )
+        # 反向孤儿认领：LoadBalancer service 按 hostname 补 LB 桥接边
+        await adopt_service_lb_edges(session, (resource.fields or {}).get("dns_name") or "")
     elif model.code == "aliyun_nat_gateway":
         await _rebuild_nat_edges(session, rel_repo, res_repo, model_repo, resource, message)
     elif model.code == "aliyun_disk":
         await _rebuild_disk_edges(session, rel_repo, res_repo, model_repo, resource, message)
+        # 反向孤儿认领：PV 先于云盘入库时补 CSI 桥接边
+        await adopt_pv_csi_edges(session, "aliyun_disk", resource.provider_id)
     elif model.code == "aliyun_nas":
         await _rebuild_nas_edges(session, rel_repo, res_repo, model_repo, resource, message)
+        await adopt_pv_csi_edges(session, "aliyun_nas", resource.provider_id)
     elif model.code == "aliyun_rds":
         # RDS → VSwitch belongs_to（网络归属），复用通用 parent 重建
         await _rebuild_parent_edge(
@@ -158,6 +165,8 @@ async def rebuild_cloud_relationships(
             description=DESC_ACCOUNT_BELONG,
         )
         await _rebuild_gcp_disk_edges(session, rel_repo, res_repo, model_repo, resource, message)
+        # 反向孤儿认领：PV 先于云盘入库时补 CSI 桥接边
+        await adopt_pv_csi_edges(session, "gcp_disk", resource.provider_id)
     elif model.code in ("gcp_cloudsql", "gcp_redis"):
         # 托管数据库/缓存 → VPC belongs_to（网络归属），复用通用 parent 重建
         await _rebuild_parent_edge(

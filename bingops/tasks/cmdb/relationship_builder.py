@@ -55,6 +55,11 @@ DESC_USES_STORAGE = "使用存储"
 DESC_PVC_BOUND = "绑定"
 DESC_HOSTED_ON = "承载于"
 DESC_ROUTE_UPSTREAM = "路由上游"
+DESC_CSI_BRIDGE = "CSI 桥接"
+KIND_CSI = "csi"
+DESC_LB_BRIDGE = "LB 桥接"
+KIND_LB = "lb"
+KIND_SELECTOR = "selector"
 
 # Pod 属主中可直接映射为 k8s_workload 的 Kind
 _WORKLOAD_KINDS = {"Deployment", "StatefulSet", "DaemonSet"}
@@ -114,6 +119,7 @@ async def rebuild_k8s_relationships(
     # 关联边按语义槽位替换重建
     if model_code == "k8s_service":
         await _rebuild_service_pod_edges(session, rel_repo, resource, cluster_id, namespace, model_ids)
+        await _rebuild_service_lb_edges(session, rel_repo, res_repo, resource)
         # 反向：引用该 service 的 ingress 重算路由上游边
         await _rebuild_ingress_inbound_edges(
             session, rel_repo, res_repo, resource.name, cluster_id, namespace, model_ids,
@@ -127,6 +133,131 @@ async def rebuild_k8s_relationships(
         await _rebuild_ingress_service_edges(
             session, rel_repo, res_repo, resource, cluster_id, namespace, model_ids,
         )
+    elif model_code == "k8s_pv":
+        await _rebuild_pv_csi_edges(session, rel_repo, res_repo, resource, model_ids)
+
+
+# ── Service ↔ LB 桥接边（#38/#39）─────────────────────────────
+
+
+def _looks_like_ip(value: str) -> bool:
+    """lb_ingress 是 IP（CLB）还是 hostname（NLB）。"""
+    import ipaddress
+
+    try:
+        ipaddress.ip_address(value)
+        return True
+    except ValueError:
+        return False
+
+
+async def _rebuild_service_lb_edges(
+    session: AsyncSession,
+    rel_repo: CmdbRelationshipRepo,
+    res_repo: CmdbResourceRepo,
+    service: CmdbResource,
+) -> None:
+    """Service → CLB/NLB relates_to（LB 桥接，kind=lb）。
+
+    lb_ingress 取 status.loadBalancer 首条目：IP 形态按 aliyun_clb.address
+    匹配，hostname 形态按 aliyun_nlb.dns_name 匹配。kind 槽位与
+    selector 边隔离。
+    """
+    await rel_repo.delete_relates_to_by_source_kind(service.id, KIND_LB)
+    value = (service.fields or {}).get("lb_ingress")
+    if not value:
+        return
+    model_repo = CmdbModelRepo(session)
+    target = None
+    if _looks_like_ip(value):
+        clb = await model_repo.get_model_by_code("aliyun_clb")
+        if clb is not None:
+            target = await res_repo.find_by_field_text(clb.id, "address", value)
+    else:
+        nlb = await model_repo.get_model_by_code("aliyun_nlb")
+        if nlb is not None:
+            target = await res_repo.find_by_field_text(nlb.id, "dns_name", value)
+    if target is None:
+        return
+    await rel_repo.create_relates_to(CmdbRelatesTo(
+        source_id=service.id,
+        target_id=target.id,
+        description=DESC_LB_BRIDGE,
+        kind=KIND_LB,
+        synced_at=datetime.now(timezone.utc),
+        source="discovery",
+    ))
+
+
+async def adopt_service_lb_edges(session: AsyncSession, match_value: str) -> None:
+    """CLB/NLB 入库时反向孤儿认领：lb_ingress 匹配的 service 重算 LB 桥接边。"""
+    if not match_value:
+        return
+    model_repo = CmdbModelRepo(session)
+    svc_model = await model_repo.get_model_by_code("k8s_service")
+    if svc_model is None:
+        return
+    res_repo = CmdbResourceRepo(session)
+    rel_repo = CmdbRelationshipRepo(session)
+    for svc in await res_repo.list_alive_by_model(svc_model.id):
+        if (svc.fields or {}).get("lb_ingress") == match_value:
+            await _rebuild_service_lb_edges(session, rel_repo, res_repo, svc)
+
+
+# ── PV ↔ 云盘 CSI 桥接边（#43/#44/#56）───────────────────────
+
+
+async def _rebuild_pv_csi_edges(
+    session: AsyncSession,
+    rel_repo: CmdbRelationshipRepo,
+    res_repo: CmdbResourceRepo,
+    pv: CmdbResource,
+    model_ids: dict[str, int],
+) -> None:
+    """k8s_pv → 云盘 relates_to（CSI 桥接，kind=csi）。
+
+    _csi_target 由 extractor 按 driver 解析（diskplugin→aliyun_disk、
+    nasplugin→aliyun_nas、pd.csi→gcp_disk）；PV 不知云账号，跨账号查对端。
+    """
+    await rel_repo.delete_relates_to_by_source_kind(pv.id, KIND_CSI)
+    target = (pv.fields or {}).get("_csi_target") or {}
+    t_code, t_key = target.get("model"), target.get("key")
+    if not t_code or not t_key:
+        return
+    t_model_id = model_ids.get(t_code)
+    if not t_model_id:
+        return
+    provider = "gcp" if t_code.startswith("gcp_") else "aliyun"
+    disk = await res_repo.find_by_provider_id_any_account(t_model_id, provider, t_key)
+    if disk is None:
+        return
+    await rel_repo.create_relates_to(CmdbRelatesTo(
+        source_id=pv.id,
+        target_id=disk.id,
+        description=DESC_CSI_BRIDGE,
+        kind=KIND_CSI,
+        synced_at=datetime.now(timezone.utc),
+        source="discovery",
+    ))
+
+
+async def adopt_pv_csi_edges(
+    session: AsyncSession, target_model_code: str, target_provider_id: str,
+) -> None:
+    """云盘入库时反向孤儿认领：重算引用它的 PV 的 CSI 桥接边。"""
+    model_repo = CmdbModelRepo(session)
+    pv_model = await model_repo.get_model_by_code("k8s_pv")
+    target_model = await model_repo.get_model_by_code(target_model_code)
+    if pv_model is None or target_model is None:
+        return
+    res_repo = CmdbResourceRepo(session)
+    rel_repo = CmdbRelationshipRepo(session)
+    for pv in await res_repo.list_alive_by_model(pv_model.id):
+        target = (pv.fields or {}).get("_csi_target") or {}
+        if target.get("model") == target_model_code and target.get("key") == target_provider_id:
+            await _rebuild_pv_csi_edges(
+                session, rel_repo, res_repo, pv, {target_model_code: target_model.id},
+            )
 
 
 # ── Ingress 路由上游边 ─────────────────────────────────────────────
@@ -366,9 +497,10 @@ async def _rebuild_service_pod_edges(
     namespace: str,
     model_ids: dict[str, int],
 ) -> None:
-    """Service 变更时：按 selector 重建 Service → Pod 边。"""
+    """Service 变更时：按 selector 重建 Service → Pod 边（kind=selector 槽位）。"""
     selector = service.fields.get("selector") or {}
-    await rel_repo.delete_relates_to_by_source(service.id)
+    # 按描述删除（kind 无关）：兼容存量 kind='' 边，且不踩 LB 桥接边
+    await rel_repo.delete_relates_to_by_source_description(service.id, DESC_SELECTOR_MATCH)
     if not selector or not namespace:
         return
 
@@ -380,6 +512,7 @@ async def _rebuild_service_pod_edges(
                 source_id=service.id,
                 target_id=pod_id,
                 description=DESC_SELECTOR_MATCH,
+                kind=KIND_SELECTOR,
                 synced_at=now,
                 source="discovery",
             ))

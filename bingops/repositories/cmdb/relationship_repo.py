@@ -143,6 +143,38 @@ class CmdbRelationshipRepo:
         await self._session.flush()
         return len(relations)
 
+    async def delete_relates_to_by_source_description(
+        self, source_id: int, description: str,
+    ) -> int:
+        """按源节点+描述删除关联边（kind 无关，兼容存量 kind='' 边）。"""
+        result = await self._session.execute(
+            select(CmdbRelatesTo).where(
+                CmdbRelatesTo.source_id == source_id,
+                CmdbRelatesTo.description == description,
+            )
+        )
+        relations = list(result.scalars().all())
+        for relation in relations:
+            await self._session.delete(relation)
+        if relations:
+            await self._session.flush()
+        return len(relations)
+
+    async def find_by_field_text(
+        self, model_id: int, field_code: str, value: str,
+    ):
+        """按 fields JSONB 键的文本值匹配未软删资源（LB 桥接按 address/dns_name）。"""
+        from bingops.models.cmdb.resource import CmdbResource
+
+        result = await self._session.execute(
+            select(CmdbResource).where(
+                CmdbResource.model_id == model_id,
+                CmdbResource.fields[field_code].astext == value,
+                CmdbResource.deleted_at.is_(None),
+            )
+        )
+        return result.scalars().first()
+
     async def delete_relations_of(self, resource_id: int) -> int:
         """删除资源相关的全部边（两个方向、两种表），软删除时清理用。"""
         total = await self.delete_belongs_to_by_child(resource_id)

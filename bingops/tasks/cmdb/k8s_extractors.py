@@ -212,6 +212,36 @@ def _extract_workload(obj: dict, resource_type: str) -> tuple[dict, str]:
     return _clean(fields), status
 
 
+def _parse_csi_target(
+    driver: str | None, handle: str | None, volume_attrs: dict | None,
+) -> dict | None:
+    """CSI volumeHandle/driver 解析为 {model, key}（供 PV→云盘桥接边）。
+
+    - alicloud disk：volumeHandle 即 DiskId
+    - alicloud NAS：文件系统 ID 在 volumeAttributes.server 域名前缀
+      （<fsid>-<mnt>.<region>.nas.aliyuncs.com）
+    - GCP PD：handle=projects/p/zones/{zone}/disks/{name} → {zone}/{name}
+      （同 gcp_disk provider_id 形态）
+    """
+    if not driver:
+        return None
+    d = driver.lower()
+    if "diskplugin" in d:
+        return {"model": "aliyun_disk", "key": handle} if handle else None
+    if "nasplugin" in d:
+        server = (volume_attrs or {}).get("server") or ""
+        fsid = server.split(".", 1)[0].split("-", 1)[0] if server else ""
+        return {"model": "aliyun_nas", "key": fsid} if fsid else None
+    if "pd.csi.storage.gke.io" in d:
+        parts = (handle or "").split("/")
+        if "zones" in parts:
+            zone = parts[parts.index("zones") + 1]
+            name = parts[-1]
+            if zone and name:
+                return {"model": "gcp_disk", "key": f"{zone}/{name}"}
+    return None
+
+
 def _extract_pv(obj: dict, _rt: str) -> tuple[dict, str]:
     spec = obj.get("spec") or {}
     csi = spec.get("csi") or {}
@@ -223,6 +253,9 @@ def _extract_pv(obj: dict, _rt: str) -> tuple[dict, str]:
         "reclaim_policy": spec.get("persistentVolumeReclaimPolicy"),
         "csi_driver": csi.get("driver"),
         "volume_handle": csi.get("volumeHandle"),
+        "_csi_target": _parse_csi_target(
+            csi.get("driver"), csi.get("volumeHandle"), csi.get("volumeAttributes"),
+        ),
     }
     return _clean(fields), phase
 

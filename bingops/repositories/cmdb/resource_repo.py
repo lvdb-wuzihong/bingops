@@ -53,6 +53,16 @@ class CmdbResourceRepo:
         )
         return list(result.scalars().all())
 
+    async def list_alive_by_model(self, model_id: int) -> list[CmdbResource]:
+        """某模型全部未软删资源（CSI 桥接反向孤儿认领遍历用，量级小）。"""
+        result = await self._session.execute(
+            select(CmdbResource).where(
+                CmdbResource.model_id == model_id,
+                CmdbResource.deleted_at.is_(None),
+            )
+        )
+        return list(result.scalars().all())
+
     async def get_by_provider_id(
         self,
         model_id: int,
