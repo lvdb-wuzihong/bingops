@@ -25,6 +25,22 @@ class CmdbResourceRepo:
         )
         return result.scalar_one_or_none()
 
+    async def find_by_name_and_zone(
+        self, model_id: int, provider: str, name: str, zone: str, cloud_account: str,
+    ) -> CmdbResource | None:
+        """按 name+zone+账号查（GCP disk users URL 解析出的实例名+zone 匹配 compute）。"""
+        result = await self._session.execute(
+            select(CmdbResource).where(
+                CmdbResource.model_id == model_id,
+                CmdbResource.provider == provider,
+                CmdbResource.name == name,
+                CmdbResource.zone == zone,
+                CmdbResource.cloud_account == cloud_account,
+                CmdbResource.deleted_at.is_(None),
+            )
+        )
+        return result.scalars().first()
+
     async def list_by_ids(self, resource_ids: list[int]) -> list[CmdbResource]:
         """按 ID 集合批量查资源（排除软删；拓扑子图节点装载用）。"""
         if not resource_ids:

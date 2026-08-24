@@ -151,6 +151,13 @@ async def rebuild_cloud_relationships(
             session, rel_repo, res_repo, model_repo, resource, message,
             description=DESC_FIREWALL_BELONG,
         )
+    elif model.code == "gcp_disk":
+        # 云盘 → 项目账号根节点 belongs_to（账号归属）+ 挂载于边
+        await _rebuild_parent_edge(
+            session, rel_repo, res_repo, model_repo, resource, message,
+            description=DESC_ACCOUNT_BELONG,
+        )
+        await _rebuild_gcp_disk_edges(session, rel_repo, res_repo, model_repo, resource, message)
     elif model.code == "dns_record":
         # 解析记录 → zone belongs_to（域归属），跨厂商共用模型 code
         await _rebuild_parent_edge(
@@ -480,6 +487,54 @@ async def _rebuild_dnat_edges(
             target_id=ecs_id,
             description=DESC_DNAT_EXPOSE,
             kind=KIND_DNAT,
+            synced_at=now,
+            source="discovery",
+        ))
+
+
+# ── GCP 云盘挂载边 ───────────────────────────────────────────────
+
+
+async def _rebuild_gcp_disk_edges(
+    session: AsyncSession,
+    rel_repo: CmdbRelationshipRepo,
+    res_repo: CmdbResourceRepo,
+    model_repo: CmdbModelRepo,
+    resource: CmdbResource,
+    message: CloudResourceMessage,
+) -> None:
+    """gcp_disk → gcp_compute relates_to（挂载于）。
+
+    users 字段存 [{name, zone}]（采集端从实例 URL 解析）；GCE 名称仅 zone 内
+    唯一，故按 name+zone+账号 精确匹配。diff 跳过无变更。
+    """
+    fields = resource.fields or {}
+    expected_ids: set[int] = set()
+    compute_model = await model_repo.get_model_by_code("gcp_compute")
+    if compute_model is not None:
+        for entry in fields.get("users") or []:
+            name = entry.get("name") or ""
+            if not name:
+                continue
+            inst = await res_repo.find_by_name_and_zone(
+                compute_model.id, message.provider, name,
+                entry.get("zone") or "", message.cloud_account,
+            )
+            if inst is not None:
+                expected_ids.add(inst.id)
+
+    current = await rel_repo.get_relations_from(resource.id)
+    current_ids = {r.target_id for r in current}
+    if expected_ids == current_ids:
+        return
+
+    await rel_repo.delete_relates_to_by_source(resource.id)
+    now = datetime.now(timezone.utc)
+    for target_id in expected_ids:
+        await rel_repo.create_relates_to(CmdbRelatesTo(
+            source_id=resource.id,
+            target_id=target_id,
+            description=DESC_MOUNT_ECS,
             synced_at=now,
             source="discovery",
         ))
