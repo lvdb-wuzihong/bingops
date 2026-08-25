@@ -126,6 +126,7 @@ step:      pending → running → success / failed / skipped / rolled_back / ro
 - **Inventory 源 = CMDB**：下发时 bingops 从目标快照生成 `[{resource_id, name, ip, ssh_user, ssh_key_ref}]`；runner 拼 inventory JSON，资源选择器能力在此变现
 - **目标范围硬校验**：runbook.`target_models` 声明 scope（默认 `[aliyun_ecs, gcp_compute]`），`create_execution` 对快照 model_code 越界即 400；前端选择器按 target_models 传 `model_id` 过滤（UX 层，不替代后端校验）；K8s 对象 P2 以 local 模式扩入
 - **网络可达**：runner 部署于同 VPC 直连 22 端口；跨 VPC/IDC 留 runbook 级 `proxy_hop` 字段（P1 不实现，渲染为 ProxyCommand）
+- **connection 契约**（runbook 级）：`ssh_user` 登录用户 / `ssh_key_ref` Vault 键名 / `become` 默认 false / `become_method` 默认 sudo / `become_user` 默认 root；**sudo 密码不进配置**：宿主机 NOPASSWD sudoers 由 bootstrap runbook 统刷，退路 `become_password_ref` 走 Vault+no_log；runner 渲染为 inventory 变量 `ansible_become*`
 
 ---
 
@@ -175,7 +176,7 @@ CREATE TABLE runbooks (
     description   TEXT,
     params_schema JSONB        NOT NULL DEFAULT '{}',   -- 用户入参动态表单
     steps         JSONB        NOT NULL DEFAULT '[]',   -- 有序步骤，契约见 §3
-    connection    JSONB        NOT NULL DEFAULT '{}',   -- {ssh_user, ssh_key_ref}
+    connection    JSONB        NOT NULL DEFAULT '{}',   -- {ssh_user, ssh_key_ref, become, become_method, become_user}
     target_models JSONB        NOT NULL DEFAULT '["aliyun_ecs", "gcp_compute"]',
     version       INT          NOT NULL DEFAULT 1,      -- 编辑 +1，execution 快照
     risk_level    VARCHAR(16)  NOT NULL DEFAULT 'low',

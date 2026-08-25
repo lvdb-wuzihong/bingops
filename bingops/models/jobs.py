@@ -35,7 +35,8 @@ class Runbook(BaseMixin, Base):
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     params_schema: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     steps: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
-    # 连接配置：{ssh_user, ssh_key_ref}（钥匙名进消息，真钥匙在 Vault）
+    # 连接配置：{ssh_user, ssh_key_ref, become, become_method, become_user}
+    # 钥匙名进消息，真钥匙在 Vault；sudo 密码不进配置（NOPASSWD sudoers 纪律）
     connection: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     # 目标模型范围（执行清单硬校验依据，P1 默认云主机两类）
     target_models: Mapped[list] = mapped_column(
