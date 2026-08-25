@@ -80,6 +80,16 @@ PERMISSIONS: list[tuple[str, str]] = [
     ("ticket:update", "更新工单"),
     ("ticket:assign", "指派工单"),
     ("ticket:delete", "删除工单"),
+    ("runbook:list", "查看 Runbook 列表"),
+    ("runbook:get", "查看 Runbook 详情"),
+    ("runbook:create", "创建 Runbook"),
+    ("runbook:update", "更新 Runbook"),
+    ("runbook:delete", "删除 Runbook"),
+    ("job:list", "查看任务执行列表"),
+    ("job:get", "查看任务执行详情"),
+    ("job:create", "创建并下发任务"),
+    ("job:cancel", "取消任务"),
+    ("job:rollback", "回滚任务"),
 ]
 
 ROLES: list[tuple[str, str, str, bool]] = [

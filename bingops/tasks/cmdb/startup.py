@@ -14,8 +14,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from bingops.core.config import settings
 from bingops.kafka.client import KafkaClient
 from bingops.schemas.cmdb.kafka_messages import CloudResourceMessage, K8sResourceMessage
+from bingops.schemas.jobs import JOB_EVENTS_TOPIC, JobEventMessage
 from bingops.tasks.cmdb.cloud_consumer import create_cloud_handler
 from bingops.tasks.cmdb.k8s_consumer import create_k8s_handler, snapshot_sweep_loop
+from bingops.tasks.jobs import dispatcher
+from bingops.tasks.jobs.event_consumer import create_job_event_handler
 
 logger = logging.getLogger(f"bingops.{__name__}")
 
@@ -50,11 +53,20 @@ async def start_cmdb_kafka_consumer(session_factory: async_sessionmaker[AsyncSes
         CloudResourceMessage,
         cloud_handler,
     )
+    # 任务系统：runner 回流的步骤事件/日志（job-events 单 topic，精确匹配）
+    client.register_handler(
+        JOB_EVENTS_TOPIC,
+        JobEventMessage,
+        create_job_event_handler(session_factory),
+    )
 
     # 订阅 Topic：固定正则订阅，是否处理由 cmdb_sync_tasks 数据表驱动
     pattern = _resolve_pattern()
 
     await client.start_consumer(pattern=pattern)
+    # 任务系统分发需要 Producer（job-dispatch）；注入 dispatcher 供 service/consumer 使用
+    await client.start_producer()
+    dispatcher.set_kafka_client(client)
     client.start_background()
 
     # 快照对账扫尾任务（#15）：空闲快照会话定时终结差集软删
@@ -79,7 +91,7 @@ async def stop_cmdb_kafka_consumer() -> None:
 
 
 def _resolve_pattern() -> str:
-    """生成订阅正则：^(k8s-events-.*|cloud-sync-.*)。
+    """生成订阅正则：^(k8s-events-.*|cloud-sync-.*|job-events.*)。
 
     aiokafka pattern 订阅由 coordinator 按集群 metadata 动态匹配实际 topic，
     新接入集群/云厂商无需改配置、无需重启。
@@ -88,4 +100,4 @@ def _resolve_pattern() -> str:
     """
     k8s_prefix = settings.kafka_k8s_topic_pattern.split("{")[0]
     cloud_prefix = settings.kafka_cloud_topic_pattern.split("{")[0]
-    return f"^({k8s_prefix}.*|{cloud_prefix}.*)"
+    return f"^({k8s_prefix}.*|{cloud_prefix}.*|{JOB_EVENTS_TOPIC}.*)"

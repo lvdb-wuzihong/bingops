@@ -15,29 +15,29 @@
 
 ---
 
-## 1. 录入进度对账（2026-08-18 库内实测）
+## 1. 录入进度对账（2026-08-25 库内实测）
 
 | 项 | 进度 | 说明 |
 |-----|------|------|
 | 分类 | 4 个 ✅ | 阿里云 / K8S / 谷歌云 / DNS；中间件分组用到再建 |
-| 模型 | 33 个 | 待建：`k8s_ingress`（**模型已建 id=34，字段/关系待录**，见 §3.3；extractor/边分支已落地 2026-08-24）、`gcp_redis`（附录 A 规格就绪待录）；`apisix_route` 缓做（§3.1）；`selfhosted_*` 在用哪个建哪个（§3.2） |
-| 字段 | 154 + 云模型批次 | 剩 2 见 §2；**字段疑惑对账见 §2.5** |
-| 关系约束 | **53/56 已录** | 全部正确；余 3 条被 apisix_route 阻塞，见 §4 头部注 |
+| 模型 | 34 个 | 在用模型**全部录齐**（k8s_ingress 字段/关系 2026-08-25 补录完成）；待建仅：`apisix_route` 缓做（§3.1）、`selfhosted_*` 在用哪个建哪个（§3.2） |
+| 字段 | 198 个 | §2 修正项**清零**（ecs.memory_gb=number、dns_zone.dns_servers=json 均已重建）；§2.5 裁决项全部落地 |
+| 关系约束 | **56/56 已录** | 全部正确；apisix_route 的 3 条（#20/#40/#48）随缓做不占坑，见 §4 头部注 |
 | 选项库 | 0 ✅ 已清空 | API 标 deprecated 休眠 |
-| 实例/边 | 生产产出中 | K8s 链路已产出；**云链路第二批完成**（附录 B #23）；**GCP 链路启动**（附录 B #25）：compute/vpc/subnet/firewall 已实现；**DNS 链路完成**（附录 B #26）：dns_zone/dns_record 双厂商适配器 |
+| 实例/边 | 生产产出中 | 存活资源 **1048**（aliyun 701 / gcp 347），belongs_to 边 989；**K8s↔云全链路桥接边代码闭环**（附录 B #34）：承载于/CSI/LB/DNAT/解析目标/路由上游全落地，其中 csi/lb/dnat kind 边待生产数据验证 |
 | 同步任务 | 多任务支持 | v8 迁移放开 (task_type, target_id) 唯一约束；消费端门控 = 启用任务并集（附录 B #24） |
 
 ---
 
-## 2. 字段修正清单（剩 2 项，UI 上删掉重建）
+## 2. 字段修正清单（✅ 全部清零，2026-08-25 实测）
 
-> `field_type` 创建后不可改（后端有意设计，实例 fields JSONB 的值类型锤定），改类型一律**删掉重建**（现在无实例数据，零成本）。
+> `field_type` 创建后不可改（后端有意设计，实例 fields JSONB 的值类型锤定），改类型一律**删掉重建**。
 > 其余 6 项（旧 #2/#3/#4/#5/#7/#8）已于 2026-08-08 对账确认修复。
 
-| # | 模型.字段 | 现状 | 改为 | 原因 |
-|---|-----------|------|------|------|
-| 1 | aliyun_ecs.`memory_gb` | 类型=string | **删重建为 number** | 数值筛选/排序依赖数字类型 |
-| 2 | dns_zone.`dns_servers` | string | **删重建为 json** | NS 服务器是数组 |
+| # | 模型.字段 | 状态 | 说明 |
+|---|-----------|------|------|
+| 1 | aliyun_ecs.`memory_gb` | ✅ 已重建为 number | 数值筛选/排序依赖数字类型 |
+| 2 | dns_zone.`dns_servers` | ✅ 已重建为 json | NS 服务器是数组 |
 
 > 检查过无问题的项：全部枚举字段 options 与值域清单一致；EIP/CLB/云盘/NAS 的
 > charge_type 只放 prepaid/postpaid（无 spot）是**正确裁剪**，这些资源不存在抢占式。
@@ -50,10 +50,10 @@
 |---|-----------|------|------|
 | 1 | aliyun_amqp.`support_node` | **建议删** | 预置期臆想字段：说明写「单节点/镜像/集群」却是 number 类型，自相矛盾；RabbitMQ OpenAPI（ListInstances/GetInstance，SDK 解包逐项核对）**不返回任何节点数**，产品规格只暴露系列+TPS/队列上限，节点拓扑云侧托管不可见 |
 | 2 | aliyun_amqp.`port` | **建议删**（或留人工） | API 不返回；5671/5672 是协议常识非实例规格，采集器不填 |
-| 3 | aliyun_rds.`connection_string` | **待决策** | 库内录的是单字段，附录 A 原设计是 private/public 一对；采集器现语义「内网默认、公网存在时覆盖」有歧义。二选一：接受现状并明确语义为「主连接地址」，或按附录 A 新增 `public_connection_string`（新增不违反不可变纪律） |
+| 3 | aliyun_rds.`connection_string` | **仍待决策** | 2026-08-25 实测库内仍为单字段；附录 A 原设计是 private/public 一对。二选一：接受现状并明确语义为「主连接地址」，或按附录 A 新增 `public_connection_string`（新增不违反不可变纪律）。记忆库已有「RDS 公网与内网连接地址并存规范」决策，落地时对齐 |
 | 4 | aliyun_oss.`used_size_gb` | 保留，注明 | GetBucketStat 约小时级延迟，不做实时容量监控依据 |
 | 5 | aliyun_nas.`used_size_gb` | 保留 | MeteredSize 实时计量，无延迟问题 |
-| 6 | aliyun_amqp.`instance_type` | 保留（已修映射） | 官方值域 PROFESSIONAL/ENTERPRISE/VIP/SERVERLESS；采集器 VIP→platinum、SERVERLESS→serverless（模型枚举需 UI 补 serverless option）；Edition 是部署架构不作回退 |
+| 6 | aliyun_amqp.`instance_type` | ✅ 保留（映射+枚举已修） | 官方值域 PROFESSIONAL/ENTERPRISE/VIP/SERVERLESS；采集器 VIP→platinum、SERVERLESS→serverless；**serverless option 已补录**（2026-08-25 实测）；Edition 是部署架构不作回退 |
 
 ---
 
@@ -97,11 +97,11 @@
 > 承载关系用 relates_to 不用 belongs_to（集群跨多台机器，挂从属树会重复显示），
 > 见 §4 #50/#51。与 k8s_workload 不重复：workload 是运行形态，本分组是逻辑服务资产。
 
-### 3.3 Ingress `k8s_ingress`（K8S 分组）——**模型已建，字段待录**
+### 3.3 Ingress `k8s_ingress`（K8S 分组）——✅ 已录齐（2026-08-25 实测）
 
 > 决策反转（2026-08-20）：ingress 在用 → 保留建模；cmdb-informer 已加 Ingress watch（2026-08-24 消息在流）。
-> extractor 与关系分支已落地（附录 B #30）；字段/关系按下表 UI 录入后即生效。
-> 关系：k8s_ingress → k8s_namespace belongs_to「命名空间归属」；k8s_ingress → k8s_service relates_to「路由上游」（backend service 名同 ns 匹配，service 事件反向重算）。
+> 5 字段 + 2 关系已录入（命名空间归属 belongs_to / 路由上游 relates_to），extractor 与边分支已落地（附录 B #30），**全链路生效**。
+> backend service 名同 ns 匹配，service 事件反向重算。下表留作规格参考。
 
 | 字段名 | code | 类型 | 分组 | 必填 | 说明 |
 |--------|------|------|------|------|------|
@@ -118,12 +118,12 @@ ConfigMap/Secret 待“配置影响面分析”立项再议。
 
 ---
 
-## 4. 模型关系约束（cmdb_model_relations 录入清单，53/56）
+## 4. 模型关系约束（cmdb_model_relations 录入清单，56/56）
 
 > relation_type 只有 belongs_to（从属/树）与 relates_to（关联/图）两种，业务语义写在关系名。
 >
-> 录入进度（2026-08-19）：53 条全部正确（本轮新增 gcp_cloudsql/gcp_disk 4 条）；
-> **阻塞 3**：#20/#40/#48 等 apisix_route 建好；#49/#50/#51 按原策略缓录。
+> 录入进度（2026-08-25 实测）：56 条全部正确（含 ingress #57/#58、gcp_redis 网络归属）；
+> #20/#40/#48 随 apisix_route 缓做不占坑；#49/#50/#51 按原策略缓录。
 
 ### 4.1 从属关系（belongs_to）
 
@@ -274,7 +274,7 @@ ConfigMap/Secret 待“配置影响面分析”立项再议。
 
 从属：gcp_cloudsql belongs_to gcp_vpc (n:1，网络归属)。
 
-### gcp_redis（Memorystore for Redis）
+### gcp_redis（Memorystore for Redis）✅ 已录
 
 | 字段名 | code | 类型 | 分组 | 必填 | 说明 |
 |--------|------|------|------|------|------|
@@ -288,7 +288,7 @@ ConfigMap/Secret 待“配置影响面分析”立项再议。
 从属：gcp_redis belongs_to gcp_vpc (n:1，网络归属)。
 > 采集 API：Cloud Redis `projects.locations.instances.list`（location 用 `-` 一次拉全）；
 > state 映射 READY→running / CREATING/UPDATING/DELETING→maintenance / SUSPENDED→stopped；
-> OAuth scope 需补 `cloud-platform.read-only`（compute.readonly 不覆盖 Redis API）。
+> OAuth scope 实际补的是 `cloud-platform`（Memorystore/SQL Admin 无专属只读 scope，IAM 仍限只读）。
 
 ### gcp_disk ✅ 已录（GKE 跑有状态服务、需 PV 桥接对端）
 
@@ -330,14 +330,15 @@ ConfigMap/Secret 待“配置影响面分析”立项再议。
 | 20 | 实例关系 API 单父校验 | 手工创建 belongs_to 边时 service 层校验：该 child 已有父则拒绝（或提示替换）；边表现状只有 UNIQUE(child_id, parent_id) 防重复边，不防一子多父 |
 | 21 | 高 churn Kind（pod）边写入策略 | pod 边变更**不写 change_log**（discovery 数据审计价值≈0，防噪音淹没）；pod 删除靠边表外键 ON DELETE CASCADE 自动级联，无需主动删边；builder 对 pod 按事件增量 upsert，禁止全量重建（防死元组/VACUUM 压力） |
 | 22 | **ReplicaSet 层不建模**（决策 2026-08-11） | pod ownerRef 实际经过 RS 层，但**边扁平化为 pod→workload**（RS 名剥离尾部 `-hash` 定位 Deployment，kubectl 同款做法）；RS 痕迹保留在 `pod.owner_kind/owner_name` 字段供排障追溯。不建模理由：RS 无独立管理价值（完全被 Deployment 掌控）、每次发版新建 RS 旧 RS 僵尸留存（churn 翻倍）、informer 未 watch replicasets。发版拓扑（新旧 RS 共存）属运行时视图，归 kubectl/控制台 |
-| 23 | **云链路第二批完成**（2026-08-18） | 采集器 15 类 fetcher 全部落地：account（配置驱动零 API，建树根）/ ecs / vpc / vswitch / security_group / eip / clb / nlb / nat_gateway / oss / disk / nas / rds / redis / amqp；消费端边重建分支对齐库内关系约束描述（网络归属/账号归属/挂载于/绑定 EIP/挂载点/负载均衡后端/服务器组后端）；默认集派生自 _FETCHERS（空白名单 = 全部已实现，未实现类型不再进默认集）；SDK 方法名/响应结构以解包 wheel 核对为准（防 AttributeError 类事故）；未决：k8s_pv→disk/nas CSI 桥接、NAT DNAT 派生边（依赖 #1 kind 列）、dns_record 解析目标边 |
+| 23 | **云链路第二批完成**（2026-08-18） | 采集器 15 类 fetcher 全部落地：account（配置驱动零 API，建树根）/ ecs / vpc / vswitch / security_group / eip / clb / nlb / nat_gateway / oss / disk / nas / rds / redis / amqp；消费端边重建分支对齐库内关系约束描述（网络归属/账号归属/挂载于/绑定 EIP/挂载点/负载均衡后端/服务器组后端）；默认集派生自 _FETCHERS（空白名单 = 全部已实现，未实现类型不再进默认集）；SDK 方法名/响应结构以解包 wheel 核对为准（防 AttributeError 类事故）；~~未决 CSI 桥接/DNAT 派生边/解析目标边~~ 已全部落地（#32/#12） |
 | 24 | **同步任务多目标拆分**（v8 迁移，2026-08-18） | 删除 (task_type, target_id) 唯一约束：同一云账号可按资源类型拆多个任务独立调度（如计算 5min / 网络 1h）；消费端门控改为「任一启用任务白名单命中即放行」（空=全部）；拆分建议白名单互不重叠避免重复采集；同账号多任务可并发，cron 错开防限流 |
-| 25 | **GCP 链路启动**（2026-08-19） | gcp_compute 生产跑通 + gcp_vpc/gcp_subnet/gcp_firewall 已实现。关键事实：① 大陆出网不通 googleapis.com，采集器部署配 HTTPS_PROXY/NO_PROXY=.aliyuncs.com 仅代理 GCP 流量；② **OAuth scope 必须 compute.readonly**（cloud-platform.read-only 会被 Compute API 拒 403），DNS 另需 ndev.clouddns.readonly（多 scope token 两边都满足）；③ OS 三级推断：licenses 家族项目 slug→许可证名关键词→Disks.get 磁盘 sourceImage；④ GCP 名称型 provider_id 约定（vpc/subnet 用名称，compute 用数字 ID）；⑤ 待办：gcp_disk / gcp_cloudsql / gcp_account 根节点 |
-| 26 | **DNS 链路完成**（2026-08-19） | dns_zone/dns_record 跨厂商共用模型 code，aliyun（alidns：DescribeDomains/DescribeDomainRecords）与 gcp（Cloud DNS：ManagedZones/ResourceRecordSets）双适配器落地。归一化约定照附录 B #19：name 存 FQDN（@→裸域、*→*.zone、GCP 尾点剥离）；aliyun provider_id=RecordId、gcp 合成 {zone}:{fqdn}:{type}:{value}；MX/SRV 优先级 GCP 嵌 rrdatas 需拆分、TXT 去引号；aliyun Line→policy_type simple/line+policy_key；raw json 保留原始数据；SOA 不建；GCP zone_type 取 visibility（public/private）。record→zone belongs_to「域归属」消费端已接；**未决**：解析目标边（#45-47，A 按 IP 匹配 EIP、CNAME 按 hostname 匹配 CLB/NLB）二期；PrivateZone（pvtz）用到再录 |
+| 25 | **GCP 链路启动**（2026-08-19） | gcp_compute 生产跑通 + gcp_vpc/gcp_subnet/gcp_firewall 已实现。关键事实：① 大陆出网不通 googleapis.com，采集器部署配 HTTPS_PROXY/NO_PROXY=.aliyuncs.com 仅代理 GCP 流量；② **OAuth scope 必须 compute.readonly**（cloud-platform.read-only 会被 Compute API 拒 403），DNS 另需 ndev.clouddns.readonly（多 scope token 两边都满足）；③ OS 三级推断：licenses 家族项目 slug→许可证名关键词→Disks.get 磁盘 sourceImage；④ GCP provider_id 作用域键约定：vpc 用名称、subnet/disk/redis 用 {region|zone}/{name}（防撞键，#29/#31）、compute 用数字 ID；⑤ ~~待办 gcp_disk/gcp_cloudsql/gcp_account~~ 已全部完成（#29/#31），gcp_subnet 撞键事故后 provider_id 升级 region/name 键 |
+| 26 | **DNS 链路完成**（2026-08-19） | dns_zone/dns_record 跨厂商共用模型 code，aliyun（alidns：DescribeDomains/DescribeDomainRecords）与 gcp（Cloud DNS：ManagedZones/ResourceRecordSets）双适配器落地。归一化约定照附录 B #19：name 存 FQDN（@→裸域、*→*.zone、GCP 尾点剥离）；aliyun provider_id=RecordId、gcp 合成 {zone}:{fqdn}:{type}:{value}；MX/SRV 优先级 GCP 嵌 rrdatas 需拆分、TXT 去引号；aliyun Line→policy_type simple/line+policy_key；raw json 保留原始数据；SOA 不建；GCP zone_type 取 visibility（public/private）。record→zone belongs_to「域归属」消费端已接；~~解析目标边二期~~ **#45-47 已完成**（A 按 IP 匹配 EIP/CLB、CNAME 按 hostname 匹配 NLB + 反向孤儿认领，见 #12）；PrivateZone（pvtz）用到再录；GCP DKIM 超长 TXT 值合成 provider_id 换 sha 摘要防超 VARCHAR(256) |
 | 27 | **K8s 节点↔云主机桥接边完成**（2026-08-19） | #35/#36 承载于：节点 upsert 时按 fields.instance_id 精确匹配（ACK providerID 解析 i-xxx=ECS provider_id；GKE gce://proj/zone/name 解析实例名=gcp_compute.name）优先、internal_ip==private_ip 兜底；云主机 upsert 时反向孤儿认领（adopt_node_host_edges）补边；槽位整包替换 diff 跳过；自建集群（provider=k8s）无对端静默跳过 |
 | 28 | **K8s 资源地域消费端推导**（2026-08-21） | informer 契约不改；消费端从 node 消息 labels 提取 `topology.kubernetes.io/region/zone` 写 k8s_cluster 实例 region/zone 通用列（集群实例为地域唯一事实源，同 #17/#19 模式；仅首次识别写入，防多 zone 集群 zone 值抖动）；所有 K8s 资源 upsert 时继承集群 region/zone；region 首次识别时批量回填该集群 discovery 资源历史空白地域（无变更跳过分支不自愈 region）；标签缺失（自建集群无 cloud-provider）优雅降级留空。ACK 实测 `cn-guangzhou`/`cn-guangzhou-a|b`，与云侧表达一致；GKE 待接入后验收 |
-| 29 | **gcp_disk + gcp_account 根节点完成**（2026-08-24） | disk.py：DisksClient.aggregated_list（scope zones/{zone}，zone→region 地图过滤 accounts.yaml regions）；provider_id={zone}/{name}（盘名仅 zone 内唯一，同 subnet 撞键教训）；字段 disk_type=type_ URL 末段（proto 属性带下划线）/size_gb/encrypted=三类加密钥存在性/users=[{name,zone}]（实例 URL 解析）；labels→cloud_tags。account.py：零 API 配置驱动根节点（同 aliyun account），provider_id=项目 ID，顺带修复 gcp_vpc 账号归属悬空边。消费端：gcp_disk→gcp_account 账号归属 + _rebuild_gcp_disk_edges 挂载于（users name+zone+账号 精确匹配 gcp_compute，GCE 名仅 zone 内唯一）；k8s_pv→gcp_disk CSI 桥接仍待办 |
-| 30 | **k8s_ingress 消费端落地**（2026-08-24） | informer 已发 ingresses 消息；k8s_extractors 加 _extract_ingress（rules/hosts/tls_hosts/lb_ingress 归一化排序，_backend_services 下划线内部键供建边）；relationship_builder：ingress→namespace 命名空间归属 + _rebuild_ingress_service_edges 路由上游（backend 名按 provider_id {cluster}/{ns}/{name} 精确匹配）+ service 事件反向重算引用它的 ingress（_rebuild_ingress_inbound_edges）。模型字段/关系待 UI 录入（§3.3）；字段未录期间 _backend_services 仍存活（下划线键豁免过滤），路由上游边先行可用 |
-| 31 | **gcp_cloudsql + gcp_redis 完成**（2026-08-24） | cloudsql.py：PyPI 无 sqladmin GAPIC 包（google-cloud-sqladmin-* 不存在）→ SQL Admin REST（AuthorizedSession，requests 系走代理）+ pageToken 分页；databaseVersion MYSQL_8_0 拆 engine/engine_version；ipAddresses PRIMARY/PRIVATE 拆公网/内网；settings.ipConfiguration.privateNetwork→vpc_id+parent。redis.py：google-cloud-redis GAPIC（list_instances locations='-' 全项目）；provider_id={region}/{name}（名字仅 location 内唯一）；redisVersion REDIS_7_2→7.2；memorySizeGb×1024=capacity_mb；authorized_network→vpc_id+parent。scope 加 cloud-platform（Memorystore/SQL Admin 无专属只读 scope，IAM 仍限只读）。消费端两者复用 _rebuild_parent_edge(DESC_NETWORK_BELONG)。**gcp_redis 模型待补录**：connection_string/port/vpc_id 三字段 + gcp_redis→gcp_vpc 网络归属关系（已录部分：engine_version/tier/capacity_mb） |
+| 29 | **gcp_disk + gcp_account 根节点完成**（2026-08-24） | disk.py：DisksClient.aggregated_list（scope zones/{zone}，zone→region 地图过滤 accounts.yaml regions）；provider_id={zone}/{name}（盘名仅 zone 内唯一，同 subnet 撞键教训）；字段 disk_type=type_ URL 末段（proto 属性带下划线）/size_gb/encrypted=三类加密钥存在性/users=[{name,zone}]（实例 URL 解析）；labels→cloud_tags。account.py：零 API 配置驱动根节点（同 aliyun account），provider_id=项目 ID，顺带修复 gcp_vpc 账号归属悬空边。消费端：gcp_disk→gcp_account 账号归属 + _rebuild_gcp_disk_edges 挂载于（users name+zone+账号 精确匹配 gcp_compute，GCE 名仅 zone 内唯一）；~~k8s_pv→gcp_disk CSI 桥接仍待办~~ 同日完成（#32） |
+| 30 | **k8s_ingress 消费端落地**（2026-08-24） | informer 已发 ingresses 消息；k8s_extractors 加 _extract_ingress（rules/hosts/tls_hosts/lb_ingress 归一化排序，_backend_services 下划线内部键供建边）；relationship_builder：ingress→namespace 命名空间归属 + _rebuild_ingress_service_edges 路由上游（backend 名按 provider_id {cluster}/{ns}/{name} 精确匹配）+ service 事件反向重算引用它的 ingress（_rebuild_ingress_inbound_edges）。**模型字段/关系 2026-08-25 已录齐**（§3.3），全链路生效 |
+| 31 | **gcp_cloudsql + gcp_redis 完成**（2026-08-24） | cloudsql.py：PyPI 无 sqladmin GAPIC 包（google-cloud-sqladmin-* 不存在）→ SQL Admin REST（AuthorizedSession，requests 系走代理）+ pageToken 分页；databaseVersion MYSQL_8_0 拆 engine/engine_version；ipAddresses PRIMARY/PRIVATE 拆公网/内网；settings.ipConfiguration.privateNetwork→vpc_id+parent。redis.py：google-cloud-redis GAPIC（list_instances locations='-' 全项目）；provider_id={region}/{name}（名字仅 location 内唯一）；redisVersion REDIS_7_2→7.2；memorySizeGb×1024=capacity_mb；authorized_network→vpc_id+parent。scope 加 cloud-platform（Memorystore/SQL Admin 无专属只读 scope，IAM 仍限只读）。消费端两者复用 _rebuild_parent_edge(DESC_NETWORK_BELONG)。**gcp_redis 模型 2026-08-25 已补录齐**：connection_string/port/vpc_id 三字段 + gcp_redis→gcp_vpc 网络归属关系 |
 | 32 | **CSI 桥接边完成**（2026-08-24） | #43/#44/#56：extractor 加 _parse_csi_target（diskplugin→aliyun_disk key=volumeHandle；nasplugin→aliyun_nas key=volumeAttributes.server 域名前缀解析 fsid；pd.csi.storage.gke.io→gcp_disk key={zone}/{name} 同 provider_id 形态）存下划线内部键 _csi_target；relationship_builder _rebuild_pv_csi_edges（kind=csi 描述「CSI 桥接」，PV 不知云账号跨账号查对端，槽位级 kind 删除）+ k8s_pv 分支；云侧 aliyun_disk/aliyun_nas/gcp_disk upsert 时 adopt_pv_csi_edges 反向孤儿认领 |
 | 33 | **LB 桥接边完成**（2026-08-24） | #38/#39：service lb_ingress（status.loadBalancer 首条目）IP 形态→aliyun_clb.address、hostname 形态→aliyun_nlb.dns_name（ipaddress 解析区分）；kind=lb 槽位与 selector 边隔离；selector 边改 kind=selector + 按描述删除（兼容存量 kind='' 边）；云侧 CLB/NLB upsert 时 adopt_service_lb_edges 反向孤儿认领。repo 加 find_by_field_text（JSONB astext 匹配）/delete_relates_to_by_source_description |
+| 34 | **模型录入与桥接边全景闭环**（2026-08-25 实测） | 34 模型 / 198 字段 / 56 关系全部录齐（ingress #57/#58、gcp_redis 补录收尾）；§2 字段修正清零、§2.5 裁决全落地（amqp support_node/port 已删、serverless option 已补、ecs.memory_gb/dns_zone.dns_servers 已重建）。生产规模：存活资源 1048（aliyun 701/gcp 347）、belongs_to 989 条。**未决仅**：① csi/lb/dnat kind 边生产验证（代码已闭环，kind 分布实测仅 bind=5，需后端部署生效后观察）；② rds 单/双连接地址决策（§2.5 #3）；③ dns→ingress 解析目标变体（锚点已就绪）；④ ECS disk_size_gb 补采（可选） |

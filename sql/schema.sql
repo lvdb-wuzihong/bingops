@@ -365,6 +365,79 @@ CREATE INDEX idx_ticket_comment_ticket ON ticket_comments (ticket_id);
 CREATE INDEX idx_ticket_comment_time   ON ticket_comments (created_at);
 
 -- ============================================================================
+-- 任务系统（runbook + job 执行引擎，设计见 docs/task-system-design.md）
+-- ============================================================================
+
+CREATE TABLE runbooks (
+    id            BIGSERIAL PRIMARY KEY,
+    name          VARCHAR(128) NOT NULL UNIQUE,
+    category      VARCHAR(64),
+    description   TEXT,
+    params_schema JSONB        NOT NULL DEFAULT '{}',
+    steps         JSONB        NOT NULL DEFAULT '[]',
+    connection    JSONB        NOT NULL DEFAULT '{}',   -- {ssh_user, ssh_key_ref}
+    version       INT          NOT NULL DEFAULT 1,
+    risk_level    VARCHAR(16)  NOT NULL DEFAULT 'low',
+    auto_rollback BOOLEAN      NOT NULL DEFAULT FALSE,
+    is_active     BOOLEAN      NOT NULL DEFAULT TRUE,
+    created_by    BIGINT       REFERENCES users(id) ON DELETE SET NULL,
+    created_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    updated_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE job_executions (
+    id               BIGSERIAL PRIMARY KEY,
+    runbook_id       BIGINT       NOT NULL REFERENCES runbooks(id),
+    runbook_version  INT          NOT NULL,
+    code_ref         VARCHAR(128) NOT NULL,
+    params           JSONB        NOT NULL DEFAULT '{}',
+    target_resources JSONB        NOT NULL DEFAULT '[]',
+    steps_snapshot   JSONB        NOT NULL DEFAULT '[]',
+    connection       JSONB        NOT NULL DEFAULT '{}',
+    status           VARCHAR(32)  NOT NULL DEFAULT 'pending',
+    rollback_policy  VARCHAR(16)  NOT NULL DEFAULT 'manual',
+    ticket_id        BIGINT,
+    triggered_by     BIGINT       NOT NULL REFERENCES users(id),
+    started_at       TIMESTAMPTZ,
+    finished_at      TIMESTAMPTZ,
+    created_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    updated_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+CREATE INDEX idx_job_exec_status  ON job_executions (status);
+CREATE INDEX idx_job_exec_runbook ON job_executions (runbook_id);
+
+CREATE TABLE job_steps (
+    id            BIGSERIAL PRIMARY KEY,
+    execution_id  BIGINT      NOT NULL REFERENCES job_executions(id) ON DELETE CASCADE,
+    step_key      VARCHAR(64) NOT NULL,
+    step_name     VARCHAR(128),
+    type          VARCHAR(16) NOT NULL DEFAULT 'ansible',
+    attempt_type  VARCHAR(16) NOT NULL DEFAULT 'do',
+    status        VARCHAR(32) NOT NULL DEFAULT 'pending',
+    serial        VARCHAR(16),
+    exit_code     INT,
+    error_message TEXT,
+    started_at    TIMESTAMPTZ,
+    finished_at   TIMESTAMPTZ,
+    created_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    updated_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    UNIQUE (execution_id, step_key, attempt_type)
+);
+CREATE INDEX idx_job_step_exec ON job_steps (execution_id);
+
+CREATE TABLE job_step_logs (
+    id        BIGSERIAL PRIMARY KEY,
+    step_id   BIGINT      NOT NULL REFERENCES job_steps(id) ON DELETE CASCADE,
+    seq       INT         NOT NULL,
+    level     VARCHAR(16) NOT NULL DEFAULT 'info',
+    host      VARCHAR(128),
+    line      TEXT        NOT NULL,
+    logged_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (step_id, seq)
+);
+CREATE INDEX idx_job_log_step ON job_step_logs (step_id, seq);
+
+-- ============================================================================
 -- 触发器：自动维护 updated_at
 -- ============================================================================
 
@@ -386,7 +459,8 @@ BEGIN
             'cmdb_model_categories', 'cmdb_models', 'cmdb_model_fields',
             'cmdb_option_sets', 'cmdb_resources', 'cmdb_business_apps',
             'cmdb_tag_definitions', 'cmdb_resource_tags', 'cmdb_sync_tasks',
-            'tickets'
+            'tickets',
+            'runbooks', 'job_executions', 'job_steps'
         ])
     LOOP
         EXECUTE format(
@@ -478,7 +552,17 @@ INSERT INTO permissions (code, name) VALUES
 ('ticket:create',  '创建工单'),
 ('ticket:update',  '更新工单'),
 ('ticket:assign',  '指派工单'),
-('ticket:delete',  '删除工单')
+('ticket:delete',  '删除工单'),
+('runbook:list',   '查看 Runbook 列表'),
+('runbook:get',    '查看 Runbook 详情'),
+('runbook:create', '创建 Runbook'),
+('runbook:update', '更新 Runbook'),
+('runbook:delete', '删除 Runbook'),
+('job:list',       '查看任务执行列表'),
+('job:get',        '查看任务执行详情'),
+('job:create',     '创建并下发任务'),
+('job:cancel',     '取消任务'),
+('job:rollback',   '回滚任务')
 ON CONFLICT (code) DO NOTHING;
 
 -- admin 角色分配所有权限（须在全部权限插入后执行）
