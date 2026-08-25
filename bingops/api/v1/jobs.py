@@ -36,6 +36,7 @@ def _runbook_to_response(runbook: Runbook) -> dict:
         params_schema=runbook.params_schema or {},
         steps=runbook.steps or [],
         connection=runbook.connection or {},
+        target_models=runbook.target_models or [],
         version=runbook.version,
         risk_level=runbook.risk_level,
         auto_rollback=runbook.auto_rollback,

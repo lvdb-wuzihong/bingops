@@ -35,6 +35,10 @@ logger = logging.getLogger(f"bingops.{__name__}")
 # 目标机 IP 提取候选键（跨模型通用 code 优先）
 _IP_FIELD_CANDIDATES = ("private_ip", "internal_ip", "ip")
 
+# P1 默认目标范围：ansible 走 SSH，仅稳定可 SSH 的云主机；
+# K8s 对象（P2 local 模式）与自建主机模型按需扩入
+DEFAULT_TARGET_MODELS: list[str] = ["aliyun_ecs", "gcp_compute"]
+
 ROLLBACKABLE_SOURCE_STATUSES = ("failed",)
 
 
@@ -103,6 +107,7 @@ async def create_runbook(session: AsyncSession, payload: RunbookCreate, user: Us
         params_schema=payload.params_schema,
         steps=payload.steps,
         connection=payload.connection,
+        target_models=payload.target_models or list(DEFAULT_TARGET_MODELS),
         risk_level=payload.risk_level,
         auto_rollback=payload.auto_rollback,
         created_by=user.id,
@@ -125,7 +130,9 @@ async def update_runbook(session: AsyncSession, runbook_id: int, payload: Runboo
     if "steps" in data:
         _validate_steps(data["steps"])
     # 定义类字段变更 → version +1（execution 快照语义）
-    definition_changed = any(k in data for k in ("steps", "params_schema", "connection"))
+    definition_changed = any(
+        k in data for k in ("steps", "params_schema", "connection", "target_models")
+    )
     for key, value in data.items():
         setattr(runbook, key, value)
     if definition_changed:
@@ -168,8 +175,16 @@ async def _snapshot_targets(
         res, code = rows[rid]
         fields = res.fields or {}
         ip = next((fields.get(k) for k in _IP_FIELD_CANDIDATES if fields.get(k)), None)
+        is_k8s = code.startswith("k8s_")
+        namespace = None
+        if is_k8s:
+            # provider_id 格式 {cluster}/{ns}/{name}（namespace 级）或 {cluster}/{name}
+            parts = (res.provider_id or "").split("/")
+            namespace = parts[1] if len(parts) >= 3 else None
         targets.append(ExecutionTarget(
             resource_id=res.id, name=res.name, ip=ip, region=res.region, model_code=code,
+            cluster_id=res.cloud_account if is_k8s else None,
+            namespace=namespace,
         ))
     return targets
 
@@ -203,6 +218,14 @@ async def create_execution(
     _validate_params(runbook.params_schema, payload.params)
 
     targets = await _snapshot_targets(session, payload.target_resource_ids)
+
+    # 目标模型范围硬校验：runbook 声明 scope 之外的资源一律拒绝
+    allowed = set(runbook.target_models or DEFAULT_TARGET_MODELS)
+    bad = sorted({t.model_code for t in targets if t.model_code not in allowed})
+    if bad:
+        raise ValidationError(
+            f"Targets outside runbook scope {bad}: allowed={sorted(allowed)}",
+        )
 
     # 并发目标锁：与执行中的 execution 目标交集命中即拒绝
     active = await JobExecutionRepo(session).list_active()

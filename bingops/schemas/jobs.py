@@ -27,6 +27,7 @@ class RunbookCreate(BaseModel):
     params_schema: dict = Field(default_factory=dict)
     steps: list[dict] = Field(min_length=1)
     connection: dict = Field(default_factory=dict)
+    target_models: list[str] | None = None  # None → 默认 [aliyun_ecs, gcp_compute]
     risk_level: str = "low"
     auto_rollback: bool = False
 
@@ -38,6 +39,7 @@ class RunbookUpdate(BaseModel):
     params_schema: dict | None = None
     steps: list[dict] | None = None
     connection: dict | None = None
+    target_models: list[str] | None = None
     risk_level: str | None = None
     auto_rollback: bool | None = None
     is_active: bool | None = None
@@ -51,6 +53,7 @@ class RunbookResponse(BaseModel):
     params_schema: dict
     steps: list
     connection: dict
+    target_models: list
     version: int
     risk_level: str
     auto_rollback: bool
@@ -76,6 +79,8 @@ class ExecutionTarget(BaseModel):
     ip: str | None = None
     region: str | None = None
     model_code: str | None = None
+    cluster_id: str | None = None   # K8s 模式（P2）：目标所属集群
+    namespace: str | None = None    # K8s 模式（P2）：命名空间
 
 
 class ExecutionResponse(BaseModel):

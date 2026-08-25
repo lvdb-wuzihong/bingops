@@ -236,6 +236,19 @@ class CmdbResourceRepo:
         )
         return list(result.scalars().all())
 
+    async def find_by_field_text(
+        self, model_id: int, field_code: str, value: str,
+    ) -> CmdbResource | None:
+        """按 fields JSONB 键的文本值匹配未软删资源（LB 桥接按 address/dns_name）。"""
+        result = await self._session.execute(
+            select(CmdbResource).where(
+                CmdbResource.model_id == model_id,
+                CmdbResource.fields[field_code].astext == value,
+                CmdbResource.deleted_at.is_(None),
+            )
+        )
+        return result.scalars().first()
+
     async def create(self, resource: CmdbResource) -> CmdbResource:
         self._session.add(resource)
         await self._session.flush()

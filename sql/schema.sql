@@ -376,6 +376,7 @@ CREATE TABLE runbooks (
     params_schema JSONB        NOT NULL DEFAULT '{}',
     steps         JSONB        NOT NULL DEFAULT '[]',
     connection    JSONB        NOT NULL DEFAULT '{}',   -- {ssh_user, ssh_key_ref}
+    target_models JSONB        NOT NULL DEFAULT '["aliyun_ecs", "gcp_compute"]',
     version       INT          NOT NULL DEFAULT 1,
     risk_level    VARCHAR(16)  NOT NULL DEFAULT 'low',
     auto_rollback BOOLEAN      NOT NULL DEFAULT FALSE,

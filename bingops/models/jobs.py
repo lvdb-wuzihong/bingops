@@ -37,6 +37,10 @@ class Runbook(BaseMixin, Base):
     steps: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
     # 连接配置：{ssh_user, ssh_key_ref}（钥匙名进消息，真钥匙在 Vault）
     connection: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    # 目标模型范围（执行清单硬校验依据，P1 默认云主机两类）
+    target_models: Mapped[list] = mapped_column(
+        JSONB, nullable=False, default=lambda: ["aliyun_ecs", "gcp_compute"],
+    )
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     risk_level: Mapped[str] = mapped_column(
         String(16), nullable=False, default="low",

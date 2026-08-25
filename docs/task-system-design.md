@@ -57,6 +57,7 @@ UI ──→ bingops（控制面，无状态 FastAPI）
 ```yaml
 name: 批量重启服务
 category: restart
+target_models: [aliyun_ecs, gcp_compute]  # 目标范围硬校验；P1 默认即此两类
 risk_level: medium            # low/medium/high/critical，叠加环境维度提级（P3）
 auto_rollback: false          # opt-in 自动回滚，默认手动
 params_schema:
@@ -123,6 +124,7 @@ step:      pending → running → success / failed / skipped / rolled_back / ro
 ## 5. Inventory 与网络
 
 - **Inventory 源 = CMDB**：下发时 bingops 从目标快照生成 `[{resource_id, name, ip, ssh_user, ssh_key_ref}]`；runner 拼 inventory JSON，资源选择器能力在此变现
+- **目标范围硬校验**：runbook.`target_models` 声明 scope（默认 `[aliyun_ecs, gcp_compute]`），`create_execution` 对快照 model_code 越界即 400；前端选择器按 target_models 传 `model_id` 过滤（UX 层，不替代后端校验）；K8s 对象 P2 以 local 模式扩入
 - **网络可达**：runner 部署于同 VPC 直连 22 端口；跨 VPC/IDC 留 runbook 级 `proxy_hop` 字段（P1 不实现，渲染为 ProxyCommand）
 
 ---
@@ -174,6 +176,7 @@ CREATE TABLE runbooks (
     params_schema JSONB        NOT NULL DEFAULT '{}',   -- 用户入参动态表单
     steps         JSONB        NOT NULL DEFAULT '[]',   -- 有序步骤，契约见 §3
     connection    JSONB        NOT NULL DEFAULT '{}',   -- {ssh_user, ssh_key_ref}
+    target_models JSONB        NOT NULL DEFAULT '["aliyun_ecs", "gcp_compute"]',
     version       INT          NOT NULL DEFAULT 1,      -- 编辑 +1，execution 快照
     risk_level    VARCHAR(16)  NOT NULL DEFAULT 'low',
     auto_rollback BOOLEAN      NOT NULL DEFAULT FALSE,
