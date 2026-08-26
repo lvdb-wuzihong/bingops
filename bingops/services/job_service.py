@@ -9,7 +9,12 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bingops.core.exceptions import ConflictError, NotFoundError, ValidationError
+from bingops.core.exceptions import (
+    ConflictError,
+    ExternalServiceError,
+    NotFoundError,
+    ValidationError,
+)
 from bingops.models.cmdb.model import CmdbModel
 from bingops.models.cmdb.resource import CmdbResource
 from bingops.models.jobs import JobExecution, JobStep, Runbook
@@ -150,7 +155,7 @@ async def update_runbook(session: AsyncSession, runbook_id: int, payload: Runboo
 async def delete_runbook(session: AsyncSession, runbook_id: int) -> None:
     runbook = await get_runbook(session, runbook_id)
     if await JobExecutionRepo(session).has_any(runbook_id):
-        raise ConflictError("Runbook has execution history, deactivate instead of delete")
+        raise ConflictError("Runbook", "has execution history, deactivate instead of delete")
     await RunbookRepo(session).delete(runbook)
     await session.commit()
     logger.info("Runbook deleted", extra={"runbook_id": runbook_id})
@@ -209,7 +214,8 @@ async def _send_dispatch(execution: JobExecution, command: str) -> None:
     try:
         await dispatcher.send_dispatch(_build_dispatch(execution, command))
     except RuntimeError as exc:
-        raise ConflictError(str(exc)) from exc
+        # Kafka 未启用/未注入：下发通道不可用，503 语义（配置类失败而非外部故障）
+        raise ExternalServiceError("kafka", str(exc), http_status=503) from exc
 
 
 async def create_execution(
@@ -217,7 +223,7 @@ async def create_execution(
 ) -> JobExecution:
     runbook = await get_runbook(session, payload.runbook_id)
     if not runbook.is_active:
-        raise ConflictError(f"Runbook {runbook.id} is deactivated")
+        raise ConflictError("Runbook", f"runbook {runbook.id} is deactivated")
     _validate_params(runbook.params_schema, payload.params)
 
     targets = await _snapshot_targets(session, payload.target_resource_ids)
@@ -237,7 +243,9 @@ async def create_execution(
         overlap = wanted & {t.get("resource_id") for t in (exe.target_resources or [])}
         if overlap:
             raise ConflictError(
-                f"Targets {sorted(overlap)} are busy in execution {exe.id} (status={exe.status})",
+                "JobExecution",
+                f"targets {sorted(overlap)} are busy in execution {exe.id} "
+                f"(status={exe.status})",
             )
 
     execution = JobExecution(
@@ -254,7 +262,15 @@ async def create_execution(
     execution = await JobExecutionRepo(session).create(execution)
     await session.commit()  # 先提交再下发：防止 runner 事件回流时 execution 行尚未落库
 
-    await _send_dispatch(execution, "execute")
+    try:
+        await _send_dispatch(execution, "execute")
+    except Exception:
+        # 下发失败（如 Kafka 未启用）：置 failed 释放目标锁，避免 pending 残留
+        execution.status = "failed"
+        execution.finished_at = datetime.now(timezone.utc)
+        await JobExecutionRepo(session).update(execution)
+        await session.commit()
+        raise
     execution.status = "running"
     execution.started_at = datetime.now(timezone.utc)
     await JobExecutionRepo(session).update(execution)
@@ -288,9 +304,8 @@ async def cancel_execution(session: AsyncSession, execution_id: int) -> JobExecu
     execution = await get_execution(session, execution_id)
     if execution.status not in ("pending", "running"):
         raise ConflictError(
-            "Execution {} cannot be cancelled (status={})".format(
-                execution_id, execution.status,
-            ),
+            "JobExecution",
+            f"execution {execution_id} cannot be cancelled (status={execution.status})",
         )
     execution.status = "cancelled"
     execution.finished_at = datetime.now(timezone.utc)
@@ -304,11 +319,12 @@ async def trigger_rollback(session: AsyncSession, execution: JobExecution) -> Jo
     """触发回滚下发（手动 API 与自动回滚共用）。"""
     if execution.status not in ROLLBACKABLE_SOURCE_STATUSES:
         raise ConflictError(
-            f"Execution {execution.id} cannot rollback (status={execution.status})",
+            "JobExecution",
+            f"execution {execution.id} cannot rollback (status={execution.status})",
         )
     rollbackable = [s.get("key") for s in execution.steps_snapshot if s.get("rollbackable")]
     if not rollbackable:
-        raise ConflictError("No rollbackable steps in this execution")
+        raise ConflictError("JobExecution", "no rollbackable steps in this execution")
 
     await _send_dispatch(execution, "rollback")
     execution.status = "rolling_back"

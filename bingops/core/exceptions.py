@@ -84,7 +84,7 @@ class InternalError(BingOpsError):
 class ExternalServiceError(BingOpsError):
     """外部服务调用失败。"""
 
-    def __init__(self, service: str, detail: str):
+    def __init__(self, service: str, detail: str, http_status: int = 502):
         message = f"External service '{service}' failed: {detail}"
-        super().__init__(message, code=50201, http_status=502)
+        super().__init__(message, code=50201, http_status=http_status)
         self.service = service
