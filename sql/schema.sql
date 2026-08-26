@@ -420,9 +420,9 @@ CREATE TABLE job_steps (
     error_message TEXT,
     started_at    TIMESTAMPTZ,
     finished_at   TIMESTAMPTZ,
-    created_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    updated_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    UNIQUE (execution_id, step_key, attempt_type)
+    created_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    updated_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    CONSTRAINT uq_job_step_key_attempt UNIQUE (execution_id, step_key, attempt_type)
 );
 CREATE INDEX idx_job_step_exec ON job_steps (execution_id);
 
@@ -434,7 +434,7 @@ CREATE TABLE job_step_logs (
     host      VARCHAR(128),
     line      TEXT        NOT NULL,
     logged_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE (step_id, seq)
+    CONSTRAINT uq_job_step_log_seq UNIQUE (step_id, seq)
 );
 CREATE INDEX idx_job_log_step ON job_step_logs (step_id, seq);
 
