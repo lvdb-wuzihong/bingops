@@ -150,6 +150,19 @@ class JobStepRepo:
         )
         return list(result.scalars().all())
 
+    async def has_succeeded_do_step(self, execution_id: int) -> bool:
+        """是否存在成功完成的 do 步骤（自动回滚守卫：无成功步骤则无可回滚对象）。"""
+        result = await self.session.execute(
+            select(func.count())
+            .select_from(JobStep)
+            .where(
+                JobStep.execution_id == execution_id,
+                JobStep.attempt_type == "do",
+                JobStep.status == "success",
+            )
+        )
+        return (result.scalar() or 0) > 0
+
 
 class JobStepLogRepo:
     def __init__(self, session: AsyncSession) -> None:

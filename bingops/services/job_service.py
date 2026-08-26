@@ -72,6 +72,16 @@ def _validate_steps(steps: list[dict]) -> list[dict]:
     return steps
 
 
+def _validate_connection(connection: dict) -> None:
+    """connection 契约校验（P1 ssh 模式）：ssh_key_ref 必备，真钥匙在 Vault。
+
+    在 bingops 侧 fail-fast（422），不把契约校验责任推给 runner。
+    """
+    ref = (connection or {}).get("ssh_key_ref")
+    if not isinstance(ref, str) or not ref.strip():
+        raise ValidationError("runbook connection.ssh_key_ref is required (Vault key name)")
+
+
 def _validate_params(params_schema: dict, params: dict) -> None:
     """按 params_schema 做 required 存在性 + 基础类型校验。"""
     for name, spec in (params_schema or {}).items():
@@ -105,6 +115,7 @@ async def list_runbooks(
 
 async def create_runbook(session: AsyncSession, payload: RunbookCreate, user: User) -> Runbook:
     _validate_steps(payload.steps)
+    _validate_connection(payload.connection)
     runbook = Runbook(
         name=payload.name,
         category=payload.category,
@@ -135,6 +146,8 @@ async def update_runbook(session: AsyncSession, runbook_id: int, payload: Runboo
     data = payload.model_dump(exclude_unset=True)
     if "steps" in data:
         _validate_steps(data["steps"])
+    if "connection" in data:
+        _validate_connection(data["connection"])
     # 定义类字段变更 → version +1（execution 快照语义）
     definition_changed = any(
         k in data for k in ("steps", "params_schema", "connection", "target_models")
@@ -224,6 +237,8 @@ async def create_execution(
     runbook = await get_runbook(session, payload.runbook_id)
     if not runbook.is_active:
         raise ConflictError("Runbook", f"runbook {runbook.id} is deactivated")
+    # 存量 runbook 可能创建於校验上线前：下发前再验一次 connection 契约
+    _validate_connection(runbook.connection)
     _validate_params(runbook.params_schema, payload.params)
 
     targets = await _snapshot_targets(session, payload.target_resource_ids)
@@ -302,7 +317,7 @@ async def list_executions(
 
 async def cancel_execution(session: AsyncSession, execution_id: int) -> JobExecution:
     execution = await get_execution(session, execution_id)
-    if execution.status not in ("pending", "running"):
+    if execution.status not in ("pending", "running", "rolling_back"):
         raise ConflictError(
             "JobExecution",
             f"execution {execution_id} cannot be cancelled (status={execution.status})",

@@ -144,10 +144,15 @@ def _new_step(execution, message: JobEventMessage, status: str) -> JobStep:
 
 
 async def _handle_do_step_failure(session: AsyncSession, execution) -> None:
-    """do 步骤失败：auto 策略触发逆序回滚，manual 策略落 failed 等人工。"""
+    """do 步骤失败：auto 策略触发逆序回滚，manual 策略落 failed 等人工。
+
+    自动回滚守卫：没有任何 do 步骤成功过（如 dispatch 契约校验失败）
+    则无可回滚对象，直接落 failed，避免“没执行却回滚中”的语义荒谬。
+    """
     if execution.status != "running":
         return
-    if execution.rollback_policy == "auto":
+    has_done = await JobStepRepo(session).has_succeeded_do_step(execution.id)
+    if execution.rollback_policy == "auto" and has_done:
         execution.status = "failed"
         await JobExecutionRepo(session).update(execution)
         await job_service.trigger_rollback(session, execution)
