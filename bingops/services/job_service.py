@@ -113,7 +113,8 @@ async def create_runbook(session: AsyncSession, payload: RunbookCreate, user: Us
         created_by=user.id,
     )
     runbook = await RunbookRepo(session).create(runbook)
-    logger.info("Runbook created", extra={"runbook_id": runbook.id, "name": runbook.name})
+    await session.commit()
+    logger.info("Runbook created", extra={"runbook_id": runbook.id, "runbook_name": runbook.name})
     return runbook
 
 
@@ -138,6 +139,7 @@ async def update_runbook(session: AsyncSession, runbook_id: int, payload: Runboo
     if definition_changed:
         runbook.version += 1
     await RunbookRepo(session).update(runbook)
+    await session.commit()
     logger.info(
         "Runbook updated",
         extra={"runbook_id": runbook.id, "version": runbook.version, "changed": sorted(data)},
@@ -150,6 +152,7 @@ async def delete_runbook(session: AsyncSession, runbook_id: int) -> None:
     if await JobExecutionRepo(session).has_any(runbook_id):
         raise ConflictError("Runbook has execution history, deactivate instead of delete")
     await RunbookRepo(session).delete(runbook)
+    await session.commit()
     logger.info("Runbook deleted", extra={"runbook_id": runbook_id})
 
 
@@ -249,11 +252,13 @@ async def create_execution(
         triggered_by=user.id,
     )
     execution = await JobExecutionRepo(session).create(execution)
+    await session.commit()  # 先提交再下发：防止 runner 事件回流时 execution 行尚未落库
 
     await _send_dispatch(execution, "execute")
     execution.status = "running"
     execution.started_at = datetime.now(timezone.utc)
     await JobExecutionRepo(session).update(execution)
+    await session.commit()
 
     logger.info(
         "Job execution dispatched",
@@ -290,6 +295,7 @@ async def cancel_execution(session: AsyncSession, execution_id: int) -> JobExecu
     execution.status = "cancelled"
     execution.finished_at = datetime.now(timezone.utc)
     await JobExecutionRepo(session).update(execution)
+    await session.commit()
     logger.info("Job execution cancelled", extra={"execution_id": execution_id})
     return execution
 
@@ -307,6 +313,7 @@ async def trigger_rollback(session: AsyncSession, execution: JobExecution) -> Jo
     await _send_dispatch(execution, "rollback")
     execution.status = "rolling_back"
     await JobExecutionRepo(session).update(execution)
+    await session.commit()
     logger.info(
         "Job rollback dispatched",
         extra={"execution_id": execution.id, "rollbackable_steps": rollbackable},
