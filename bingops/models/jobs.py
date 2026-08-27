@@ -71,7 +71,7 @@ class JobExecution(BaseMixin, Base):
     connection: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     status: Mapped[str] = mapped_column(
         String(32), nullable=False, default="pending",
-    )  # pending|running|success|failed|rolling_back|rolled_back|partial_rollback|cancelled
+    )  # pending|running|success|failed|rolling_back|rolled_back|partial_rollback|rollback_failed|cancelled
     rollback_policy: Mapped[str] = mapped_column(
         String(16), nullable=False, default="manual",
     )  # manual|auto

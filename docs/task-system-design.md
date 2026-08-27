@@ -81,8 +81,11 @@ steps:
 
 ```yaml
 # roles/app_restart/tasks/main.yml
-- include_tasks: "{{ 'undo.yml' if bingops_action | default('do') == 'undo' else 'do.yml' }}"
+- include_tasks:
+    file: "{{ 'undo.yml' if bingops_action | default('do') == 'undo' else 'do.yml' }}"
 ```
+
+（必须用 `file:` 映射形式；单行简写里的 `==` 会被 mod_args 误拆为 k=v 选项报 Invalid options）
 
 - 操作与逆操作同仓同文件，永不漂移；引擎回滚无需独立 rollback playbook 路径
 - 步内瞬时失败用 ansible 原生 `block/rescue/always` 自愈（如起服失败先尝试拉起），与步级回滚互补不替代
@@ -113,11 +116,17 @@ steps:
 
 ```
 execution: pending → awaiting_approval(P3) → running → success / cancelled
-                                       ↘ failed → rolling_back → rolled_back / partial_rollback
+                                       ↘ failed → rolling_back → rolled_back / partial_rollback / rollback_failed
 step:      pending → running → success / failed / skipped / rolled_back / rollback_failed
 ```
 
 回滚执行在 `job_steps` 记为同 step_key、`attempt_type='rollback'` 的新行，日志/审计天然齐全。
+
+回滚链纪律（控制面实现）：
+- 回滚下发只包含**已完成且 rollbackable** 的步骤（控制面按 `job_steps` 状态过滤）；runner 无状态，不知道哪些步骤跑过，给什么跑什么
+- 零已完成步骤的失败（如 prepare 阶段失败）直接落终态，不进 `rolling_back`
+- 回滚下发后收到失败事件（含 runner 契约校验失败回流的 rollback attempt 事件）落 `rollback_failed`/`partial_rollback`，不得无限等待
+- **终态以 runner 的 `execution_finished` 事件为准**：每次 dispatch 处理结束 runner 必发该事件（do → success/failed；rollback → rolled_back/partial_rollback/rollback_failed），控制面收到即落 execution 终态，不得自行推断或无限等待
 
 ---
 

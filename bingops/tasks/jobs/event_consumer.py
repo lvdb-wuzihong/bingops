@@ -175,6 +175,7 @@ async def _finalize_execution(session: AsyncSession, execution, message: JobEven
         "failed": {"running", "pending"},
         "rolled_back": {"rolling_back"},
         "partial_rollback": {"rolling_back"},
+        "rollback_failed": {"rolling_back"},
     }
     if execution.status not in allowed.get(final, set()):
         logger.debug(
