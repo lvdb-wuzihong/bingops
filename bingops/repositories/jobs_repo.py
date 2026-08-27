@@ -116,6 +116,16 @@ class JobExecutionRepo:
         )
         return (result.scalar() or 0) > 0
 
+    async def get_latest_by_ticket(self, ticket_id: int) -> JobExecution | None:
+        """按工单查询最新一次执行（P3 工单↔任务闭环回显用）。"""
+        result = await self.session.execute(
+            select(JobExecution)
+            .where(JobExecution.ticket_id == ticket_id)
+            .order_by(JobExecution.id.desc())
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
+
 
 class JobStepRepo:
     def __init__(self, session: AsyncSession) -> None:

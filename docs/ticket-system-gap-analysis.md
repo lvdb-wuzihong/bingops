@@ -3,6 +3,10 @@
 > 输入：Gemini 描述的 SRE 工单系统（设计理念 + 五层架构 + 生命周期 + 度量体系 + 最佳实践）
 > 基线：`docs/ticket-system.md`（BingOps tickets v1，已实现）
 > 结论先行：**两者不冲突，是同一系统的两个演进阶段**。v1 是"协作与流转"地基，Gemini 蓝图是"自动执行平台"目标态。核心差距在于**执行引擎**与**风控层**，而非工单模型本身。
+>
+> **2026-08 状态修正**：执行引擎缺口已由任务系统补齐（runbook + job_execution，见 `docs/task-system-design.md`，迁移 v11~v13），
+> 控制面/执行面分离、灰度回滚、步骤日志均已落地。工单审批即该设计的 **P3 阶段**，`job_executions.ticket_id` 挂接列与执行态 `awaiting_approval` 均已预留。
+> 当前开发重点从"补执行层"转为：**审批流 + 工单↔任务闭环 + change_freezes 封禁窗口**。
 
 ## 1. 定位差异
 
@@ -45,7 +49,7 @@
 | 审批流引擎 | 审批链表、双签、自动直通、Emergency 绿色通道（先执行后补单） | 仅后端 | 中 |
 | 变更风控栅栏 | Change Freeze 窗口表、高危命令拦截、同资源并发控制 | 仅后端 | 中 |
 | ChatOps（IM 机器人） | 飞书审批/通知/一键操作 | 项目已有 `core/feishu_provider.py`（SSO），可扩展消息能力 | 中 |
-| 执行引擎（Job Executor） | 任务模板、Runner、预检/后置校验、灰度、幂等、回滚、健康观察 | 需对接 Ansible/Terraform/K8s API/监控 | **高** |
+| 执行引擎（Job Executor） | ~~任务模板、Runner、预检/后置校验、灰度、幂等、回滚、健康观察~~ **P1 已落地**（ansible 通道，见 task-system-design）；terraform/监控联动待 P2 | - | ~~高~~ 已完成大半 |
 | 集成：监控/CI-CD/GitOps | Prometheus 联动、变更 Annotate | 需监控系统先行 | 高 |
 | Toil/ROI 看板 | 自动化率、Top 10 待自动化场景 | 依赖度量数据积累 | 低（数据齐后） |
 
@@ -92,5 +96,5 @@
 |------|------|
 | v1 不需要推倒重来 | 工单主表、流转记录、RBAC、状态矩阵全部保留，作为申请与审计外壳 |
 | 蓝图的价值在排序 | Gemini 给的是目标态全景，落地必须按"审批 → 通知 → 执行"递进，不能跳级 |
-| 最大的坑 | 直接照蓝图造执行引擎——没有执行通道（Ansible/K8s API/Terraform）之前，所有"自动化"都是模拟 |
-| 立即可做的第一步 | Phase A 的 5 项均为纯后端扩展，与现有三层架构完全兼容 |
+| ~~最大的坑~~（已解除） | 执行通道已由任务系统 P1 提供（ansible runner + Kafka 控制/执行面分离） |
+| 当前第一步（2026-08） | 即任务系统设计中的 P3：审批流 + 工单↔job 闭环 + 封禁窗口；挂接点（`ticket_id` 列、`awaiting_approval` 态）均已预留 |

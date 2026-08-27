@@ -71,6 +71,7 @@ class ExecutionCreate(BaseModel):
     params: dict = Field(default_factory=dict)
     target_resource_ids: list[int] = Field(min_length=1)
     code_ref: str = Field(max_length=128)  # git tag
+    ticket_id: int | None = None  # P3：高危 runbook 必须携带已审批通过的工单
 
 
 class ExecutionTarget(BaseModel):

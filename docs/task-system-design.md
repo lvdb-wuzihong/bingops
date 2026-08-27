@@ -156,7 +156,7 @@ step:      pending → running → success / failed / skipped / rolled_back / ro
 | 工单 | 高危 execution 挂 ticket_id，审批通过才下发 | P3 |
 | 变更封禁 | change_freezes 窗口校验（执行前） | P3 |
 | RBAC | 新增权限码 `runbook:*`、`job:list/get/create/cancel/rollback`，按权限码规范同步 schema.sql 种子 | P1 |
-| 环境维度 | **待决策**：CMDB 加 `environment` 通用列；P1 暂仅按 runbook.risk_level 门控 | 待定 |
+| 环境维度 | **已决策**：不加 `environment` 列，复用标签体系（云资源 `env` 标签 manual→cloud 优先级，K8s 读 `k8s:env`），收敛为共享 `resolve_resource_env` helper，门控与展示同源；解析不到按 fail-safe 默认值（待定向：从严视为 production） | P3 |
 
 ---
 
@@ -329,5 +329,6 @@ bingops-runner/
 
 | 项 | 说明 | 阻塞阶段 |
 |----|------|---------|
-| CMDB `environment` 通用列 | 审批提级/风险评级依赖；存量回填成本随时间增长 | P3（P1 不阻塞） |
+| ~~CMDB `environment` 通用列~~（已结案） | 决策：不建列。env 事实源即运维约定（云标签 / K8s label），加列不解决覆盖问题反而引入双写漂移；门控与展示统一走 `resolve_resource_env` helper（K8s 读 `k8s:env`；云资源 manual 优先、cloud 兜底；无值按 fail-safe） | - |
+| 无 env 时的 fail-safe 方向 | 从严（视为 production，多审批）还是从宽（低危放行）；建议从严 | P3 |
 | GitLab 自建与否 | 决定 P2 terraform state 是否可先用 GitLab 原生 backend 过渡 | P2 |

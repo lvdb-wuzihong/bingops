@@ -336,6 +336,10 @@ CREATE TABLE tickets (
     creator_id          BIGINT       NOT NULL REFERENCES users(id),
     assignee_id         BIGINT       REFERENCES users(id),
     related_resource_id BIGINT       REFERENCES cmdb_resources(id) ON DELETE SET NULL,
+    runbook_id          BIGINT       REFERENCES runbooks(id),   -- 变更工单携带的执行意图（P3）
+    job_params          JSONB        NOT NULL DEFAULT '{}',
+    code_ref            VARCHAR(128),                            -- git tag 快照（同 job_executions）
+    approval_status     VARCHAR(16),                             -- none|pending|approved|rejected
     resolved_at         TIMESTAMPTZ,
     closed_at           TIMESTAMPTZ,
     created_at          TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
@@ -363,6 +367,34 @@ CREATE TABLE ticket_comments (
 
 CREATE INDEX idx_ticket_comment_ticket ON ticket_comments (ticket_id);
 CREATE INDEX idx_ticket_comment_time   ON ticket_comments (created_at);
+
+-- 工单审批记录表（不可变，仅 created_at；P3 审批挂接）
+CREATE TABLE ticket_approvals (
+    id          BIGSERIAL PRIMARY KEY,
+    ticket_id   BIGINT      NOT NULL REFERENCES tickets(id) ON DELETE CASCADE,
+    approver_id BIGINT      NOT NULL REFERENCES users(id),
+    action      VARCHAR(16) NOT NULL,              -- approve|reject
+    comment     TEXT,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_ticket_approval_ticket ON ticket_approvals (ticket_id);
+
+-- 变更封禁窗口（scope=NULL 表示全局；JSONB 数组限定 model_code）
+CREATE TABLE change_freezes (
+    id          BIGSERIAL PRIMARY KEY,
+    name        VARCHAR(128) NOT NULL,
+    reason      TEXT,
+    scope       JSONB,
+    starts_at   TIMESTAMPTZ  NOT NULL,
+    ends_at     TIMESTAMPTZ  NOT NULL,
+    created_by  BIGINT       REFERENCES users(id) ON DELETE SET NULL,
+    created_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    updated_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    CHECK (ends_at > starts_at)
+);
+
+CREATE INDEX idx_change_freeze_time ON change_freezes (starts_at, ends_at);
 
 -- ============================================================================
 -- 任务系统（runbook + job 执行引擎，设计见 docs/task-system-design.md）
@@ -461,7 +493,8 @@ BEGIN
             'cmdb_option_sets', 'cmdb_resources', 'cmdb_business_apps',
             'cmdb_tag_definitions', 'cmdb_resource_tags', 'cmdb_sync_tasks',
             'tickets',
-            'runbooks', 'job_executions', 'job_steps'
+            'runbooks', 'job_executions', 'job_steps',
+            'change_freezes'
         ])
     LOOP
         EXECUTE format(
@@ -554,6 +587,7 @@ INSERT INTO permissions (code, name) VALUES
 ('ticket:update',  '更新工单'),
 ('ticket:assign',  '指派工单'),
 ('ticket:delete',  '删除工单'),
+('ticket:approve', '审批工单'),
 ('runbook:list',   '查看 Runbook 列表'),
 ('runbook:get',    '查看 Runbook 详情'),
 ('runbook:create', '创建 Runbook'),
@@ -563,7 +597,10 @@ INSERT INTO permissions (code, name) VALUES
 ('job:get',        '查看任务执行详情'),
 ('job:create',     '创建并下发任务'),
 ('job:cancel',     '取消任务'),
-('job:rollback',   '回滚任务')
+('job:rollback',   '回滚任务'),
+('change_freeze:list',   '查看变更封禁窗口'),
+('change_freeze:create', '创建变更封禁窗口'),
+('change_freeze:delete', '删除变更封禁窗口')
 ON CONFLICT (code) DO NOTHING;
 
 -- admin 角色分配所有权限（须在全部权限插入后执行）

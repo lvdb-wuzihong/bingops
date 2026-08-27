@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from sqlalchemy import BigInteger, DateTime, ForeignKey, String, Text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from bingops.models.base import Base, BaseMixin
@@ -45,6 +46,15 @@ class Ticket(BaseMixin, Base):
     related_resource_id: Mapped[int | None] = mapped_column(
         BigInteger, ForeignKey("cmdb_resources.id", ondelete="SET NULL"), nullable=True,
     )
+    # 变更工单携带的执行意图（P3 审批挂接）
+    runbook_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("runbooks.id"), nullable=True,
+    )
+    job_params: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    code_ref: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    approval_status: Mapped[str | None] = mapped_column(
+        String(16), nullable=True,
+    )  # none|pending|approved|rejected
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
@@ -74,3 +84,43 @@ class TicketComment(Base):
     )
 
     user: Mapped[User] = relationship()
+
+
+class TicketApproval(Base):
+    """工单审批记录表（不可变，仅 created_at）。"""
+
+    __tablename__ = "ticket_approvals"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    ticket_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("tickets.id", ondelete="CASCADE"), nullable=False,
+    )
+    approver_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.id"), nullable=False)
+    action: Mapped[str] = mapped_column(String(16), nullable=False)  # approve|reject
+    comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+    approver: Mapped[User] = relationship()
+
+
+class ChangeFreeze(BaseMixin, Base):
+    """变更封禁窗口（P3 风控栅栏）。
+
+    scope=None 表示全局封禁；scope 为 JSONB 数组时仅限定模型范围，
+    如 ["aliyun_ecs", "gcp_compute"]。
+    """
+
+    __tablename__ = "change_freezes"
+
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    scope: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    starts_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    ends_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_by: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("users.id", ondelete="SET NULL"), nullable=True,
+    )

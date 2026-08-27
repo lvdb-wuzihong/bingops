@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from bingops.models.ticket import Ticket, TicketComment
+from bingops.models.ticket import ChangeFreeze, Ticket, TicketApproval, TicketComment
 
 
 class TicketRepo:
@@ -111,3 +113,61 @@ class TicketCommentRepo:
         self._session.add(comment)
         await self._session.flush()
         return comment
+
+
+class TicketApprovalRepo:
+    """工单审批记录 Repository（只追加，不可修改/删除）。"""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def list_by_ticket(self, ticket_id: int) -> list[TicketApproval]:
+        """按工单查询审批记录（时间正序）。"""
+        result = await self._session.execute(
+            select(TicketApproval)
+            .options(selectinload(TicketApproval.approver))
+            .where(TicketApproval.ticket_id == ticket_id)
+            .order_by(TicketApproval.created_at.asc(), TicketApproval.id.asc())
+        )
+        return list(result.scalars().all())
+
+    async def create(self, approval: TicketApproval) -> TicketApproval:
+        self._session.add(approval)
+        await self._session.flush()
+        return approval
+
+
+class ChangeFreezeRepo:
+    """变更封禁窗口 Repository。"""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def get_by_id(self, freeze_id: int) -> ChangeFreeze | None:
+        result = await self._session.execute(
+            select(ChangeFreeze).where(ChangeFreeze.id == freeze_id)
+        )
+        return result.scalar_one_or_none()
+
+    async def list_freezes(
+        self, *, active_only: bool = False, at: datetime | None = None,
+    ) -> list[ChangeFreeze]:
+        """封禁窗口列表（默认按生效时间倒序；active_only 只返当前生效的）。"""
+        query = select(ChangeFreeze)
+        if active_only:
+            moment = at or datetime.now(timezone.utc)
+            query = query.where(
+                ChangeFreeze.starts_at <= moment, ChangeFreeze.ends_at >= moment,
+            )
+        query = query.order_by(ChangeFreeze.starts_at.desc())
+        result = await self._session.execute(query)
+        return list(result.scalars().all())
+
+    async def create(self, freeze: ChangeFreeze) -> ChangeFreeze:
+        self._session.add(freeze)
+        await self._session.flush()
+        return freeze
+
+    async def delete(self, freeze: ChangeFreeze) -> None:
+        await self._session.delete(freeze)
+        await self._session.flush()

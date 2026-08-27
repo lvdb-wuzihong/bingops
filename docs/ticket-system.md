@@ -1,8 +1,8 @@
 # 工单系统（Tickets）设计文档
 
-> 状态：v1 已实现 | 维护者：BingOps Team
-> 相关代码：`bingops/models/ticket.py`、`bingops/services/ticket_service.py`、`bingops/api/v1/tickets.py`
-> 数据库脚本：`sql/migrations/v4_tickets.sql`（已同步 `sql/schema.sql`）
+> 状态：v2 已实现（v1 协作流转 + P3 审批挂接） | 维护者：BingOps Team
+> 相关代码：`bingops/models/ticket.py`、`bingops/services/ticket_service.py`、`bingops/api/v1/tickets.py`、`bingops/services/change_freeze_service.py`
+> 数据库脚本：`sql/migrations/v4_tickets.sql` + `sql/migrations/v14_ticket_approval.sql`（已同步 `sql/schema.sql`）
 
 ## 1. 定位
 
@@ -154,8 +154,56 @@ psql -U <user> -d <dbname> -f sql/schema.sql
 
 ## 10. 后续规划（候选，未实现）
 
-- SLA 计时与超时预警：创建时设置 due_at，超时未处理自动标记
-- 抄送/关注人：扩展工单可见与通知范围
-- 统计报表：按状态/类型/处理人聚合的 dashboard 接口
+- SLA 计时与超时预警：创建时设置 due_at，超时未处理自动标记（`first_response_at`/`due_at` 字段待加）
+- 抄送/关注人：扩展工单可见与通知范围（飞书机器人）
+- 统计报表：按状态/类型/处理人聚合的 dashboard 接口（MTTA/MTTR 时间戳已具备）
 - 附件支持：工单附件上传
-- 审批流：change / data_ops 等高危类型的多级审批
+
+---
+
+## 11. P3 审批挂接（v2，已实现）
+
+工单系统与任务系统（runbook/job_execution）接通，落地任务设计文档 P3 阶段。
+
+### 11.1 数据模型扩展（v14 迁移）
+
+| 变更 | 内容 |
+|------|------|
+| tickets 新增列 | `runbook_id`（执行意图）、`job_params` JSONB（含 target_resource_ids/params）、`code_ref`（git tag）、`approval_status`（none/pending/approved/rejected） |
+| ticket_approvals 表 | 审批记录（不可变）：approver、action（approve/reject）、comment |
+| change_freezes 表 | 封禁窗口：name、reason、scope（NULL=全局，数组=模型范围）、起止时间 |
+| job_executions.ticket_id | 启用回填（工单自动下发时写入） |
+
+### 11.2 审批策略（风险分级）
+
+- 阈值：`runbook.risk_level ∈ {medium, high, critical}`（`job_service.APPROVAL_RISK_LEVELS`）
+- 达标：创建时工单进入 `pending_approval`（approval_status=pending），需 `POST /{id}/approve` 审批；通过→转 open 并自动下发 job；拒绝→cancelled。创建人不得自批（超管除外）
+- 低危：自动直通，创建即下发（填单即执行）
+- 高危兜底门控：`job:create` 时中高危 runbook 必须携带已审批工单（超管除外），绕道直接下发被拒绝（403）
+- 审批门禁态禁止通过 `/{id}/status` 绕过流转（422）
+- 下发失败（如封禁期命中、Kafka 不可用）：工单保留，失败原因落入流转记录（[dispatch-failed]）
+
+### 11.3 风控栅栏：封禁窗口（change_freezes）
+
+- CRUD：`GET/POST /api/v1/tickets/freezes`、`DELETE /freezes/{id}`
+- 门控点：`job_service.create_execution` 下发前校验，命中全局/模型范围封禁 → 409（工单自动下发路径同样生效）
+- scope：NULL=全局；`["aliyun_ecs", "gcp_compute"]` 等仅限定模型范围
+- 权限：`change_freeze:list/create/delete`
+
+### 11.4 变更上下文聚合（判断变更时点）
+
+`GET /api/v1/tickets/change-context?resource_ids=1,2,3`（`ticket:list`），每个资源返回：
+- 近 7 天变更记录（cmdb_change_logs，每资源 Top 5）
+- 占用中的任务执行（同并发目标锁口径）
+- 当前命中的封禁窗口（全局/模型范围）
+- 环境解析：K8s 读 `k8s:env`、云资源读 `env` 标签（manual 优先、cloud 兜底，与展示同源）；无值返空，门控侧按 fail-safe 处理（`ENV_FAILSAFE_DEFAULT="production"`，从严）
+
+变更后落地判断：job 执行完自动写 `cmdb_change_logs(source='job')`，工单详情聚合 `job_execution` 摘要（状态/起止时间）回显。
+
+### 11.5 新增权限码（已同步 schema.sql / v14 / init_data.py）
+
+| 权限码 | 说明 | 预置角色 |
+|--------|------|----------|
+| `ticket:approve` | 审批工单 | admin、operator |
+| `change_freeze:list` | 查看封禁窗口 | 全角色 |
+| `change_freeze:create/delete` | 维护封禁窗口 | admin |

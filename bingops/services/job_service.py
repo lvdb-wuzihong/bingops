@@ -13,11 +13,13 @@ from bingops.core.exceptions import (
     ConflictError,
     ExternalServiceError,
     NotFoundError,
+    PermissionDeniedError,
     ValidationError,
 )
 from bingops.models.cmdb.model import CmdbModel
 from bingops.models.cmdb.resource import CmdbResource
 from bingops.models.jobs import JobExecution, JobStep, Runbook
+from bingops.models.ticket import Ticket
 from bingops.models.user import User
 from bingops.repositories.jobs_repo import (
     JobExecutionRepo,
@@ -33,9 +35,13 @@ from bingops.schemas.jobs import (
     RunbookCreate,
     RunbookUpdate,
 )
+from bingops.services import change_freeze_service
 from bingops.tasks.jobs import dispatcher
 
 logger = logging.getLogger(f"bingops.{__name__}")
+
+# P3 审批挂接：达到该风险等级的 runbook 必须携带已审批通过的工单才可执行（超管除外）
+APPROVAL_RISK_LEVELS = ("medium", "high", "critical")
 
 # 目标机 IP 提取候选键（跨模型通用 code 优先）
 _IP_FIELD_CANDIDATES = ("private_ip", "internal_ip", "ip")
@@ -231,6 +237,25 @@ async def _send_dispatch(execution: JobExecution, command: str) -> None:
         raise ExternalServiceError("kafka", str(exc), http_status=503) from exc
 
 
+async def _check_approval_gate(
+    session: AsyncSession, runbook: Runbook, ticket_id: int | None, user: User,
+) -> None:
+    """高危门控：中高危 runbook 必须携带已审批通过且 runbook 匹配的工单。"""
+    if runbook.risk_level not in APPROVAL_RISK_LEVELS or user.is_superuser:
+        return
+    if ticket_id is None:
+        raise PermissionDeniedError(
+            f"runbook risk_level={runbook.risk_level} requires an approved ticket",
+        )
+    ticket = await session.get(Ticket, ticket_id)
+    if ticket is None:
+        raise NotFoundError("Ticket", str(ticket_id))
+    if ticket.approval_status != "approved":
+        raise PermissionDeniedError(f"ticket {ticket_id} is not approved")
+    if ticket.runbook_id != runbook.id:
+        raise ValidationError(f"ticket {ticket_id} is not attached to runbook {runbook.id}")
+
+
 async def create_execution(
     session: AsyncSession, payload: ExecutionCreate, user: User,
 ) -> JobExecution:
@@ -241,7 +266,17 @@ async def create_execution(
     _validate_connection(runbook.connection)
     _validate_params(runbook.params_schema, payload.params)
 
+    # P3 高危门控：中高危必须挂已审批工单（先于目标快照，提前拒绝）
+    await _check_approval_gate(session, runbook, payload.ticket_id, user)
+
     targets = await _snapshot_targets(session, payload.target_resource_ids)
+
+    # P3 封禁窗口门控：命中全局/模型范围封禁即拒绝（含工单自动下发路径）
+    model_codes = {t.model_code for t in targets if t.model_code}
+    freezes = await change_freeze_service.find_active_freezes_for_models(session, model_codes)
+    if freezes:
+        names = ", ".join(f.name for f in freezes)
+        raise ConflictError("JobExecution", f"change freeze active: {names}")
 
     # 目标模型范围硬校验：runbook 声明 scope 之外的资源一律拒绝
     allowed = set(runbook.target_models or DEFAULT_TARGET_MODELS)
@@ -272,6 +307,7 @@ async def create_execution(
         steps_snapshot=list(runbook.steps),
         connection=runbook.connection,
         rollback_policy="auto" if runbook.auto_rollback else "manual",
+        ticket_id=payload.ticket_id,
         triggered_by=user.id,
     )
     execution = await JobExecutionRepo(session).create(execution)
