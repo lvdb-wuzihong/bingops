@@ -233,7 +233,7 @@ psql -U <user> -d <dbname> -f sql/schema.sql
 
 | 前缀 | 端点 | 权限 |
 |------|------|------|
-| `/api/v1/ticket-catalog` | GET/POST/PUT/{id}/DELETE/{id} | `ticket_catalog:*` |
+| `/api/v1/ticket-catalog` | GET/POST/PUT/{id}/DELETE/{id}；另提供语义端点 `POST /categories`（一级分类，无事项属性）与 `POST /items`（二级事项，parent_id 必填） | `ticket_catalog:*` |
 | `/api/v1/ticket-groups` | GET/POST/PUT/{id}/DELETE/{id} | `ticket_group:*` |
 | `/api/v1/oncall-schedules` | GET/POST/PUT/{id}/DELETE/{id} | `oncall:*` |
 

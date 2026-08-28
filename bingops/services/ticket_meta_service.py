@@ -43,13 +43,18 @@ async def list_catalog(
 
 
 async def create_catalog_item(session: AsyncSession, payload: CatalogCreate) -> TicketCatalog:
-    """创建目录项（最多两级：parent 必须是一级分类）。"""
-    if payload.difficulty not in VALID_DIFFICULTIES:
-        raise ValidationError(f"difficulty must be one of: {VALID_DIFFICULTIES}")
-    if payload.default_risk not in VALID_RISKS:
-        raise ValidationError(f"default_risk must be one of: {VALID_RISKS}")
-    if payload.default_type not in VALID_TYPES:
-        raise ValidationError(f"default_type must be one of: {VALID_TYPES}")
+    """创建目录项（最多两级：parent 必须是一级分类）。
+
+    parent_id 为空=一级分类：事项级属性（难度/风险/类型/runbook）无意义，归一为默认值。
+    """
+    is_category = payload.parent_id is None
+    if not is_category:
+        if payload.difficulty not in VALID_DIFFICULTIES:
+            raise ValidationError(f"difficulty must be one of: {VALID_DIFFICULTIES}")
+        if payload.default_risk not in VALID_RISKS:
+            raise ValidationError(f"default_risk must be one of: {VALID_RISKS}")
+        if payload.default_type not in VALID_TYPES:
+            raise ValidationError(f"default_type must be one of: {VALID_TYPES}")
 
     repo = TicketCatalogRepo(session)
     if payload.parent_id is not None:
@@ -63,10 +68,10 @@ async def create_catalog_item(session: AsyncSession, payload: CatalogCreate) -> 
         name=payload.name,
         parent_id=payload.parent_id,
         description=payload.description,
-        difficulty=payload.difficulty,
-        default_risk=payload.default_risk,
-        default_type=payload.default_type,
-        default_runbook_id=payload.default_runbook_id,
+        difficulty="simple" if is_category else payload.difficulty,
+        default_risk="low" if is_category else payload.default_risk,
+        default_type="request" if is_category else payload.default_type,
+        default_runbook_id=None if is_category else payload.default_runbook_id,
         sort_order=payload.sort_order,
     )
     item = await repo.create(item)
@@ -93,6 +98,10 @@ async def update_catalog_item(
         raise ValidationError(f"difficulty must be one of: {VALID_DIFFICULTIES}")
     if "default_risk" in data and data["default_risk"] not in VALID_RISKS:
         raise ValidationError(f"default_risk must be one of: {VALID_RISKS}")
+    if item.parent_id is None:
+        # 一级分类：事项级属性无意义，更新时屏蔽
+        for key in ("difficulty", "default_risk", "default_type", "default_runbook_id"):
+            data.pop(key, None)
     for field, value in data.items():
         setattr(item, field, value)
 

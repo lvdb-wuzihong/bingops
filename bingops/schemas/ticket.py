@@ -175,7 +175,7 @@ class TicketResponse(BaseModel):
 
 
 class CatalogCreate(BaseModel):
-    """创建服务目录项请求。"""
+    """创建服务目录项请求（通用兼容端点；推荐用 categories/items 语义端点）。"""
 
     name: str = Field(min_length=1, max_length=128)
     parent_id: int | None = Field(default=None, description="一级分类 ID，空=创建一级分类")
@@ -197,6 +197,27 @@ class CatalogUpdate(BaseModel):
     default_runbook_id: int | None = None
     is_active: bool | None = None
     sort_order: int | None = None
+
+
+class CategoryCreate(BaseModel):
+    """创建一级分类请求（不含事项级属性）。"""
+
+    name: str = Field(min_length=1, max_length=128)
+    description: str | None = None
+    sort_order: int = 0
+
+
+class ItemCreate(BaseModel):
+    """创建二级事项请求（parent_id 必填，携带事项级属性）。"""
+
+    name: str = Field(min_length=1, max_length=128)
+    parent_id: int = Field(description="所属一级分类 ID")
+    description: str | None = None
+    difficulty: str = Field(default="simple", description="simple|medium|hard")
+    default_risk: str = Field(default="low", description="low|medium|high")
+    default_type: str = Field(default="request", description="语义 ticket_type")
+    default_runbook_id: int | None = None
+    sort_order: int = 0
 
 
 class CatalogResponse(BaseModel):

@@ -15,9 +15,11 @@ from bingops.schemas.ticket import (
     CatalogCreate,
     CatalogResponse,
     CatalogUpdate,
+    CategoryCreate,
     GroupCreate,
     GroupResponse,
     GroupUpdate,
+    ItemCreate,
     OncallCreate,
     OncallResponse,
     OncallUpdate,
@@ -99,8 +101,41 @@ async def create_catalog_item(
     session: AsyncSession = Depends(get_db_session),
     _user: User = require_permission("ticket_catalog:create"),
 ):
-    """创建目录项（最多两级）。"""
+    """创建目录项（通用兼容端点；推荐按语义用 /categories 或 /items）。"""
     item = await ticket_meta_service.create_catalog_item(session, payload)
+    return success_response(
+        data=_catalog_to_response(item), message="Catalog item created", http_status=201,
+    )
+
+
+@catalog_router.post("/categories", status_code=201)
+async def create_category(
+    payload: CategoryCreate,
+    session: AsyncSession = Depends(get_db_session),
+    _user: User = require_permission("ticket_catalog:create"),
+):
+    """创建一级分类（表单只需名称/描述/排序）。"""
+    item = await ticket_meta_service.create_catalog_item(
+        session,
+        CatalogCreate(
+            name=payload.name, description=payload.description, sort_order=payload.sort_order,
+        ),
+    )
+    return success_response(
+        data=_catalog_to_response(item), message="Catalog category created", http_status=201,
+    )
+
+
+@catalog_router.post("/items", status_code=201)
+async def create_item(
+    payload: ItemCreate,
+    session: AsyncSession = Depends(get_db_session),
+    _user: User = require_permission("ticket_catalog:create"),
+):
+    """创建二级事项（parent_id 必填 + 事项级属性）。"""
+    item = await ticket_meta_service.create_catalog_item(
+        session, CatalogCreate(**payload.model_dump()),
+    )
     return success_response(
         data=_catalog_to_response(item), message="Catalog item created", http_status=201,
     )
