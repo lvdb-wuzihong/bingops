@@ -344,6 +344,7 @@ CREATE TABLE tickets (
     group_id            BIGINT,
     difficulty          VARCHAR(16),                             -- 建单时从目录快照 simple|medium|hard
     started_at          TIMESTAMPTZ,                             -- 开始处理时间（响应时长计算）
+    target_resource_ids JSONB        NOT NULL DEFAULT '[]',      -- 执行目标资源 ID 列表（多选唯一入口）
     resolved_at         TIMESTAMPTZ,
     closed_at           TIMESTAMPTZ,
     created_at          TIMESTAMPTZ  NOT NULL DEFAULT NOW(),

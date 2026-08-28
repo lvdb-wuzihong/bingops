@@ -43,6 +43,7 @@ class TicketRepo:
         assignee_id: int | None = None,
         group_id: int | None = None,
         catalog_item_id: int | None = None,
+        target_resource_id: int | None = None,
         keyword: str | None = None,
         page: int = 1,
         page_size: int = 20,
@@ -72,6 +73,11 @@ class TicketRepo:
         if catalog_item_id is not None:
             query = query.where(Ticket.catalog_item_id == catalog_item_id)
             count_query = count_query.where(Ticket.catalog_item_id == catalog_item_id)
+        if target_resource_id is not None:
+            # JSONB 包含语义：target_resource_ids @> [rid]
+            contains_filter = Ticket.target_resource_ids.contains([target_resource_id])
+            query = query.where(contains_filter)
+            count_query = count_query.where(contains_filter)
         if keyword:
             like_pattern = f"%{keyword}%"
             keyword_filter = or_(
@@ -92,6 +98,13 @@ class TicketRepo:
         tickets = list(result.scalars().all())
 
         return tickets, total
+
+    async def list_by_statuses(self, statuses: tuple[str, ...]) -> list[Ticket]:
+        """按状态集合查询（变更上下文聚合用，不分页）。"""
+        result = await self._session.execute(
+            select(Ticket).where(Ticket.status.in_(statuses))
+        )
+        return list(result.scalars().all())
 
     async def create(self, ticket: Ticket) -> Ticket:
         self._session.add(ticket)

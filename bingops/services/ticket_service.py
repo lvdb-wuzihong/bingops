@@ -99,6 +99,7 @@ async def list_tickets(
     assignee_id: int | None = None,
     group_id: int | None = None,
     catalog_item_id: int | None = None,
+    target_resource_id: int | None = None,
     keyword: str | None = None,
     page: int = 1,
     page_size: int = 20,
@@ -113,6 +114,7 @@ async def list_tickets(
         assignee_id=assignee_id,
         group_id=group_id,
         catalog_item_id=catalog_item_id,
+        target_resource_id=target_resource_id,
         keyword=keyword,
         page=page,
         page_size=page_size,
@@ -137,7 +139,9 @@ async def list_approvals(session: AsyncSession, ticket_id: int) -> list[TicketAp
 
 
 def _extract_target_ids(payload: TicketCreate) -> list[int]:
-    """从 job_params / related_resource_id 提取执行目标 ID 列表。"""
+    """提取执行目标 ID：target_resource_ids 优先，兼容 job_params/related_resource_id 旧路径。"""
+    if payload.target_resource_ids:
+        return list(payload.target_resource_ids)
     raw = payload.job_params.get("target_resource_ids")
     if isinstance(raw, list) and raw:
         if not all(isinstance(x, int) for x in raw):
@@ -239,6 +243,7 @@ async def create_ticket(session: AsyncSession, payload: TicketCreate, operator: 
         catalog_item_id=payload.catalog_item_id,
         group_id=payload.group_id,
         difficulty=catalog_item.difficulty if catalog_item is not None else None,
+        target_resource_ids=_extract_target_ids(payload),
     )
     ticket = await repo.create(ticket)
     ticket.ticket_no = f"TK-{ticket.id:08d}"
@@ -341,7 +346,9 @@ async def _dispatch_attached_job(
 
 
 def _extract_target_ids_from_ticket(ticket: Ticket) -> list[int]:
-    """从已落库工单提取执行目标 ID（同创建时规则）。"""
+    """从已落库工单提取执行目标（一等列优先，兼容旧路径）。"""
+    if ticket.target_resource_ids:
+        return list(ticket.target_resource_ids)
     raw = (ticket.job_params or {}).get("target_resource_ids")
     if isinstance(raw, list) and raw:
         return list(raw)
@@ -633,6 +640,17 @@ async def change_context(
             if rid is not None:
                 busy_map.setdefault(rid, exe.id)
 
+    # 4.5 影响该资源的活跃工单（判断变更时点用）
+    active_ticket_rows = await TicketRepo(session).list_by_statuses(
+        ("pending_approval", "open", "in_progress"),
+    )
+    tickets_by_resource: dict[int, list[dict]] = {}
+    for t in active_ticket_rows:
+        for rid in _extract_target_ids_from_ticket(t):
+            tickets_by_resource.setdefault(rid, []).append(
+                {"id": t.id, "ticket_no": t.ticket_no, "status": t.status, "title": t.title},
+            )
+
     # 5. 当前生效的封禁窗口（全局命中所有资源，scope 按模型命中）
     active_freezes = await ChangeFreezeRepo(session).list_freezes(active_only=True)
 
@@ -662,6 +680,7 @@ async def change_context(
                 for log in logs_by_resource.get(rid, [])
             ],
             busy_execution_id=busy_map.get(rid),
+            active_tickets=tickets_by_resource.get(rid, []),
             active_freezes=[
                 {
                     "id": f.id,

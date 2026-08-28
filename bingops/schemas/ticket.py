@@ -19,12 +19,17 @@ class TicketCreate(BaseModel):
     )
     priority: str = Field(default="medium", description="优先级: low|medium|high|urgent")
     assignee_id: int | None = Field(default=None, description="指派的处理人用户 ID")
-    related_resource_id: int | None = Field(default=None, description="关联的 CMDB 资源 ID")
+    related_resource_id: int | None = Field(
+        default=None, description="已废弃：关联资源 ID，改用 target_resource_ids（兼容保留）",
+    )
     runbook_id: int | None = Field(default=None, description="变更工单携带的 Runbook ID")
     job_params: dict = Field(default_factory=dict, description="执行参数（随审批通过后下发）")
     code_ref: str | None = Field(default=None, max_length=128, description="git tag 快照")
     catalog_item_id: int | None = Field(default=None, description="服务目录事项 ID（二级）")
     group_id: int | None = Field(default=None, description="处理组 ID（驱动值班自动派单）")
+    target_resource_ids: list[int] = Field(
+        default_factory=list, description="执行目标资源 ID 列表（多选；绑 runbook 时必填）",
+    )
 
 
 class TicketUpdate(BaseModel):
@@ -113,6 +118,10 @@ class ChangeContextResource(BaseModel):
     busy_execution_id: int | None = Field(
         default=None, description="占用中的任务执行 ID（无则空）",
     )
+    active_tickets: list[dict] = Field(
+        default_factory=list,
+        description="影响该资源的活跃工单（pending_approval/open/in_progress）",
+    )
     active_freezes: list[dict] = Field(
         default_factory=list, description="当前命中的封禁窗口",
     )
@@ -158,6 +167,7 @@ class TicketResponse(BaseModel):
     group_name: str | None = None
     difficulty: str | None = None
     started_at: datetime | None = None
+    target_resource_ids: list[int] = Field(default_factory=list)
     resolved_at: datetime | None = None
     closed_at: datetime | None = None
     created_at: datetime

@@ -247,3 +247,24 @@ admin 全量；operator 管理但无删除；viewer/auditor 只读。目录删�
 
 - 附件能力（待存储选型：OSS/本地）
 - tier3 作为变更默认审批人的自动挂接（当前审批人仍为手动指定）
+
+---
+
+## 13. 执行目标统一与前端对接规范（v16）
+
+### 13.1 目标字段统一（v16 迁移）
+
+- `tickets.target_resource_ids` JSONB 提升为一等列：**多选唯一入口**
+- `related_resource_id` 标记废弃（保留兼容，存量回填进目标列表）
+- 必填规则：协作类工单目标可选；目录事项绑 runbook 时目标**条件必填**（`_validate_runbook_intent` 校验）
+- 工单列表新增 `target_resource_id` 过滤（JSONB @> 包含语义）
+- 变更上下文（`/change-context`）新增 `active_tickets`：影响该资源的活跃工单（pending_approval/open/in_progress），与 busy_execution_id 一起支撑变更时点判断
+
+### 13.2 前端对接规范
+
+1. **表单永远选人/选物，不填 ID**：所有关联实体字段用可搜索选择器（remote-select），提交时仅发 id
+2. 关联资源选择器数据源：`GET /api/v1/cmdb/resources/options?keyword=`（轻量字段：id/name/model_code/provider/region/status；名称+实例 ID 双模糊匹配）
+3. 执行目标为**多选**选择器，写入 `target_resource_ids`；下拉项渲染 `name（model_code / region）`
+4. 处理人/处理组/目录事项均为下拉（数据源：users、/ticket-groups、/ticket-catalog）
+5. 新建工单弹窗中，目录事项选中后若 `default_runbook_id` 非空 → 展示执行目标多选为必填；否则可选
+6. 工单详情资源回显：按 `target_resource_ids` 批量调 `/cmdb/resources/{id}` 取 name 展示

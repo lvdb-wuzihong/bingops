@@ -63,6 +63,7 @@ class Ticket(BaseMixin, Base):
     )
     difficulty: Mapped[str | None] = mapped_column(String(16), nullable=True)  # 目录快照
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    target_resource_ids: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
