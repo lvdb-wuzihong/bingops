@@ -6,6 +6,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func, select
+from sqlalchemy.orm import aliased
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bingops.core.exceptions import (
@@ -581,6 +582,131 @@ async def delete_ticket(session: AsyncSession, ticket_id: int, operator: User) -
     await session.commit()
 
     logger.info("Ticket deleted", extra={"ticket_id": ticket_id, "user_id": operator.id})
+
+
+# ── 统计报表（仪表盘用） ───────────────────────────────────────────────
+
+
+def _minute_expr(start_col, end_col):
+    """两时间戳差的分钟数表达式（SQL 层计算）。"""
+    return func.extract("epoch", end_col - start_col) / 60
+
+
+def _day_start(day) -> datetime:
+    """日期转 UTC 当天零点。"""
+    return datetime.combine(day, datetime.min.time(), tzinfo=timezone.utc)
+
+
+async def ticket_stats(
+    session: AsyncSession,
+    *,
+    date_from=None,
+    date_to=None,
+    group_id: int | None = None,
+) -> dict:
+    """工单统计：总量/状态分布/处理人效能/分类分布/每日趋势。
+
+    时间口径：响应时长=started-created；处理时长=resolved-started；全程=resolved-created。
+    """
+    conds = []
+    if date_from is not None:
+        conds.append(Ticket.created_at >= _day_start(date_from))
+    if date_to is not None:
+        conds.append(Ticket.created_at < _day_start(date_to))
+    if group_id is not None:
+        conds.append(Ticket.group_id == group_id)
+
+    # 1. 状态分布
+    status_rows = await session.execute(
+        select(Ticket.status, func.count()).where(*conds).group_by(Ticket.status),
+    )
+    by_status = {status: count for status, count in status_rows.all()}
+    total = sum(by_status.values())
+
+    # 2. 处理人效能（仅统计已指派的）
+    resp_min = _minute_expr(Ticket.created_at, Ticket.started_at)
+    handle_min = _minute_expr(Ticket.started_at, Ticket.resolved_at)
+    assignee_rows = await session.execute(
+        select(
+            Ticket.assignee_id,
+            func.count(),
+            func.count().filter(Ticket.status.in_(("resolved", "closed"))),
+            func.avg(resp_min),
+            func.avg(handle_min),
+        )
+        .where(*conds, Ticket.assignee_id.isnot(None))
+        .group_by(Ticket.assignee_id),
+    )
+    assignee_stats = []
+    user_ids = []
+    for uid, assigned, done, avg_resp, avg_handle in assignee_rows.all():
+        user_ids.append(uid)
+        assignee_stats.append({
+            "user_id": uid,
+            "assigned": assigned,
+            "done": done,
+            "avg_response_minutes": round(avg_resp, 1) if avg_resp is not None else None,
+            "avg_handle_minutes": round(avg_handle, 1) if avg_handle is not None else None,
+        })
+    if user_ids:
+        users = await session.execute(select(User).where(User.id.in_(user_ids)))
+        names = {u.id: (u.display_name or u.username) for u in users.scalars().all()}
+        for item in assignee_stats:
+            item["name"] = names.get(item["user_id"])
+    assignee_stats.sort(key=lambda x: x["done"], reverse=True)
+
+    # 3. 分类分布（二级事项归属一级分类）
+    item_alias = aliased(TicketCatalog)
+    cat_alias = aliased(TicketCatalog)
+    cat_rows = await session.execute(
+        select(cat_alias.name, func.count())
+        .select_from(Ticket)
+        .join(item_alias, Ticket.catalog_item_id == item_alias.id, isouter=True)
+        .join(cat_alias, item_alias.parent_id == cat_alias.id, isouter=True)
+        .where(*conds)
+        .group_by(cat_alias.name),
+    )
+    by_category = [
+        {"category": name or "未分类", "total": count}
+        for name, count in cat_rows.all()
+    ]
+
+    # 4. 每日趋势（创建/解决）
+    created_rows = await session.execute(
+        select(func.date(Ticket.created_at), func.count())
+        .where(*conds)
+        .group_by(func.date(Ticket.created_at))
+        .order_by(func.date(Ticket.created_at)),
+    )
+    resolved_rows = await session.execute(
+        select(func.date(Ticket.resolved_at), func.count())
+        .where(*conds, Ticket.resolved_at.isnot(None))
+        .group_by(func.date(Ticket.resolved_at)),
+    )
+    trend_map: dict[str, dict] = {}
+    for day, count in created_rows.all():
+        trend_map.setdefault(str(day), {"date": str(day), "created": 0, "resolved": 0})
+        trend_map[str(day)]["created"] = count
+    for day, count in resolved_rows.all():
+        trend_map.setdefault(str(day), {"date": str(day), "created": 0, "resolved": 0})
+        trend_map[str(day)]["resolved"] = count
+
+    # 5. 全局时效
+    time_row = await session.execute(
+        select(func.avg(resp_min), func.avg(handle_min)).where(*conds),
+    )
+    avg_resp_all, avg_handle_all = time_row.one()
+
+    return {
+        "totals": {"total": total, **by_status},
+        "time": {
+            "avg_response_minutes": round(avg_resp_all, 1) if avg_resp_all is not None else None,
+            "avg_handle_minutes": round(avg_handle_all, 1) if avg_handle_all is not None else None,
+        },
+        "by_assignee": assignee_stats,
+        "by_category": by_category,
+        "trend": sorted(trend_map.values(), key=lambda x: x["date"]),
+    }
 
 
 # ── 变更上下文聚合（判断变更时点与落地，P3） ─────────────────────────────

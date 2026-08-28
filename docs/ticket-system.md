@@ -156,7 +156,7 @@ psql -U <user> -d <dbname> -f sql/schema.sql
 
 - SLA 计时与超时预警：创建时设置 due_at，超时未处理自动标记（`first_response_at`/`due_at` 字段待加）
 - 抄送/关注人：扩展工单可见与通知范围（飞书机器人）
-- 统计报表：按状态/类型/处理人聚合的 dashboard 接口（MTTA/MTTR 时间戳已具备）
+- 统计报表：已实现，见 §14（`GET /tickets/stats`）
 - 附件支持：工单附件上传
 
 ---
@@ -285,3 +285,32 @@ admin 全量；operator 管理但无删除；viewer/auditor 只读。目录删�
 5. **处理组→处理人联动**（仅改派场景）：`POST /{id}/assign` 的人工改派弹窗用 `GET /ticket-groups/{id}/candidates`（组成员 ∪ 当日值班三线）列候选人；新建表单不出现处理人/处理组
 6. 新建工单弹窗中，目录事项选中后若 `default_runbook_id` 非空 → 展示执行目标多选为必填；否则可选
 7. 工单详情资源回显：按 `target_resource_ids` 批量调 `/cmdb/resources/{id}` 取 name 展示
+
+---
+
+## 14. 统计报表（仪表盘）
+
+`GET /api/v1/tickets/stats?date_from=&date_to=&group_id=`（权限 `ticket:list`）
+
+响应结构：
+
+```json
+{
+  "totals": {"total": 120, "open": 5, "pending_approval": 2, "in_progress": 3, "resolved": 40, "closed": 65, "cancelled": 5},
+  "time": {"avg_response_minutes": 35.2, "avg_handle_minutes": 240.5},
+  "by_assignee": [{"user_id": 1, "name": "绿豆饼", "assigned": 60, "done": 55,
+                   "avg_response_minutes": 30.0, "avg_handle_minutes": 200.0}],
+  "by_category": [{"category": "资源交付与变更", "total": 45}],
+  "trend": [{"date": "2026-08-01", "created": 6, "resolved": 4}]
+}
+```
+
+| 块 | 用途 | 图表建议 |
+|----|------|----------|
+| totals | 状态分布/存量 | 卡片 + 环图 |
+| time | 平均响应/处理时长（SLA 大盘） | 卡片 |
+| by_assignee | 处理数/完成数/人均时效（按完成数降序） | 柱状图/表格 |
+| by_category | 分类占比（二级事项归一级分类，无目录=未分类） | 环图 |
+| trend | 每日创建 vs 解决 | 双折线 |
+
+时间口径：响应=started_at-created_at；处理=resolved_at-created_at 中的解决段（resolved_at-started_at）；SQL 层 `extract(epoch ...)` 计算，avg 自动忽略 NULL。

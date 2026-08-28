@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import date
+
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -162,6 +164,21 @@ async def create_ticket(
     """创建工单。"""
     ticket = await ticket_service.create_ticket(session, payload, current_user)
     return success_response(data=_to_response(ticket), message="Ticket created", http_status=201)
+
+
+@router.get("/stats")
+async def get_ticket_stats(
+    date_from: date | None = None,
+    date_to: date | None = None,
+    group_id: int | None = None,
+    session: AsyncSession = Depends(get_db_session),
+    _user: User = require_permission("ticket:list"),
+):
+    """工单统计报表（仪表盘）：总量/状态分布/处理人效能/分类分布/每日趋势。"""
+    stats = await ticket_service.ticket_stats(
+        session, date_from=date_from, date_to=date_to, group_id=group_id,
+    )
+    return success_response(data=stats)
 
 
 @router.get("/change-context")
