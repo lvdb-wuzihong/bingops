@@ -283,6 +283,11 @@ async def create_ticket(session: AsyncSession, payload: TicketCreate, operator: 
     if runbook is not None and not needs_approval:
         await _dispatch_attached_job(session, ticket, operator)
 
+    # 提交后重查（带关系预加载），避免响应层懒加载触发 MissingGreenlet
+    reloaded = await TicketRepo(session).get_by_id(ticket.id)
+    if reloaded is not None:
+        ticket = reloaded
+
     return ticket
 
 

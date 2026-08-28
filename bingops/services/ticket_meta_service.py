@@ -233,6 +233,11 @@ async def create_oncall(session: AsyncSession, payload: OncallCreate) -> OncallS
     schedule = await repo.create(schedule)
     await session.commit()
 
+    # 提交后重查（带 selectinload group），避免响应层懒加载触发 MissingGreenlet
+    reloaded = await repo.get_by_id(schedule.id)
+    if reloaded is not None:
+        schedule = reloaded
+
     logger.info(
         "Oncall schedule created",
         extra={"schedule_id": schedule.id, "group_id": payload.group_id, "date": str(oncall_date)},
