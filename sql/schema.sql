@@ -194,6 +194,8 @@ CREATE TABLE cmdb_business_apps (
     owner       VARCHAR(128),
     department  VARCHAR(128),
     labels      JSONB        NOT NULL DEFAULT '{}',
+    repo_url    VARCHAR(512),                          -- 代码仓库地址（研发资产坐标）
+    pipelines   JSONB        NOT NULL DEFAULT '{}',    -- {环境: 流水线地址}，key 对齐 env 标签值域
     created_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     updated_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );

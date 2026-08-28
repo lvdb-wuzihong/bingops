@@ -39,6 +39,8 @@ async def list_apps(
             owner=a.owner,
             department=a.department,
             labels=a.labels,
+            repo_url=a.repo_url,
+            pipelines=a.pipelines,
             created_at=a.created_at,
             updated_at=a.updated_at,
         ).model_dump(mode="json")
@@ -64,6 +66,8 @@ async def create_app(
         owner=app.owner,
         department=app.department,
         labels=app.labels,
+        repo_url=app.repo_url,
+        pipelines=app.pipelines,
         created_at=app.created_at,
         updated_at=app.updated_at,
     )
@@ -87,6 +91,8 @@ async def get_app(
         owner=app.owner,
         department=app.department,
         labels=app.labels,
+        repo_url=app.repo_url,
+        pipelines=app.pipelines,
         created_at=app.created_at,
         updated_at=app.updated_at,
     )
@@ -111,6 +117,8 @@ async def update_app(
         owner=app.owner,
         department=app.department,
         labels=app.labels,
+        repo_url=app.repo_url,
+        pipelines=app.pipelines,
         created_at=app.created_at,
         updated_at=app.updated_at,
     )

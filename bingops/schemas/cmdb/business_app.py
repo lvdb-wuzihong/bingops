@@ -4,7 +4,16 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+
+def _validate_pipelines(value: dict | None) -> dict:
+    """流水线地址 map 校验：{环境: 地址}，值为非空字符串。"""
+    if value is None:
+        return {}
+    if not all(isinstance(k, str) and isinstance(v, str) for k, v in value.items()):
+        raise ValueError("pipelines must be a mapping of env -> url strings")
+    return value
 
 
 class BusinessAppCreate(BaseModel):
@@ -17,6 +26,13 @@ class BusinessAppCreate(BaseModel):
     owner: str | None = Field(default=None, max_length=128, description="负责人")
     department: str | None = Field(default=None, max_length=128, description="所属部门")
     labels: dict = Field(default_factory=dict, description="应用级标签")
+    repo_url: str | None = Field(default=None, max_length=512, description="代码仓库地址")
+    pipelines: dict = Field(
+        default_factory=dict,
+        description="各环境流水线地址，{环境: 地址}，key 对齐 env 标签值域",
+    )
+
+    _check_pipelines = field_validator("pipelines")(_validate_pipelines)
 
 
 class BusinessAppUpdate(BaseModel):
@@ -28,6 +44,10 @@ class BusinessAppUpdate(BaseModel):
     owner: str | None = Field(default=None, max_length=128)
     department: str | None = Field(default=None, max_length=128)
     labels: dict | None = None
+    repo_url: str | None = Field(default=None, max_length=512)
+    pipelines: dict | None = None
+
+    _check_pipelines = field_validator("pipelines")(_validate_pipelines)
 
 
 class BusinessAppResponse(BaseModel):
@@ -41,5 +61,7 @@ class BusinessAppResponse(BaseModel):
     owner: str | None = None
     department: str | None = None
     labels: dict = Field(default_factory=dict)
+    repo_url: str | None = None
+    pipelines: dict = Field(default_factory=dict)
     created_at: datetime
     updated_at: datetime

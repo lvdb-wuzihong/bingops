@@ -27,3 +27,7 @@ class CmdbBusinessApp(BaseMixin, Base):
     department: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
     labels: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+
+    # 研发资产坐标：仓库地址 + 各环境流水线地址（{环境: 地址}，key 对齐 env 标签值域）
+    repo_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    pipelines: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)

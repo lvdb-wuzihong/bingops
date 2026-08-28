@@ -54,6 +54,8 @@ async def create_app(session: AsyncSession, payload: BusinessAppCreate) -> CmdbB
         owner=payload.owner,
         department=payload.department,
         labels=payload.labels,
+        repo_url=payload.repo_url,
+        pipelines=payload.pipelines,
     )
     app = await repo.create(app)
     await session.commit()
