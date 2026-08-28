@@ -74,7 +74,7 @@ async def create_catalog_item(session: AsyncSession, payload: CatalogCreate) -> 
 
     logger.info(
         "Catalog item created",
-        extra={"item_id": item.id, "name": payload.name, "parent_id": payload.parent_id},
+        extra={"item_id": item.id, "item_name": payload.name, "parent_id": payload.parent_id},
     )
     return item
 
@@ -151,7 +151,7 @@ async def create_group(session: AsyncSession, payload: GroupCreate) -> TicketGro
     group = await repo.create(group)
     await session.commit()
 
-    logger.info("Ticket group created", extra={"group_id": group.id, "name": payload.name})
+    logger.info("Ticket group created", extra={"group_id": group.id, "group_name": payload.name})
     return group
 
 
