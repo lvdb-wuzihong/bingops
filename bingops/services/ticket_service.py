@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bingops.core.exceptions import (
@@ -19,9 +19,21 @@ from bingops.models.cmdb.model import CmdbModel
 from bingops.models.cmdb.resource import CmdbResource
 from bingops.models.cmdb.tag import CmdbResourceTag
 from bingops.models.jobs import Runbook
-from bingops.models.ticket import Ticket, TicketApproval, TicketComment
+from bingops.models.ticket import (
+    OncallSchedule,
+    Ticket,
+    TicketApproval,
+    TicketCatalog,
+    TicketComment,
+    TicketGroup,
+)
 from bingops.models.user import User
 from bingops.repositories.jobs_repo import JobExecutionRepo
+from bingops.repositories.ticket_meta_repo import (
+    OncallScheduleRepo,
+    TicketCatalogRepo,
+    TicketGroupRepo,
+)
 from bingops.repositories.ticket_repo import (
     ChangeFreezeRepo,
     TicketApprovalRepo,
@@ -85,6 +97,8 @@ async def list_tickets(
     priority: str | None = None,
     creator_id: int | None = None,
     assignee_id: int | None = None,
+    group_id: int | None = None,
+    catalog_item_id: int | None = None,
     keyword: str | None = None,
     page: int = 1,
     page_size: int = 20,
@@ -97,6 +111,8 @@ async def list_tickets(
         priority=priority,
         creator_id=creator_id,
         assignee_id=assignee_id,
+        group_id=group_id,
+        catalog_item_id=catalog_item_id,
         keyword=keyword,
         page=page,
         page_size=page_size,
@@ -152,11 +168,6 @@ async def _validate_runbook_intent(session: AsyncSession, payload: TicketCreate)
 
 async def create_ticket(session: AsyncSession, payload: TicketCreate, operator: User) -> Ticket:
     """创建工单并生成工单号；携带 runbook 时按风险等级决定审批策略。"""
-    if payload.ticket_type not in VALID_TICKET_TYPES:
-        raise ValidationError(f"ticket_type must be one of: {VALID_TICKET_TYPES}")
-    if payload.priority not in VALID_PRIORITIES:
-        raise ValidationError(f"priority must be one of: {VALID_PRIORITIES}")
-
     if payload.assignee_id is not None:
         await _get_user_or_fail(session, payload.assignee_id)
     if payload.related_resource_id is not None:
@@ -164,10 +175,47 @@ async def create_ticket(session: AsyncSession, payload: TicketCreate, operator: 
         if resource is None:
             raise NotFoundError("CmdbResource", str(payload.related_resource_id))
 
+    # 服务目录：校验二级事项 + 快照难度 + 派生默认类型/预绑 runbook
+    catalog_item: TicketCatalog | None = None
+    if payload.catalog_item_id is not None:
+        catalog_item = await TicketCatalogRepo(session).get_by_id(payload.catalog_item_id)
+        if catalog_item is None:
+            raise NotFoundError("TicketCatalog", str(payload.catalog_item_id))
+        if not catalog_item.is_active:
+            raise ValidationError(f"catalog item {catalog_item.id} is deactivated")
+        if catalog_item.parent_id is None:
+            raise ValidationError("catalog_item_id must reference a level-2 item")
+
+    group: TicketGroup | None = None
+    if payload.group_id is not None:
+        group = await TicketGroupRepo(session).get_by_id(payload.group_id)
+        if group is None:
+            raise NotFoundError("TicketGroup", str(payload.group_id))
+        if not group.is_active:
+            raise ValidationError(f"group {group.id} is deactivated")
+
+    ticket_type = payload.ticket_type
+    if catalog_item is not None and "ticket_type" not in payload.model_fields_set:
+        ticket_type = catalog_item.default_type
+    if ticket_type not in VALID_TICKET_TYPES:
+        raise ValidationError(f"ticket_type must be one of: {VALID_TICKET_TYPES}")
+    if payload.priority not in VALID_PRIORITIES:
+        raise ValidationError(f"priority must be one of: {VALID_PRIORITIES}")
+
     # P3 执行意图：runbook 校验 + 风险分级决定审批策略（低危自动直通）
     runbook: Runbook | None = None
-    if payload.runbook_id is not None:
+    effective_runbook_id = payload.runbook_id or (
+        catalog_item.default_runbook_id if catalog_item is not None else None
+    )
+    if effective_runbook_id is not None:
+        payload.runbook_id = effective_runbook_id
         runbook = await _validate_runbook_intent(session, payload)
+
+    # 值班自动派单：未显式指派且带处理组时，按当日值班 tier1 轮转
+    assignee_id = payload.assignee_id
+    auto_assigned = False
+    if assignee_id is None and group is not None:
+        assignee_id, auto_assigned = await _resolve_oncall_assignee(session, group.id)
 
     needs_approval = (
         runbook is not None and runbook.risk_level in job_service.APPROVAL_RISK_LEVELS
@@ -178,16 +226,19 @@ async def create_ticket(session: AsyncSession, payload: TicketCreate, operator: 
         ticket_no="",  # flush 后基于主键回填
         title=payload.title,
         description=payload.description,
-        ticket_type=payload.ticket_type,
+        ticket_type=ticket_type,
         status="pending_approval" if needs_approval else "open",
         priority=payload.priority,
         creator_id=operator.id,
-        assignee_id=payload.assignee_id,
+        assignee_id=assignee_id,
         related_resource_id=payload.related_resource_id,
         runbook_id=payload.runbook_id,
         job_params=payload.job_params,
         code_ref=payload.code_ref,
         approval_status="pending" if needs_approval else "none",
+        catalog_item_id=payload.catalog_item_id,
+        group_id=payload.group_id,
+        difficulty=catalog_item.difficulty if catalog_item is not None else None,
     )
     ticket = await repo.create(ticket)
     ticket.ticket_no = f"TK-{ticket.id:08d}"
@@ -201,6 +252,16 @@ async def create_ticket(session: AsyncSession, payload: TicketCreate, operator: 
             content=payload.description,
         )
     )
+    if auto_assigned and assignee_id is not None:
+        await TicketCommentRepo(session).create(
+            TicketComment(
+                ticket_id=ticket.id,
+                user_id=operator.id,
+                action="assign",
+                content="[auto-oncall]",
+                to_value=str(assignee_id),
+            )
+        )
     await session.commit()
 
     logger.info(
@@ -218,6 +279,30 @@ async def create_ticket(session: AsyncSession, payload: TicketCreate, operator: 
         await _dispatch_attached_job(session, ticket, operator)
 
     return ticket
+
+
+async def _resolve_oncall_assignee(
+    session: AsyncSession, group_id: int,
+) -> tuple[int | None, bool]:
+    """按当日值班表 tier1 轮转选取处理人（复刻多维表格自动赋值自动化）。"""
+    today = datetime.now(timezone.utc).date()
+    oncall: OncallSchedule | None = await OncallScheduleRepo(session).get_by_group_and_date(
+        group_id, today,
+    )
+    if oncall is None or not oncall.tier1:
+        return None, False
+
+    day_start = datetime.combine(today, datetime.min.time(), tzinfo=timezone.utc)
+    count_result = await session.execute(
+        select(func.count())
+        .select_from(Ticket)
+        .where(Ticket.group_id == group_id, Ticket.created_at >= day_start)
+    )
+    today_count = count_result.scalar() or 0
+    tier1 = [uid for uid in oncall.tier1 if isinstance(uid, int)]
+    if not tier1:
+        return None, False
+    return tier1[today_count % len(tier1)], True
 
 
 async def _dispatch_attached_job(
@@ -398,6 +483,8 @@ async def change_ticket_status(
     now = datetime.now(timezone.utc)
     previous = ticket.status
     ticket.status = target_status
+    if target_status == "in_progress" and ticket.started_at is None:
+        ticket.started_at = now
     if target_status == "resolved":
         ticket.resolved_at = now
     elif target_status == "closed":

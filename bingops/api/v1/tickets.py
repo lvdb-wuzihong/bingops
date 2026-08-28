@@ -56,6 +56,17 @@ def _to_response(ticket: Ticket) -> dict:
         job_params=ticket.job_params,
         code_ref=ticket.code_ref,
         approval_status=ticket.approval_status,
+        catalog_item_id=ticket.catalog_item_id,
+        catalog_item_name=ticket.catalog_item.name if ticket.catalog_item else None,
+        catalog_category_name=(
+            ticket.catalog_item.parent.name
+            if ticket.catalog_item and ticket.catalog_item.parent
+            else None
+        ),
+        group_id=ticket.group_id,
+        group_name=ticket.group.name if ticket.group else None,
+        difficulty=ticket.difficulty,
+        started_at=ticket.started_at,
         resolved_at=ticket.resolved_at,
         closed_at=ticket.closed_at,
         created_at=ticket.created_at,
@@ -113,6 +124,8 @@ async def list_tickets(
     priority: str | None = None,
     creator_id: int | None = None,
     assignee_id: int | None = None,
+    group_id: int | None = None,
+    catalog_item_id: int | None = None,
     keyword: str | None = None,
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
@@ -127,6 +140,8 @@ async def list_tickets(
         priority=priority,
         creator_id=creator_id,
         assignee_id=assignee_id,
+        group_id=group_id,
+        catalog_item_id=catalog_item_id,
         keyword=keyword,
         page=page,
         page_size=page_size,

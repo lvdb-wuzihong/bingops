@@ -8,7 +8,15 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from bingops.models.ticket import ChangeFreeze, Ticket, TicketApproval, TicketComment
+from bingops.models.ticket import ChangeFreeze, Ticket, TicketApproval, TicketCatalog, TicketComment
+
+# 工单列表/详情的关系预加载（创建人/处理人/目录项含父分类/处理组）
+_TICKET_LOAD_OPTIONS = (
+    selectinload(Ticket.creator),
+    selectinload(Ticket.assignee),
+    selectinload(Ticket.catalog_item).selectinload(TicketCatalog.parent),
+    selectinload(Ticket.group),
+)
 
 
 class TicketRepo:
@@ -20,7 +28,7 @@ class TicketRepo:
     async def get_by_id(self, ticket_id: int) -> Ticket | None:
         result = await self._session.execute(
             select(Ticket)
-            .options(selectinload(Ticket.creator), selectinload(Ticket.assignee))
+            .options(*_TICKET_LOAD_OPTIONS)
             .where(Ticket.id == ticket_id)
         )
         return result.scalar_one_or_none()
@@ -33,14 +41,14 @@ class TicketRepo:
         priority: str | None = None,
         creator_id: int | None = None,
         assignee_id: int | None = None,
+        group_id: int | None = None,
+        catalog_item_id: int | None = None,
         keyword: str | None = None,
         page: int = 1,
         page_size: int = 20,
     ) -> tuple[list[Ticket], int]:
         """分页查询工单列表。"""
-        query = select(Ticket).options(
-            selectinload(Ticket.creator), selectinload(Ticket.assignee),
-        )
+        query = select(Ticket).options(*_TICKET_LOAD_OPTIONS)
         count_query = select(Ticket.id)
 
         if status:
@@ -58,6 +66,12 @@ class TicketRepo:
         if assignee_id is not None:
             query = query.where(Ticket.assignee_id == assignee_id)
             count_query = count_query.where(Ticket.assignee_id == assignee_id)
+        if group_id is not None:
+            query = query.where(Ticket.group_id == group_id)
+            count_query = count_query.where(Ticket.group_id == group_id)
+        if catalog_item_id is not None:
+            query = query.where(Ticket.catalog_item_id == catalog_item_id)
+            count_query = count_query.where(Ticket.catalog_item_id == catalog_item_id)
         if keyword:
             like_pattern = f"%{keyword}%"
             keyword_filter = or_(

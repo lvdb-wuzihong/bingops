@@ -6,6 +6,8 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field
 
+VALID_DIFFICULTIES = ("simple", "medium", "hard")
+
 
 class TicketCreate(BaseModel):
     """创建工单请求。"""
@@ -21,6 +23,8 @@ class TicketCreate(BaseModel):
     runbook_id: int | None = Field(default=None, description="变更工单携带的 Runbook ID")
     job_params: dict = Field(default_factory=dict, description="执行参数（随审批通过后下发）")
     code_ref: str | None = Field(default=None, max_length=128, description="git tag 快照")
+    catalog_item_id: int | None = Field(default=None, description="服务目录事项 ID（二级）")
+    group_id: int | None = Field(default=None, description="处理组 ID（驱动值班自动派单）")
 
 
 class TicketUpdate(BaseModel):
@@ -147,8 +151,120 @@ class TicketResponse(BaseModel):
     job_params: dict = Field(default_factory=dict)
     code_ref: str | None = None
     approval_status: str | None = None
+    catalog_item_id: int | None = None
+    catalog_item_name: str | None = None
+    catalog_category_name: str | None = None
+    group_id: int | None = None
+    group_name: str | None = None
+    difficulty: str | None = None
+    started_at: datetime | None = None
     resolved_at: datetime | None = None
     closed_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class CatalogCreate(BaseModel):
+    """创建服务目录项请求。"""
+
+    name: str = Field(min_length=1, max_length=128)
+    parent_id: int | None = Field(default=None, description="一级分类 ID，空=创建一级分类")
+    description: str | None = None
+    difficulty: str = Field(default="simple", description="simple|medium|hard")
+    default_risk: str = Field(default="low", description="low|medium|high")
+    default_type: str = Field(default="request", description="语义 ticket_type")
+    default_runbook_id: int | None = None
+    sort_order: int = 0
+
+
+class CatalogUpdate(BaseModel):
+    """更新服务目录项请求。"""
+
+    description: str | None = None
+    difficulty: str | None = None
+    default_risk: str | None = None
+    default_type: str | None = None
+    default_runbook_id: int | None = None
+    is_active: bool | None = None
+    sort_order: int | None = None
+
+
+class CatalogResponse(BaseModel):
+    """服务目录项响应。"""
+
+    id: int
+    name: str
+    parent_id: int | None = None
+    description: str | None = None
+    difficulty: str
+    default_risk: str
+    default_type: str
+    default_runbook_id: int | None = None
+    is_active: bool
+    sort_order: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class GroupCreate(BaseModel):
+    """创建处理组请求。"""
+
+    name: str = Field(min_length=1, max_length=128)
+    description: str | None = None
+    members: list[int] = Field(default_factory=list, description="用户 ID 数组")
+
+
+class GroupUpdate(BaseModel):
+    """更新处理组请求。"""
+
+    description: str | None = None
+    members: list[int] | None = None
+    is_active: bool | None = None
+
+
+class GroupResponse(BaseModel):
+    """处理组响应。"""
+
+    id: int
+    name: str
+    description: str | None = None
+    members: list[int] = Field(default_factory=list)
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class OncallCreate(BaseModel):
+    """创建值班排班请求。"""
+
+    group_id: int
+    oncall_date: datetime = Field(description="值班日期")
+    tier1: list[int] = Field(default_factory=list, description="一线值班用户 ID")
+    tier2: list[int] = Field(default_factory=list, description="二线支持用户 ID")
+    tier3: list[int] = Field(default_factory=list, description="三线支持用户 ID")
+    note: str | None = None
+
+
+class OncallUpdate(BaseModel):
+    """更新值班排班请求。"""
+
+    tier1: list[int] | None = None
+    tier2: list[int] | None = None
+    tier3: list[int] | None = None
+    note: str | None = None
+
+
+class OncallResponse(BaseModel):
+    """值班排班响应。"""
+
+    id: int
+    group_id: int
+    group_name: str | None = None
+    oncall_date: datetime
+    tier1: list[int] = Field(default_factory=list)
+    tier2: list[int] = Field(default_factory=list)
+    tier3: list[int] = Field(default_factory=list)
+    note: str | None = None
     created_at: datetime
     updated_at: datetime
 

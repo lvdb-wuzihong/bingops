@@ -1,6 +1,6 @@
 # 工单系统（Tickets）设计文档
 
-> 状态：v2 已实现（v1 协作流转 + P3 审批挂接） | 维护者：BingOps Team
+> 状态：v3 已实现（v1 协作流转 + P3 审批挂接 + v15 服务目录/值班派单） | 维护者：BingOps Team
 > 相关代码：`bingops/models/ticket.py`、`bingops/services/ticket_service.py`、`bingops/api/v1/tickets.py`、`bingops/services/change_freeze_service.py`
 > 数据库脚本：`sql/migrations/v4_tickets.sql` + `sql/migrations/v14_ticket_approval.sql`（已同步 `sql/schema.sql`）
 
@@ -207,3 +207,43 @@ psql -U <user> -d <dbname> -f sql/schema.sql
 | `ticket:approve` | 审批工单 | admin、operator |
 | `change_freeze:list` | 查看封禁窗口 | 全角色 |
 | `change_freeze:create/delete` | 维护封禁窗口 | admin |
+
+---
+
+## 12. 服务目录/处理组/值班派单（v15，已实现）
+
+对齐飞书多维表格 IT 服务工单设计（仅系统运维范围），落地轻量服务目录与值班自动派单。
+
+### 12.1 数据模型（v15 迁移）
+
+| 表 | 说明 |
+|----|------|
+| `ticket_catalog` | 两级服务目录：一级分类（云账号与权限/资源交付与变更/K8s 平台/发布与配置变更/故障与排查/日常运维支持）→ 二级事项；事项携带 difficulty/default_risk/default_type/default_runbook_id |
+| `ticket_groups` | 处理组（name + members JSONB），派单/值班最小单位，与 RBAC 角色解耦 |
+| `oncall_schedules` | 值班表：日期 × 组 × 三线（tier1 自动派单/tier2 升级建议/tier3 变更审批来源），同组同日期唯一 |
+| tickets 扩列 | `catalog_item_id`、`group_id`、`difficulty`（目录快照）、`started_at`（开始处理时间） |
+
+### 12.2 建单语义（目录驱动）
+
+- 选二级事项建单 → 快照 difficulty；未显式传 ticket_type 时取事项 `default_type`；未传 runbook 时取事项 `default_runbook_id`（预绑执行意图，接入 P3 审批/直通链路）
+- 带处理组且未显式指派 → 按当日值班 tier1 轮转自动派单（复刻多维表格“新增工单自动赋值处理人”自动化），落 `[auto-oncall]` 流转记录
+- 处理时长不再手工填：响应时长 = started_at - created_at，处理时长 = resolved_at - started_at（open→in_progress 时自动写 started_at）
+
+### 12.3 API
+
+| 前缀 | 端点 | 权限 |
+|------|------|------|
+| `/api/v1/ticket-catalog` | GET/POST/PUT/{id}/DELETE/{id} | `ticket_catalog:*` |
+| `/api/v1/ticket-groups` | GET/POST/PUT/{id}/DELETE/{id} | `ticket_group:*` |
+| `/api/v1/oncall-schedules` | GET/POST/PUT/{id}/DELETE/{id} | `oncall:*` |
+
+工单列表新增 `group_id`/`catalog_item_id` 过滤；响应携带目录名/分类名/组名/难度/started_at。
+
+### 12.4 角色分配
+
+admin 全量；operator 管理但无删除；viewer/auditor 只读。目录删除保护：有子项或被工单引用时拒绝。
+
+### 12.5 后置项
+
+- 附件能力（待存储选型：OSS/本地）
+- tier3 作为变更默认审批人的自动挂接（当前审批人仍为手动指定）

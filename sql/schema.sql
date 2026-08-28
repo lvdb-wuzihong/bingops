@@ -340,6 +340,10 @@ CREATE TABLE tickets (
     job_params          JSONB        NOT NULL DEFAULT '{}',
     code_ref            VARCHAR(128),                            -- git tag 快照（同 job_executions）
     approval_status     VARCHAR(16),                             -- none|pending|approved|rejected
+    catalog_item_id     BIGINT,       -- 服务目录事项（二级，FK 于表定义后补建）
+    group_id            BIGINT,
+    difficulty          VARCHAR(16),                             -- 建单时从目录快照 simple|medium|hard
+    started_at          TIMESTAMPTZ,                             -- 开始处理时间（响应时长计算）
     resolved_at         TIMESTAMPTZ,
     closed_at           TIMESTAMPTZ,
     created_at          TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
@@ -395,6 +399,57 @@ CREATE TABLE change_freezes (
 );
 
 CREATE INDEX idx_change_freeze_time ON change_freezes (starts_at, ends_at);
+
+-- 两级服务目录（parent_id=NULL 为一级分类；事项挂难度/默认风险/默认类型/默认 runbook）
+CREATE TABLE ticket_catalog (
+    id                 BIGSERIAL PRIMARY KEY,
+    name               VARCHAR(128) NOT NULL UNIQUE,
+    parent_id          BIGINT       REFERENCES ticket_catalog(id) ON DELETE CASCADE,
+    description        TEXT,
+    difficulty         VARCHAR(16)  NOT NULL DEFAULT 'simple',  -- simple|medium|hard
+    default_risk       VARCHAR(16)  NOT NULL DEFAULT 'low',     -- low|medium|high
+    default_type       VARCHAR(32)  NOT NULL DEFAULT 'request', -- 语义 ticket_type
+    default_runbook_id BIGINT       REFERENCES runbooks(id),    -- 可执行事项预绑 runbook
+    is_active          BOOLEAN      NOT NULL DEFAULT TRUE,
+    sort_order         INT          NOT NULL DEFAULT 0,
+    created_at         TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    updated_at         TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+CREATE INDEX idx_ticket_catalog_parent ON ticket_catalog (parent_id);
+
+-- 工单处理组（派单/值班的最小单位，与 RBAC 角色解耦）
+CREATE TABLE ticket_groups (
+    id          BIGSERIAL PRIMARY KEY,
+    name        VARCHAR(128) NOT NULL UNIQUE,
+    description TEXT,
+    members     JSONB        NOT NULL DEFAULT '[]',   -- 用户 ID 数组
+    is_active   BOOLEAN      NOT NULL DEFAULT TRUE,
+    created_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    updated_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+-- 运维值班表（日期 × 组 × 三线支持；tier1 自动派单来源，tier3 变更审批来源）
+CREATE TABLE oncall_schedules (
+    id          BIGSERIAL PRIMARY KEY,
+    group_id    BIGINT      NOT NULL REFERENCES ticket_groups(id) ON DELETE CASCADE,
+    oncall_date DATE        NOT NULL,
+    tier1       JSONB       NOT NULL DEFAULT '[]',
+    tier2       JSONB       NOT NULL DEFAULT '[]',
+    tier3       JSONB       NOT NULL DEFAULT '[]',
+    note        TEXT,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (group_id, oncall_date)
+);
+CREATE INDEX idx_oncall_date ON oncall_schedules (oncall_date);
+
+-- tickets 对目录/处理组的外键（表定义顺序原因，后置补建）
+ALTER TABLE tickets
+    ADD CONSTRAINT fk_tickets_catalog_item
+    FOREIGN KEY (catalog_item_id) REFERENCES ticket_catalog(id);
+ALTER TABLE tickets
+    ADD CONSTRAINT fk_tickets_group
+    FOREIGN KEY (group_id) REFERENCES ticket_groups(id);
 
 -- ============================================================================
 -- 任务系统（runbook + job 执行引擎，设计见 docs/task-system-design.md）
@@ -494,7 +549,8 @@ BEGIN
             'cmdb_tag_definitions', 'cmdb_resource_tags', 'cmdb_sync_tasks',
             'tickets',
             'runbooks', 'job_executions', 'job_steps',
-            'change_freezes'
+            'change_freezes',
+            'ticket_catalog', 'ticket_groups', 'oncall_schedules'
         ])
     LOOP
         EXECUTE format(
@@ -600,7 +656,19 @@ INSERT INTO permissions (code, name) VALUES
 ('job:rollback',   '回滚任务'),
 ('change_freeze:list',   '查看变更封禁窗口'),
 ('change_freeze:create', '创建变更封禁窗口'),
-('change_freeze:delete', '删除变更封禁窗口')
+('change_freeze:delete', '删除变更封禁窗口'),
+('ticket_catalog:list',   '查看服务目录'),
+('ticket_catalog:create', '创建服务目录项'),
+('ticket_catalog:update', '更新服务目录项'),
+('ticket_catalog:delete', '删除服务目录项'),
+('ticket_group:list',     '查看处理组'),
+('ticket_group:create',   '创建处理组'),
+('ticket_group:update',   '更新处理组'),
+('ticket_group:delete',   '删除处理组'),
+('oncall:list',           '查看值班表'),
+('oncall:create',         '创建值班排班'),
+('oncall:update',         '更新值班排班'),
+('oncall:delete',         '删除值班排班')
 ON CONFLICT (code) DO NOTHING;
 
 -- admin 角色分配所有权限（须在全部权限插入后执行）
