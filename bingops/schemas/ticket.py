@@ -184,6 +184,7 @@ class CatalogCreate(BaseModel):
     default_risk: str = Field(default="low", description="low|medium|high")
     default_type: str = Field(default="request", description="语义 ticket_type")
     default_runbook_id: int | None = None
+    default_group_id: int | None = Field(default=None, description="默认处理组（路由配置化）")
     sort_order: int = 0
 
 
@@ -195,15 +196,17 @@ class CatalogUpdate(BaseModel):
     default_risk: str | None = None
     default_type: str | None = None
     default_runbook_id: int | None = None
+    default_group_id: int | None = None
     is_active: bool | None = None
     sort_order: int | None = None
 
 
 class CategoryCreate(BaseModel):
-    """创建一级分类请求（不含事项级属性）。"""
+    """创建一级分类请求（不含事项级属性，含路由配置）。"""
 
     name: str = Field(min_length=1, max_length=128)
     description: str | None = None
+    default_group_id: int | None = Field(default=None, description="默认处理组")
     sort_order: int = 0
 
 
@@ -217,6 +220,7 @@ class ItemCreate(BaseModel):
     default_risk: str = Field(default="low", description="low|medium|high")
     default_type: str = Field(default="request", description="语义 ticket_type")
     default_runbook_id: int | None = None
+    default_group_id: int | None = Field(default=None, description="覆盖分类的默认处理组")
     sort_order: int = 0
 
 
@@ -231,6 +235,7 @@ class CatalogResponse(BaseModel):
     default_risk: str
     default_type: str
     default_runbook_id: int | None = None
+    default_group_id: int | None = None
     is_active: bool
     sort_order: int
     created_at: datetime

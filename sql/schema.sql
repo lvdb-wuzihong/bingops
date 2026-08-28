@@ -413,6 +413,7 @@ CREATE TABLE ticket_catalog (
     default_risk       VARCHAR(16)  NOT NULL DEFAULT 'low',     -- low|medium|high
     default_type       VARCHAR(32)  NOT NULL DEFAULT 'request', -- 语义 ticket_type
     default_runbook_id BIGINT       REFERENCES runbooks(id),    -- 可执行事项预绑 runbook
+    default_group_id   BIGINT       REFERENCES ticket_groups(id), -- 默认处理组（路由配置化）
     is_active          BOOLEAN      NOT NULL DEFAULT TRUE,
     sort_order         INT          NOT NULL DEFAULT 0,
     created_at         TIMESTAMPTZ  NOT NULL DEFAULT NOW(),

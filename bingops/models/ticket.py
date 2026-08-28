@@ -157,6 +157,9 @@ class TicketCatalog(BaseMixin, Base):
     default_runbook_id: Mapped[int | None] = mapped_column(
         BigInteger, ForeignKey("runbooks.id"), nullable=True,
     )
+    default_group_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("ticket_groups.id"), nullable=True,
+    )
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
