@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from bingops.models.cmdb.model import CmdbModel
 from bingops.models.cmdb.resource import CmdbResource
 
 
@@ -141,8 +142,12 @@ class CmdbResourceRepo:
             count_query = count_query.where(CmdbResource.region == region)
         if keyword:
             like_pattern = f"%{keyword}%"
-            query = query.where(CmdbResource.name.ilike(like_pattern))
-            count_query = count_query.where(CmdbResource.name.ilike(like_pattern))
+            keyword_filter = or_(
+                CmdbResource.name.ilike(like_pattern),
+                CmdbResource.provider_id.ilike(like_pattern),
+            )
+            query = query.where(keyword_filter)
+            count_query = count_query.where(keyword_filter)
 
         total_result = await self._session.execute(
             select(func.count()).select_from(count_query.subquery())
@@ -297,3 +302,30 @@ class CmdbResourceRepo:
             )
         )
         return result.scalar() or 0
+
+    async def search_options(
+        self,
+        *,
+        keyword: str | None = None,
+        model_id: int | None = None,
+        limit: int = 20,
+    ) -> list[tuple[CmdbResource, str]]:
+        """选择器轻量搜索：返回 (resource, model_code)，仅带渲染所需字段。"""
+        query = (
+            select(CmdbResource, CmdbModel.code)
+            .join(CmdbModel, CmdbResource.model_id == CmdbModel.id)
+            .where(CmdbResource.deleted_at.is_(None))
+        )
+        if model_id is not None:
+            query = query.where(CmdbResource.model_id == model_id)
+        if keyword:
+            like_pattern = f"%{keyword}%"
+            query = query.where(
+                or_(
+                    CmdbResource.name.ilike(like_pattern),
+                    CmdbResource.provider_id.ilike(like_pattern),
+                )
+            )
+        query = query.order_by(CmdbResource.id.desc()).limit(limit)
+        result = await self._session.execute(query)
+        return list(result.all())

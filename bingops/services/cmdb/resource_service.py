@@ -15,6 +15,33 @@ from bingops.schemas.cmdb.resource import ResourceCreate, ResourceUpdate
 logger = logging.getLogger(f"bingops.{__name__}")
 
 
+async def search_resource_options(
+    session: AsyncSession,
+    *,
+    keyword: str | None = None,
+    model_id: int | None = None,
+    limit: int = 20,
+) -> list[dict]:
+    """选择器轻量搜索（工单关联资源等下拉场景）。
+
+    返回仅含渲染所需字段的字典列表：id/name/model_code/provider/region/status。
+    """
+    rows = await CmdbResourceRepo(session).search_options(
+        keyword=keyword, model_id=model_id, limit=limit,
+    )
+    return [
+        {
+            "id": r.id,
+            "name": r.name,
+            "model_code": code,
+            "provider": r.provider,
+            "region": r.region,
+            "status": r.status,
+        }
+        for r, code in rows
+    ]
+
+
 async def list_resources(
     session: AsyncSession,
     *,
