@@ -228,7 +228,7 @@ async def create_ticket(session: AsyncSession, payload: TicketCreate, operator: 
     assignee_id = payload.assignee_id
     auto_assigned = False
     if assignee_id is None and group is not None:
-        assignee_id, auto_assigned = await _resolve_oncall_assignee(session, group.id)
+        assignee_id, auto_assigned = await _resolve_auto_assignee(session, group)
 
     needs_approval = (
         runbook is not None and runbook.risk_level in job_service.APPROVAL_RISK_LEVELS
@@ -300,28 +300,33 @@ async def create_ticket(session: AsyncSession, payload: TicketCreate, operator: 
     return ticket
 
 
-async def _resolve_oncall_assignee(
-    session: AsyncSession, group_id: int,
+async def _resolve_auto_assignee(
+    session: AsyncSession, group: TicketGroup,
 ) -> tuple[int | None, bool]:
-    """按当日值班表 tier1 轮转选取处理人（复刻多维表格自动赋值自动化）。"""
+    """自动派单：当日值班 tier1 轮转优先；未配值班时回退组成员轮转。
+
+    轮转算法：pool[当日该组工单数 % len(pool)]，两人组即逐单交替。
+    """
     today = datetime.now(timezone.utc).date()
     oncall: OncallSchedule | None = await OncallScheduleRepo(session).get_by_group_and_date(
-        group_id, today,
+        group.id, today,
     )
-    if oncall is None or not oncall.tier1:
+    pool: list[int] = []
+    if oncall is not None:
+        pool = [uid for uid in oncall.tier1 if isinstance(uid, int)]
+    if not pool:
+        pool = [uid for uid in (group.members or []) if isinstance(uid, int)]
+    if not pool:
         return None, False
 
     day_start = datetime.combine(today, datetime.min.time(), tzinfo=timezone.utc)
     count_result = await session.execute(
         select(func.count())
         .select_from(Ticket)
-        .where(Ticket.group_id == group_id, Ticket.created_at >= day_start)
+        .where(Ticket.group_id == group.id, Ticket.created_at >= day_start)
     )
     today_count = count_result.scalar() or 0
-    tier1 = [uid for uid in oncall.tier1 if isinstance(uid, int)]
-    if not tier1:
-        return None, False
-    return tier1[today_count % len(tier1)], True
+    return pool[today_count % len(pool)], True
 
 
 async def _dispatch_attached_job(

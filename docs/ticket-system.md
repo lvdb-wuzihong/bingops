@@ -262,11 +262,16 @@ admin 全量；operator 管理但无删除；viewer/auditor 只读。目录删�
 
 ### 13.2 路由配置化与表单布局（v17）
 
-- `ticket_catalog.default_group_id`：目录关联默认处理组（事项级覆盖分类级）；建单未显式选组时自动派生，**提单人不再手选处理组**
+- `ticket_catalog.default_group_id`：目录关联默认处理组（事项级覆盖分类级）；建单时组自动派生，**提单人不再手选处理组/处理人**（新建表单已去除两字段；API 保留 assignee_id/group_id 作兼容与人工改派）
+- **自动分派规则**（组内多人时）：
+  1. 当日值班表 tier1 轮转优先
+  2. 未配值班 → 回退组成员轮转
+  3. 轮转算法 `pool[当日该组工单数 % len(pool)]`，两人组即逐单交替
+  4. 均无 → 暂不指派，后续 `POST /{id}/assign` 人工指派/转派
 - 建单表单布局规范（语义分组）：
   1. 标题*（整行）
   2. [类型] [优先级] 同行
-  3. [服务目录事项] → [处理组（自动带出，只读）] [处理人（可选，联动 candidates）] 同行相邻
+  3. [服务目录事项] → 处理组/处理人自动带出（详情只读展示，不在表单出现）
   4. 执行目标（多选，整行）
   5. 描述（整行）
 - 目录配置表单：分类表单含“默认处理组”；事项表单含“覆盖默认处理组”（可选）
@@ -276,7 +281,7 @@ admin 全量；operator 管理但无删除；viewer/auditor 只读。目录删�
 1. **表单永远选人/选物，不填 ID**：所有关联实体字段用可搜索选择器（remote-select），提交时仅发 id
 2. 关联资源选择器数据源：`GET /api/v1/cmdb/resources/options?keyword=`（轻量字段：id/name/model_code/provider/region/status；名称+实例 ID 双模糊匹配）
 3. 执行目标为**多选**选择器，写入 `target_resource_ids`；下拉项渲染 `name（model_code / region）`
-4. 处理人/处理组/目录事项均为下拉（数据源：users、/ticket-groups、/ticket-catalog）
-5. **处理组→处理人联动**：选定处理组后，处理人下拉改调 `GET /ticket-groups/{id}/candidates`（组成员 ∪ 当日值班三线），placeholder 显示“留空=按值班自动指派”；未选组时才列全量用户
+4. 目录事项为下拉（数据源：/ticket-catalog，仅列二级事项）；处理组/处理人不在新建表单出现（自动派生/自动分派）
+5. **处理组→处理人联动**（仅改派场景）：`POST /{id}/assign` 的人工改派弹窗用 `GET /ticket-groups/{id}/candidates`（组成员 ∪ 当日值班三线）列候选人；新建表单不出现处理人/处理组
 6. 新建工单弹窗中，目录事项选中后若 `default_runbook_id` 非空 → 展示执行目标多选为必填；否则可选
 7. 工单详情资源回显：按 `target_resource_ids` 批量调 `/cmdb/resources/{id}` 取 name 展示
