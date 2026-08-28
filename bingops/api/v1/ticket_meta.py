@@ -118,7 +118,10 @@ async def create_category(
     item = await ticket_meta_service.create_catalog_item(
         session,
         CatalogCreate(
-            name=payload.name, description=payload.description, sort_order=payload.sort_order,
+            name=payload.name,
+            description=payload.description,
+            default_group_id=payload.default_group_id,
+            sort_order=payload.sort_order,
         ),
     )
     return success_response(

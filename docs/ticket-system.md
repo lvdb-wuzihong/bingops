@@ -260,7 +260,18 @@ admin 全量；operator 管理但无删除；viewer/auditor 只读。目录删�
 - 工单列表新增 `target_resource_id` 过滤（JSONB @> 包含语义）
 - 变更上下文（`/change-context`）新增 `active_tickets`：影响该资源的活跃工单（pending_approval/open/in_progress），与 busy_execution_id 一起支撑变更时点判断
 
-### 13.2 前端对接规范
+### 13.2 路由配置化与表单布局（v17）
+
+- `ticket_catalog.default_group_id`：目录关联默认处理组（事项级覆盖分类级）；建单未显式选组时自动派生，**提单人不再手选处理组**
+- 建单表单布局规范（语义分组）：
+  1. 标题*（整行）
+  2. [类型] [优先级] 同行
+  3. [服务目录事项] → [处理组（自动带出，只读）] [处理人（可选，联动 candidates）] 同行相邻
+  4. 执行目标（多选，整行）
+  5. 描述（整行）
+- 目录配置表单：分类表单含“默认处理组”；事项表单含“覆盖默认处理组”（可选）
+
+### 13.3 前端对接规范
 
 1. **表单永远选人/选物，不填 ID**：所有关联实体字段用可搜索选择器（remote-select），提交时仅发 id
 2. 关联资源选择器数据源：`GET /api/v1/cmdb/resources/options?keyword=`（轻量字段：id/name/model_code/provider/region/status；名称+实例 ID 双模糊匹配）

@@ -197,6 +197,15 @@ async def create_ticket(session: AsyncSession, payload: TicketCreate, operator: 
             raise NotFoundError("TicketGroup", str(payload.group_id))
         if not group.is_active:
             raise ValidationError(f"group {group.id} is deactivated")
+    elif catalog_item is not None:
+        # 路由配置化：未显式选组时，从目录派生（事项级覆盖分类级）
+        derived_group_id = catalog_item.default_group_id or (
+            catalog_item.parent.default_group_id if catalog_item.parent else None
+        )
+        if derived_group_id is not None:
+            group = await TicketGroupRepo(session).get_by_id(derived_group_id)
+            if group is not None and not group.is_active:
+                group = None
 
     ticket_type = payload.ticket_type
     if catalog_item is not None and "ticket_type" not in payload.model_fields_set:
@@ -241,7 +250,7 @@ async def create_ticket(session: AsyncSession, payload: TicketCreate, operator: 
         code_ref=payload.code_ref,
         approval_status="pending" if needs_approval else "none",
         catalog_item_id=payload.catalog_item_id,
-        group_id=payload.group_id,
+        group_id=group.id if group is not None else None,
         difficulty=catalog_item.difficulty if catalog_item is not None else None,
         target_resource_ids=_extract_target_ids(payload),
     )
