@@ -191,6 +191,17 @@ async def create_group(
     )
 
 
+@group_router.get("/{group_id}/candidates")
+async def get_group_candidates(
+    group_id: int,
+    session: AsyncSession = Depends(get_db_session),
+    _user: User = require_permission("ticket_group:list"),
+):
+    """处理人候选人（组成员 ∪ 当日值班三线），建单表单处理组→处理人联动用。"""
+    candidates = await ticket_meta_service.get_group_candidates(session, group_id)
+    return success_response(data=candidates)
+
+
 @group_router.put("/{group_id}")
 async def update_group(
     group_id: int,

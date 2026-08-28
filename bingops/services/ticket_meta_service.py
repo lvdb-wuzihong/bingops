@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bingops.core.exceptions import ConflictError, NotFoundError, ValidationError
 from bingops.models.ticket import OncallSchedule, Ticket, TicketCatalog, TicketGroup
+from bingops.models.user import User
 from bingops.repositories.ticket_meta_repo import (
     OncallScheduleRepo,
     TicketCatalogRepo,
@@ -179,6 +181,32 @@ async def update_group(session: AsyncSession, group_id: int, payload: GroupUpdat
 
     logger.info("Ticket group updated", extra={"group_id": group_id})
     return group
+
+
+async def get_group_candidates(session: AsyncSession, group_id: int) -> list[dict]:
+    """处理组候选人：组成员 ∪ 当日值班三线，供建单处理人下拉联动。"""
+    group = await TicketGroupRepo(session).get_by_id(group_id)
+    if group is None:
+        raise NotFoundError("TicketGroup", str(group_id))
+
+    today = datetime.now(timezone.utc).date()
+    oncall = await OncallScheduleRepo(session).get_by_group_and_date(group_id, today)
+
+    ids = [uid for uid in (group.members or []) if isinstance(uid, int)]
+    if oncall is not None:
+        for tier in (oncall.tier1, oncall.tier2, oncall.tier3):
+            ids.extend(uid for uid in (tier or []) if isinstance(uid, int))
+    unique_ids = sorted(set(ids))
+    if not unique_ids:
+        return []
+
+    result = await session.execute(
+        select(User).where(User.id.in_(unique_ids), User.is_active.is_(True))
+    )
+    return [
+        {"id": u.id, "username": u.username, "display_name": u.display_name}
+        for u in result.scalars().all()
+    ]
 
 
 async def delete_group(session: AsyncSession, group_id: int) -> None:

@@ -266,5 +266,6 @@ admin 全量；operator 管理但无删除；viewer/auditor 只读。目录删�
 2. 关联资源选择器数据源：`GET /api/v1/cmdb/resources/options?keyword=`（轻量字段：id/name/model_code/provider/region/status；名称+实例 ID 双模糊匹配）
 3. 执行目标为**多选**选择器，写入 `target_resource_ids`；下拉项渲染 `name（model_code / region）`
 4. 处理人/处理组/目录事项均为下拉（数据源：users、/ticket-groups、/ticket-catalog）
-5. 新建工单弹窗中，目录事项选中后若 `default_runbook_id` 非空 → 展示执行目标多选为必填；否则可选
-6. 工单详情资源回显：按 `target_resource_ids` 批量调 `/cmdb/resources/{id}` 取 name 展示
+5. **处理组→处理人联动**：选定处理组后，处理人下拉改调 `GET /ticket-groups/{id}/candidates`（组成员 ∪ 当日值班三线），placeholder 显示“留空=按值班自动指派”；未选组时才列全量用户
+6. 新建工单弹窗中，目录事项选中后若 `default_runbook_id` 非空 → 展示执行目标多选为必填；否则可选
+7. 工单详情资源回显：按 `target_resource_ids` 批量调 `/cmdb/resources/{id}` 取 name 展示
