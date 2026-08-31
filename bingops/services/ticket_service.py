@@ -15,6 +15,7 @@ from bingops.core.exceptions import (
     PermissionDeniedError,
     ValidationError,
 )
+from bingops.models.cmdb.business_app import CmdbBusinessApp
 from bingops.models.cmdb.change_log import CmdbChangeLog
 from bingops.models.cmdb.model import CmdbModel
 from bingops.models.cmdb.resource import CmdbResource
@@ -156,9 +157,10 @@ def _extract_target_ids(payload: TicketCreate) -> list[int]:
 
 
 async def _validate_runbook_intent(session: AsyncSession, payload: TicketCreate) -> Runbook:
-    """校验变更工单携带的执行意图（runbook 存在且启用、目标非空）。
+    """校验变更工单携带的执行意图（runbook 存在且启用）。
 
-    code_ref/params 属执行层配置，由运维在下发时补齐（dispatch_ticket_job），建单不强制。
+    code_ref/params/执行目标均属执行层配置，由运维在下发时补齐（dispatch_ticket_job），
+    建单不强制——申请类是“造资源”，建单时存量资源尚不存在。
     """
     result = await session.execute(select(Runbook).where(Runbook.id == payload.runbook_id))
     runbook = result.scalar_one_or_none()
@@ -166,10 +168,6 @@ async def _validate_runbook_intent(session: AsyncSession, payload: TicketCreate)
         raise NotFoundError("Runbook", str(payload.runbook_id))
     if not runbook.is_active:
         raise ConflictError("Runbook", f"runbook {runbook.id} is deactivated")
-    if not _extract_target_ids(payload):
-        raise ValidationError(
-            "target_resource_ids (in job_params) or related_resource_id is required",
-        )
     return runbook
 
 
@@ -181,6 +179,10 @@ async def create_ticket(session: AsyncSession, payload: TicketCreate, operator: 
         resource = await session.get(CmdbResource, payload.related_resource_id)
         if resource is None:
             raise NotFoundError("CmdbResource", str(payload.related_resource_id))
+    if payload.business_app_id is not None:
+        app = await session.get(CmdbBusinessApp, payload.business_app_id)
+        if app is None:
+            raise NotFoundError("CmdbBusinessApp", str(payload.business_app_id))
 
     # 服务目录：校验二级事项 + 快照难度 + 派生默认类型/预绑 runbook
     catalog_item: TicketCatalog | None = None
@@ -256,6 +258,7 @@ async def create_ticket(session: AsyncSession, payload: TicketCreate, operator: 
         group_id=group.id if group is not None else None,
         difficulty=catalog_item.difficulty if catalog_item is not None else None,
         target_resource_ids=_extract_target_ids(payload),
+        business_app_id=payload.business_app_id,
     )
     ticket = await repo.create(ticket)
     ticket.ticket_no = f"TK-{ticket.id:08d}"
@@ -291,9 +294,14 @@ async def create_ticket(session: AsyncSession, payload: TicketCreate, operator: 
         },
     )
 
-    # 低危且建单即带执行配置（运维 API 路径）才自动下发；
-    # 提单人路径（无 code_ref）由运维事后 dispatch_ticket_job 补齐下发
-    if runbook is not None and not needs_approval and payload.code_ref:
+    # 低危且建单即带执行配置+目标（运维 API 路径）才自动下发；
+    # 提单人路径由运维事后 dispatch_ticket_job 补齐目标与配置再下发
+    if (
+        runbook is not None
+        and not needs_approval
+        and payload.code_ref
+        and _extract_target_ids(payload)
+    ):
         await _dispatch_attached_job(session, ticket, operator)
 
     # 提交后重查（带关系预加载），避免响应层懒加载触发 MissingGreenlet
@@ -374,10 +382,12 @@ async def dispatch_ticket_job(
     code_ref: str,
     params: dict,
     operator: User,
+    target_resource_ids: list[int] | None = None,
 ) -> Ticket:
-    """运维补齐执行配置并下发（角色分离：提单人不管 runbook，执行层由运维填）。
+    """运维补齐执行配置并下发（角色分离：提单人不管 runbook/目标，执行层由运维填）。
 
     前置：工单须 open（中高危已审批）；同一工单存在活跃执行时拒绝重复下发。
+    执行目标：本次传入优先，否则用工单已有目标；两者皆空拒绝（无目标不可执行）。
     """
     ticket = await _get_ticket_or_fail(session, ticket_id)
 
@@ -400,9 +410,18 @@ async def dispatch_ticket_job(
     runbook = result.scalar_one_or_none()
     if runbook is None or not runbook.is_active:
         raise ConflictError("Runbook", f"runbook {ticket.runbook_id} is unavailable")
-    job_service._validate_params(runbook.params_schema, params)
+    params = job_service._validate_params(runbook.params_schema, params)
+
+    targets = list(target_resource_ids) if target_resource_ids else (
+        ticket.target_resource_ids or []
+    )
+    if not targets:
+        raise ValidationError(
+            "target_resource_ids is required to dispatch (select execution targets)",
+        )
 
     ticket.code_ref = code_ref
+    ticket.target_resource_ids = targets
     merged_params = dict(ticket.job_params or {})
     merged_params["params"] = params
     ticket.job_params = merged_params
@@ -478,8 +497,9 @@ async def submit_approval(
         extra={"ticket_id": ticket_id, "action": action, "approver_id": approver.id},
     )
 
-    # 审批通过且携带执行意图 → 自动下发（封禁窗口拦截在此生效）
-    if approved and ticket.runbook_id is not None:
+    # 审批通过且携带执行意图且已有目标 → 自动下发（封禁窗口拦截在此生效）；
+    # 无目标（申请类“造资源”场景）→ 留待运维 dispatch 时选目标下发
+    if approved and ticket.runbook_id is not None and _extract_target_ids_from_ticket(ticket):
         await _dispatch_attached_job(session, ticket, approver)
 
     return ticket

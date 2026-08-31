@@ -257,6 +257,8 @@ admin 全量；operator 管理但无删除；viewer/auditor 只读。目录删�
 
 **值班×处理组约束**：值班三线人选必须 ⊆ 处理组成员池（创建/更新排班时写校验，越界 422 并列出非法 ID）；组成员=可值班人选池，想排外人先加入组。已被移组的在值人员可完成当天值班（不追溯）。
 
+**值班表单联动规范**：tier1/2/3 人员选择器必须以所选处理组为数据源——选定组后改调 `GET /api/v1/ticket-groups/{id}/candidates`（返回该组活跃成员，即唯一合法值班池），**禁止用全量用户列表**；未选组时人员选择器禁用。后端写校验为兜底防线。
+
 ### 12.5 后置项
 
 - 附件能力（待存储选型：OSS/本地）
@@ -268,9 +270,10 @@ admin 全量；operator 管理但无删除；viewer/auditor 只读。目录删�
 
 ### 13.1 目标字段统一（v16 迁移）
 
-- `tickets.target_resource_ids` JSONB 提升为一等列：**多选唯一入口**
+- `tickets.target_resource_ids` JSONB 一等列：**多选唯一入口，语义为“执行目标”，由运维在 `POST /{id}/dispatch` 时填写**（v18 修正：申请类是“造资源”，建单时存量资源尚不存在，提单人不选资源）；建单 API 传值仍兼容（视为运维 API 路径）
+- `tickets.business_app_id`（v18）：建单时挂靠**业务应用**作上下文（申请类开通归属哪个 app），替代资源选择器的上下文职能
 - `related_resource_id` 标记废弃（保留兼容，存量回填进目标列表）
-- 必填规则：协作类工单目标可选；目录事项绑 runbook 时目标**条件必填**（`_validate_runbook_intent` 校验）
+- 必填规则：建单时目标一律可选（提单人不选资源）；**下发时目标必填**（`dispatch_ticket_job` 校验：本次传入优先，否则用工单已有目标，皆空拒绝）
 - 工单列表新增 `target_resource_id` 过滤（JSONB @> 包含语义）
 - 变更上下文（`/change-context`）新增 `active_tickets`：影响该资源的活跃工单（pending_approval/open/in_progress），与 busy_execution_id 一起支撑变更时点判断
 
@@ -305,18 +308,19 @@ admin 全量；operator 管理但无删除；viewer/auditor 只读。目录删�
 - runbook 绑定唯一来源：目录事项 `default_runbook_id`（配置化）
 - 建单时不强制 code_ref/params；`POST /{id}/dispatch` 校验：工单 open、runbook 可用、params 过 params_schema、无活跃执行（防重复下发）
 - 低危且建单即带 code_ref（运维 API 路径）仍自动下发；提单人路径由运维事后 dispatch
-- 新建表单最终字段：标题* / 类型 / 优先级 / 服务目录事项 / 执行目标 / 描述（**无 Runbook、无 git tag、无 JSON**）
+- 新建表单最终字段：标题* arget_resource_ids` 批量调 `/cmdb/resources/{id}` 取 name 展示
+8. **下发弹窗动态表单（禁 JSON 文本框）**：按工单 `runbook_id` 调 `GET /api/v1/runbooks/{id}` 取 `params_schema` 逐条渲染控件——string→输入框（有 `enum`→下拉）、number→数字框、boolean→开关；`default` 作初值、`required` 标必填、`description` 作字段标题/提示；**执行目标资源多选为本弹窗必填项**（数据源 `/cmdb/resources/options`）；提交组装为 `params` + `target_resource_ids` 调 `POST /{id}/dispatch`。后端校验时自动回填 default，表单只收集用户实际填写项/ 类型 / 优先级 / 服务目录事项 / 执行目标 / 描述（**无 Runbook、无 git tag、无 JSON**）
 - 工单详情：有 runbook 且未下发时，对运维显示“补执行参数并下发”按钮
 
 ### 13.3 前端对接规范
 
 1. **表单永远选人/选物，不填 ID**：所有关联实体字段用可搜索选择器（remote-select），提交时仅发 id
 2. 关联资源选择器数据源：`GET /api/v1/cmdb/resources/options?keyword=`（轻量字段：id/name/model_code/provider/region/status；名称+实例 ID 双模糊匹配）
-3. 执行目标为**多选**选择器，写入 `target_resource_ids`；下拉项渲染 `name（model_code / region）`
+3. 资源多选选择器（`target_resource_ids`）**只出现在运维下发弹窗**，不出现在新建表单；新建表单的上下文挂靠用「关联应用」选择器（可选，数据源 `GET /api/v1/cmdb/apps?keyword=`）；下拉项渲染 `name（model_code / region）`
 4. 目录事项为下拉（数据源：/ticket-catalog，仅列二级事项）；处理组/处理人不在新建表单出现（自动派生/自动分派）
 5. **处理组→处理人联动**（仅改派场景）：`POST /{id}/assign` 的人工改派弹窗用 `GET /ticket-groups/{id}/candidates`（组成员 ∪ 当日值班三线）列候选人；新建表单不出现处理人/处理组
-6. 新建工单弹窗中，目录事项选中后若 `default_runbook_id` 非空 → 展示执行目标多选为必填；否则可选
-7. 工单详情资源回显：按 `target_resource_ids` 批量调 `/cmdb/resources/{id}` 取 name 展示
+6. 新建工单弹窗字段：标题* / [类型][优先级] / 服务目录事项 / 关联应用（可选）/ 描述；**无资源选择器、无处理组/处理人**（组自动派生、人自动分派）
+7. 工单详情资源回显：按 `t
 
 ---
 

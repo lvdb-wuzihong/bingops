@@ -16,6 +16,7 @@ _TICKET_LOAD_OPTIONS = (
     selectinload(Ticket.assignee),
     selectinload(Ticket.catalog_item).selectinload(TicketCatalog.parent),
     selectinload(Ticket.group),
+    selectinload(Ticket.business_app),
 )
 
 

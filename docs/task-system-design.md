@@ -60,8 +60,9 @@ category: restart
 target_models: [aliyun_ecs, gcp_compute]  # 目标范围硬校验；P1 默认即此两类
 risk_level: medium            # low/medium/high/critical，叠加环境维度提级（P3）
 auto_rollback: false          # opt-in 自动回滚，默认手动
-params_schema:
-  svc: {type: string, required: true}
+params_schema:                # 条目 spec：type/required/default/enum/description
+  svc: {type: string, required: true, description: 服务名}
+  retries: {type: number, default: 1}   # default 下发时后端自动回填，表单只收用户填写项
 steps:
   - key: restart_app
     name: 重启 {{ svc }}
@@ -183,7 +184,7 @@ CREATE TABLE runbooks (
     name          VARCHAR(128) NOT NULL UNIQUE,
     category      VARCHAR(64),                      -- restart / deploy / data_ops ...
     description   TEXT,
-    params_schema JSONB        NOT NULL DEFAULT '{}',   -- 用户入参动态表单
+    params_schema JSONB        NOT NULL DEFAULT '{}',   -- 用户入参动态表单（条目 spec：type/required/default/enum/description，校验时回填 default）
     steps         JSONB        NOT NULL DEFAULT '[]',   -- 有序步骤，契约见 §3
     connection    JSONB        NOT NULL DEFAULT '{}',   -- {ssh_user, ssh_key_ref, become, become_method, become_user}
     target_models JSONB        NOT NULL DEFAULT '["aliyun_ecs", "gcp_compute"]',

@@ -77,6 +77,8 @@ def _to_response(ticket: Ticket) -> dict:
         difficulty=ticket.difficulty,
         started_at=ticket.started_at,
         target_resource_ids=ticket.target_resource_ids or [],
+        business_app_id=ticket.business_app_id,
+        business_app_name=ticket.business_app.name if ticket.business_app else None,
         resolved_at=ticket.resolved_at,
         closed_at=ticket.closed_at,
         created_at=ticket.created_at,
@@ -331,9 +333,10 @@ async def dispatch_ticket(
     session: AsyncSession = Depends(get_db_session),
     current_user: User = require_permission("job:create"),
 ):
-    """运维补齐执行配置（git tag + 参数）并下发；审批通过或低危直通后可用。"""
+    """运维补齐执行配置（git tag + 参数 + 执行目标）并下发；审批通过或低危直通后可用。"""
     ticket = await ticket_service.dispatch_ticket_job(
         session, ticket_id, payload.code_ref, payload.params, current_user,
+        target_resource_ids=payload.target_resource_ids or None,
     )
     return success_response(data=_to_response(ticket), message="Ticket dispatched")
 

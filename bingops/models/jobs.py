@@ -34,6 +34,8 @@ class Runbook(BaseMixin, Base):
     category: Mapped[str | None] = mapped_column(String(64), nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     params_schema: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    # params_schema 条目 spec：type(string|number|boolean)/required/default/enum/description；
+    # 前端按此渲染动态表单，下发校验时后端自动回填 default
     steps: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
     # 连接配置：{ssh_user, ssh_key_ref, become, become_method, become_user}
     # 钥匙名进消息，真钥匙在 Vault；sudo 密码不进配置（NOPASSWD sudoers 纪律）
@@ -71,7 +73,9 @@ class JobExecution(BaseMixin, Base):
     connection: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     status: Mapped[str] = mapped_column(
         String(32), nullable=False, default="pending",
-    )  # pending|running|success|failed|rolling_back|rolled_back|partial_rollback|rollback_failed|cancelled
+    )
+    # pending|running|success|failed|rolling_back|rolled_back|
+    # partial_rollback|rollback_failed|cancelled
     rollback_policy: Mapped[str] = mapped_column(
         String(16), nullable=False, default="manual",
     )  # manual|auto

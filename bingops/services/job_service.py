@@ -88,16 +88,26 @@ def _validate_connection(connection: dict) -> None:
         raise ValidationError("runbook connection.ssh_key_ref is required (Vault key name)")
 
 
-def _validate_params(params_schema: dict, params: dict) -> None:
-    """按 params_schema 做 required 存在性 + 基础类型校验。"""
+def _validate_params(params_schema: dict, params: dict) -> dict:
+    """按 params_schema 校验（required/type/enum）并回填 default。
+
+    条目 spec 支持：type(string|number|boolean)/required/default/enum/description。
+    返回归一化后的 params（含默认值），调用方须用返回值落库/下发——
+    前端动态表单只需收集用户实际填写项，缺省由后端补齐。
+    """
+    normalized = dict(params or {})
     for name, spec in (params_schema or {}).items():
-        required = bool(spec.get("required")) if isinstance(spec, dict) else False
-        value = params.get(name)
+        if not isinstance(spec, dict):
+            continue
+        value = normalized.get(name)
         if value is None:
-            if required:
+            if "default" in spec:
+                normalized[name] = spec["default"]
+                continue
+            if spec.get("required"):
                 raise ValidationError(f"missing required param: {name}")
             continue
-        ptype = spec.get("type") if isinstance(spec, dict) else None
+        ptype = spec.get("type")
         ok = (
             ptype is None
             or (ptype == "string" and isinstance(value, str))
@@ -107,6 +117,10 @@ def _validate_params(params_schema: dict, params: dict) -> None:
         )
         if not ok:
             raise ValidationError(f"param '{name}' type mismatch, expected {ptype}")
+        enum = spec.get("enum")
+        if isinstance(enum, list) and value not in enum:
+            raise ValidationError(f"param '{name}' must be one of: {enum}")
+    return normalized
 
 
 async def list_runbooks(
@@ -264,7 +278,7 @@ async def create_execution(
         raise ConflictError("Runbook", f"runbook {runbook.id} is deactivated")
     # 存量 runbook 可能创建於校验上线前：下发前再验一次 connection 契约
     _validate_connection(runbook.connection)
-    _validate_params(runbook.params_schema, payload.params)
+    params = _validate_params(runbook.params_schema, payload.params)
 
     # P3 高危门控：中高危必须挂已审批工单（先于目标快照，提前拒绝）
     await _check_approval_gate(session, runbook, payload.ticket_id, user)
@@ -302,7 +316,7 @@ async def create_execution(
         runbook_id=runbook.id,
         runbook_version=runbook.version,
         code_ref=payload.code_ref,
-        params=payload.params,
+        params=params,
         target_resources=[t.model_dump() for t in targets],
         steps_snapshot=list(runbook.steps),
         connection=runbook.connection,

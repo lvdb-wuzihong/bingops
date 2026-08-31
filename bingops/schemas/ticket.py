@@ -27,8 +27,12 @@ class TicketCreate(BaseModel):
     code_ref: str | None = Field(default=None, max_length=128, description="git tag 快照")
     catalog_item_id: int | None = Field(default=None, description="服务目录事项 ID（二级）")
     group_id: int | None = Field(default=None, description="处理组 ID（驱动值班自动派单）")
+    business_app_id: int | None = Field(
+        default=None, description="关联业务应用 ID（上下文；如申请类开通归属的应用）",
+    )
     target_resource_ids: list[int] = Field(
-        default_factory=list, description="执行目标资源 ID 列表（多选；绑 runbook 时必填）",
+        default_factory=list,
+        description="执行目标资源 ID 列表（通常由运维下发时填写；建单传值视为运维 API 路径）",
     )
 
 
@@ -65,6 +69,10 @@ class DispatchRequest(BaseModel):
     code_ref: str = Field(min_length=1, max_length=128, description="git tag 快照")
     params: dict = Field(
         default_factory=dict, description="执行参数（按 runbook params_schema 校验）",
+    )
+    target_resource_ids: list[int] = Field(
+        default_factory=list,
+        description="执行目标资源（多选；工单自身无目标时必填）",
     )
 
 
@@ -177,6 +185,8 @@ class TicketResponse(BaseModel):
     difficulty: str | None = None
     started_at: datetime | None = None
     target_resource_ids: list[int] = Field(default_factory=list)
+    business_app_id: int | None = None
+    business_app_name: str | None = None
     resolved_at: datetime | None = None
     closed_at: datetime | None = None
     created_at: datetime
