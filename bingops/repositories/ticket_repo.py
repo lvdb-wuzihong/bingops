@@ -44,6 +44,7 @@ class TicketRepo:
         group_id: int | None = None,
         catalog_item_id: int | None = None,
         target_resource_id: int | None = None,
+        stakeholder_id: int | None = None,
         keyword: str | None = None,
         page: int = 1,
         page_size: int = 20,
@@ -78,6 +79,14 @@ class TicketRepo:
             contains_filter = Ticket.target_resource_ids.contains([target_resource_id])
             query = query.where(contains_filter)
             count_query = count_query.where(contains_filter)
+        if stakeholder_id is not None:
+            # 无 ticket:list 角色权限时：仅可见自己参与的工单（创建人/处理人）
+            stake_filter = or_(
+                Ticket.assignee_id == stakeholder_id,
+                Ticket.creator_id == stakeholder_id,
+            )
+            query = query.where(stake_filter)
+            count_query = count_query.where(stake_filter)
         if keyword:
             like_pattern = f"%{keyword}%"
             keyword_filter = or_(

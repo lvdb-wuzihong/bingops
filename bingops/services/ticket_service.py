@@ -101,6 +101,7 @@ async def list_tickets(
     group_id: int | None = None,
     catalog_item_id: int | None = None,
     target_resource_id: int | None = None,
+    stakeholder_id: int | None = None,
     keyword: str | None = None,
     page: int = 1,
     page_size: int = 20,
@@ -116,6 +117,7 @@ async def list_tickets(
         group_id=group_id,
         catalog_item_id=catalog_item_id,
         target_resource_id=target_resource_id,
+        stakeholder_id=stakeholder_id,
         keyword=keyword,
         page=page,
         page_size=page_size,
@@ -154,20 +156,20 @@ def _extract_target_ids(payload: TicketCreate) -> list[int]:
 
 
 async def _validate_runbook_intent(session: AsyncSession, payload: TicketCreate) -> Runbook:
-    """校验变更工单携带的执行意图（runbook 存在且启用、目标非空、参数合法）。"""
+    """校验变更工单携带的执行意图（runbook 存在且启用、目标非空）。
+
+    code_ref/params 属执行层配置，由运维在下发时补齐（dispatch_ticket_job），建单不强制。
+    """
     result = await session.execute(select(Runbook).where(Runbook.id == payload.runbook_id))
     runbook = result.scalar_one_or_none()
     if runbook is None:
         raise NotFoundError("Runbook", str(payload.runbook_id))
     if not runbook.is_active:
         raise ConflictError("Runbook", f"runbook {runbook.id} is deactivated")
-    if not payload.code_ref:
-        raise ValidationError("code_ref (git tag) is required when runbook_id is set")
     if not _extract_target_ids(payload):
         raise ValidationError(
             "target_resource_ids (in job_params) or related_resource_id is required",
         )
-    job_service._validate_params(runbook.params_schema, payload.job_params.get("params", {}))
     return runbook
 
 
@@ -289,8 +291,9 @@ async def create_ticket(session: AsyncSession, payload: TicketCreate, operator: 
         },
     )
 
-    # 低危变更自动直通：创建即下发（填单即执行）
-    if runbook is not None and not needs_approval:
+    # 低危且建单即带执行配置（运维 API 路径）才自动下发；
+    # 提单人路径（无 code_ref）由运维事后 dispatch_ticket_job 补齐下发
+    if runbook is not None and not needs_approval and payload.code_ref:
         await _dispatch_attached_job(session, ticket, operator)
 
     # 提交后重查（带关系预加载），避免响应层懒加载触发 MissingGreenlet
@@ -363,6 +366,56 @@ async def _dispatch_attached_job(
         "Ticket job auto-dispatched",
         extra={"ticket_id": ticket.id, "runbook_id": ticket.runbook_id},
     )
+
+
+async def dispatch_ticket_job(
+    session: AsyncSession,
+    ticket_id: int,
+    code_ref: str,
+    params: dict,
+    operator: User,
+) -> Ticket:
+    """运维补齐执行配置并下发（角色分离：提单人不管 runbook，执行层由运维填）。
+
+    前置：工单须 open（中高危已审批）；同一工单存在活跃执行时拒绝重复下发。
+    """
+    ticket = await _get_ticket_or_fail(session, ticket_id)
+
+    if ticket.runbook_id is None:
+        raise ValidationError("Ticket has no runbook attached")
+    if ticket.status != "open":
+        raise ValidationError(
+            f"Ticket must be open to dispatch (status={ticket.status})",
+        )
+    if not code_ref or not code_ref.strip():
+        raise ValidationError("code_ref (git tag) is required to dispatch")
+
+    latest = await JobExecutionRepo(session).get_latest_by_ticket(ticket_id)
+    if latest is not None and latest.status in ("pending", "running", "rolling_back"):
+        raise ConflictError(
+            "JobExecution", f"ticket {ticket_id} already has active execution {latest.id}",
+        )
+
+    result = await session.execute(select(Runbook).where(Runbook.id == ticket.runbook_id))
+    runbook = result.scalar_one_or_none()
+    if runbook is None or not runbook.is_active:
+        raise ConflictError("Runbook", f"runbook {ticket.runbook_id} is unavailable")
+    job_service._validate_params(runbook.params_schema, params)
+
+    ticket.code_ref = code_ref
+    merged_params = dict(ticket.job_params or {})
+    merged_params["params"] = params
+    ticket.job_params = merged_params
+    ticket = await TicketRepo(session).update(ticket)
+    await session.commit()
+
+    logger.info(
+        "Ticket execution configured",
+        extra={"ticket_id": ticket_id, "code_ref": code_ref, "user_id": operator.id},
+    )
+
+    await _dispatch_attached_job(session, ticket, operator)
+    return ticket
 
 
 def _extract_target_ids_from_ticket(ticket: Ticket) -> list[int]:

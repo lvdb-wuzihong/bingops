@@ -7,7 +7,13 @@ from datetime import date
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bingops.api.dependencies import get_db_session, require_permission
+from bingops.api.dependencies import (
+    get_current_user,
+    get_db_session,
+    has_permissions,
+    require_permission,
+    require_ticket_permission,
+)
 from bingops.core.exceptions import ValidationError
 from bingops.core.response import paginated_response, success_response
 from bingops.models.ticket import ChangeFreeze, Ticket, TicketApproval, TicketComment
@@ -16,6 +22,7 @@ from bingops.repositories.jobs_repo import JobExecutionRepo
 from bingops.schemas.ticket import (
     ApprovalResponse,
     ApprovalSubmit,
+    DispatchRequest,
     FreezeCreate,
     FreezeResponse,
     TicketAssignRequest,
@@ -134,9 +141,12 @@ async def list_tickets(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     session: AsyncSession = Depends(get_db_session),
-    _user: User = require_permission("ticket:list"),
+    current_user: User = Depends(get_current_user),
 ):
-    """查询工单列表（分页）。"""
+    """查询工单列表（分页）。无 ticket:list 角色权限时仅返回自己参与的工单。"""
+    stakeholder_id = (
+        None if has_permissions(current_user, "ticket:list") else current_user.id
+    )
     tickets, total = await ticket_service.list_tickets(
         session,
         status=status,
@@ -147,6 +157,7 @@ async def list_tickets(
         group_id=group_id,
         catalog_item_id=catalog_item_id,
         target_resource_id=target_resource_id,
+        stakeholder_id=stakeholder_id,
         keyword=keyword,
         page=page,
         page_size=page_size,
@@ -235,7 +246,7 @@ async def delete_freeze(
 async def get_ticket(
     ticket_id: int,
     session: AsyncSession = Depends(get_db_session),
-    _user: User = require_permission("ticket:list"),
+    _user: User = require_ticket_permission("ticket:list"),
 ):
     """获取工单详情（含流转记录、审批记录、关联任务执行）。"""
     ticket = await ticket_service.get_ticket(session, ticket_id)
@@ -267,7 +278,7 @@ async def update_ticket(
     ticket_id: int,
     payload: TicketUpdate,
     session: AsyncSession = Depends(get_db_session),
-    current_user: User = require_permission("ticket:update"),
+    current_user: User = require_ticket_permission("ticket:update"),
 ):
     """更新工单（仅 open 状态、创建人或管理员）。"""
     ticket = await ticket_service.update_ticket(session, ticket_id, payload, current_user)
@@ -313,12 +324,26 @@ async def approve_ticket(
     return success_response(data=_to_response(ticket), message=f"Ticket {payload.action}d")
 
 
+@router.post("/{ticket_id}/dispatch")
+async def dispatch_ticket(
+    ticket_id: int,
+    payload: DispatchRequest,
+    session: AsyncSession = Depends(get_db_session),
+    current_user: User = require_permission("job:create"),
+):
+    """运维补齐执行配置（git tag + 参数）并下发；审批通过或低危直通后可用。"""
+    ticket = await ticket_service.dispatch_ticket_job(
+        session, ticket_id, payload.code_ref, payload.params, current_user,
+    )
+    return success_response(data=_to_response(ticket), message="Ticket dispatched")
+
+
 @router.post("/{ticket_id}/status")
 async def change_ticket_status(
     ticket_id: int,
     payload: TicketStatusRequest,
     session: AsyncSession = Depends(get_db_session),
-    current_user: User = require_permission("ticket:update"),
+    current_user: User = require_ticket_permission("ticket:update"),
 ):
     """推进工单状态（按流转矩阵校验）。"""
     ticket = await ticket_service.change_ticket_status(
@@ -331,7 +356,7 @@ async def change_ticket_status(
 async def list_ticket_comments(
     ticket_id: int,
     session: AsyncSession = Depends(get_db_session),
-    _user: User = require_permission("ticket:list"),
+    _user: User = require_ticket_permission("ticket:list"),
 ):
     """获取工单流转/评论记录。"""
     comments = await ticket_service.list_comments(session, ticket_id)
@@ -344,7 +369,7 @@ async def add_ticket_comment(
     ticket_id: int,
     payload: TicketCommentCreate,
     session: AsyncSession = Depends(get_db_session),
-    current_user: User = require_permission("ticket:create"),
+    current_user: User = require_ticket_permission("ticket:create"),
 ):
     """添加工单评论。"""
     comment = await ticket_service.add_comment(session, ticket_id, payload.content, current_user)

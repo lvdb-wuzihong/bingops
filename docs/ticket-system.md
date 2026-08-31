@@ -208,6 +208,8 @@ psql -U <user> -d <dbname> -f sql/schema.sql
 | `change_freeze:list` | 查看封禁窗口 | 全角色 |
 | `change_freeze:create/delete` | 维护封禁窗口 | admin |
 
+**利害关系人免底（v19）**：纯 RBAC 不识别“被派单人”身份，值班用户无宽泛角色时无法处理自己的工单。现 `require_ticket_permission` 在角色权限不足时对工单**创建人/处理人**免底开放 `ticket:list`/`ticket:update`/`ticket:create`（查看/推进状态/评论）；列表接口无 `ticket:list` 时仅返回自己参与的工单。`approve`/`assign`/`delete`/`dispatch` 仍为角色专属。
+
 ---
 
 ## 12. 服务目录/处理组/值班派单（v15，已实现）
@@ -275,6 +277,24 @@ admin 全量；operator 管理但无删除；viewer/auditor 只读。目录删�
   4. 执行目标（多选，整行）
   5. 描述（整行）
 - 目录配置表单：分类表单含“默认处理组”；事项表单含“覆盖默认处理组”（可选）
+
+### 13.2.1 角色分离与执行下发（v18 修正）
+
+**问题**：runbook/git tag/JSON 参数是执行层概念，提单人（开发/测试）不知道也不该接触。
+
+**修正后的角色分层**：
+
+| 角色 | 动作 | 接口 |
+|------|------|------|
+| 提单人 | 选事项+目标+描述，**不接触 runbook** | `POST /tickets` |
+| 审批人 | 中高危审批 | `POST /{id}/approve` |
+| 执行人（运维） | 补 git tag + 参数 → 下发 | `POST /{id}/dispatch`（`job:create`） |
+
+- runbook 绑定唯一来源：目录事项 `default_runbook_id`（配置化）
+- 建单时不强制 code_ref/params；`POST /{id}/dispatch` 校验：工单 open、runbook 可用、params 过 params_schema、无活跃执行（防重复下发）
+- 低危且建单即带 code_ref（运维 API 路径）仍自动下发；提单人路径由运维事后 dispatch
+- 新建表单最终字段：标题* / 类型 / 优先级 / 服务目录事项 / 执行目标 / 描述（**无 Runbook、无 git tag、无 JSON**）
+- 工单详情：有 runbook 且未下发时，对运维显示“补执行参数并下发”按钮
 
 ### 13.3 前端对接规范
 

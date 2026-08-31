@@ -5,9 +5,7 @@
 
 from __future__ import annotations
 
-from typing import Any
-
-from fastapi import Depends, Security
+from fastapi import Depends, Request, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -70,6 +68,54 @@ async def get_current_user(
         raise AuthenticationError("Account is disabled")
 
     return user
+
+
+def has_permissions(user: User, *permissions: str) -> bool:
+    """判断用户是否拥有全部指定权限码（超管恒真）。"""
+    if user.is_superuser:
+        return True
+    perms = {p.code for role in user.roles for p in role.permissions}
+    return all(p in perms for p in permissions)
+
+
+# 工单利害关系人（创建人/处理人）免角色权限的动作白名单；
+# approve/assign/delete 仍为角色专属，不开放免底
+TICKET_STAKEHOLDER_ACTIONS = {"ticket:list", "ticket:update", "ticket:create"}
+
+
+def require_ticket_permission(*permissions: str):
+    """工单端点权限：角色权限优先，不足时对工单利害关系人（创建人/处理人）免底。
+
+    免底仅开放 TICKET_STAKEHOLDER_ACTIONS 内的动作，
+    使值班被派单人无需宽泛角色也能处理自己的工单。
+    """
+
+    async def checker(
+        request: Request,
+        current_user: User = Depends(get_current_user),
+        session: AsyncSession = Depends(get_db_session),
+    ) -> User:
+        if has_permissions(current_user, *permissions):
+            return current_user
+
+        if set(permissions) <= TICKET_STAKEHOLDER_ACTIONS:
+            raw_id = request.path_params.get("ticket_id")
+            try:
+                ticket_id = int(raw_id)
+            except (TypeError, ValueError):
+                ticket_id = None
+            if ticket_id is not None:
+                from bingops.models.ticket import Ticket
+
+                ticket = await session.get(Ticket, ticket_id)
+                if ticket is not None and current_user.id in (
+                    ticket.assignee_id, ticket.creator_id,
+                ):
+                    return current_user
+
+        raise PermissionDeniedError(f"Missing permission: {permissions[0]}")
+
+    return Depends(checker)
 
 
 def require_permission(*permissions: str):

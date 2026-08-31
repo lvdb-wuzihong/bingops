@@ -59,6 +59,15 @@ class TicketCommentCreate(BaseModel):
     content: str = Field(min_length=1, description="评论内容")
 
 
+class DispatchRequest(BaseModel):
+    """补齐执行配置并下发请求（运维角色填写，提单人不接触）。"""
+
+    code_ref: str = Field(min_length=1, max_length=128, description="git tag 快照")
+    params: dict = Field(
+        default_factory=dict, description="执行参数（按 runbook params_schema 校验）",
+    )
+
+
 class ApprovalSubmit(BaseModel):
     """审批提交请求。"""
 
