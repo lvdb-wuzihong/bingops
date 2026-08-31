@@ -228,7 +228,18 @@ async def delete_group(session: AsyncSession, group_id: int) -> None:
     logger.info("Ticket group deleted", extra={"group_id": group_id})
 
 
-# ── 值班表 ────────────────────────────────────────────────────────────────────
+# ── 值班表 ──────────────────────────────────────────────────────────────
+
+
+def _oncall_outside_group(group: TicketGroup, tiers: list[list[int] | None]) -> set[int]:
+    """值班人选超出组成员池的 ID 集合（值班必须从组内选）。"""
+    members = {uid for uid in (group.members or []) if isinstance(uid, int)}
+    outside: set[int] = set()
+    for tier in tiers:
+        for uid in tier or []:
+            if isinstance(uid, int) and uid not in members:
+                outside.add(uid)
+    return outside
 
 
 async def list_oncall(
@@ -249,6 +260,12 @@ async def create_oncall(session: AsyncSession, payload: OncallCreate) -> OncallS
     group = await TicketGroupRepo(session).get_by_id(payload.group_id)
     if group is None:
         raise NotFoundError("TicketGroup", str(payload.group_id))
+
+    outside = _oncall_outside_group(group, [payload.tier1, payload.tier2, payload.tier3])
+    if outside:
+        raise ValidationError(
+            f"oncall users not in group members: {sorted(outside)}",
+        )
 
     repo = OncallScheduleRepo(session)
     oncall_date = payload.oncall_date.date()
@@ -291,7 +308,24 @@ async def update_oncall(
     if schedule is None:
         raise NotFoundError("OncallSchedule", str(schedule_id))
 
-    for field, value in payload.model_dump(exclude_unset=True).items():
+    # 校验更新后的最终三线人选仍在组成员池内
+    data = payload.model_dump(exclude_unset=True)
+    group = await TicketGroupRepo(session).get_by_id(schedule.group_id)
+    if group is not None:
+        outside = _oncall_outside_group(
+            group,
+            [
+                data.get("tier1", schedule.tier1),
+                data.get("tier2", schedule.tier2),
+                data.get("tier3", schedule.tier3),
+            ],
+        )
+        if outside:
+            raise ValidationError(
+                f"oncall users not in group members: {sorted(outside)}",
+            )
+
+    for field, value in data.items():
         setattr(schedule, field, value)
 
     schedule = await repo.update(schedule)
