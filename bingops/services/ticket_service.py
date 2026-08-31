@@ -560,6 +560,21 @@ async def change_ticket_status(
             f"Invalid status transition: {ticket.status} -> {target_status}"
         )
 
+    # 处理权归属：admin 不受限；其余按利害关系人身份（处理权跟指派走，不跟角色走）
+    if not operator.is_superuser:
+        is_assignee = ticket.assignee_id == operator.id
+        is_creator = ticket.creator_id == operator.id
+        if target_status == "in_progress" and ticket.status == "resolved":
+            can = is_assignee or is_creator  # 重开：处理人或创建人
+        elif target_status in ("in_progress", "resolved"):
+            can = is_assignee  # 处理：仅被派单的值班处理人
+        else:  # cancelled
+            can = is_assignee or is_creator
+        if not can:
+            raise PermissionDeniedError(
+                "Only the assigned handler (or admin) can process this ticket",
+            )
+
     now = datetime.now(timezone.utc)
     previous = ticket.status
     ticket.status = target_status
