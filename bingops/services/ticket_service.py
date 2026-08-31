@@ -713,8 +713,8 @@ async def ticket_stats(
             "user_id": uid,
             "assigned": assigned,
             "done": done,
-            "avg_response_minutes": round(avg_resp, 1) if avg_resp is not None else None,
-            "avg_handle_minutes": round(avg_handle, 1) if avg_handle is not None else None,
+            "avg_response_minutes": round(float(avg_resp), 1) if avg_resp is not None else None,
+            "avg_handle_minutes": round(float(avg_handle), 1) if avg_handle is not None else None,
         })
     if user_ids:
         users = await session.execute(select(User).where(User.id.in_(user_ids)))
@@ -768,8 +768,12 @@ async def ticket_stats(
     return {
         "totals": {"total": total, **by_status},
         "time": {
-            "avg_response_minutes": round(avg_resp_all, 1) if avg_resp_all is not None else None,
-            "avg_handle_minutes": round(avg_handle_all, 1) if avg_handle_all is not None else None,
+            "avg_response_minutes": (
+                round(float(avg_resp_all), 1) if avg_resp_all is not None else None
+            ),
+            "avg_handle_minutes": (
+                round(float(avg_handle_all), 1) if avg_handle_all is not None else None
+            ),
         },
         "by_assignee": assignee_stats,
         "by_category": by_category,
