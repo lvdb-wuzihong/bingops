@@ -144,6 +144,20 @@ class CmdbTagRepo:
         )
         return list(result.scalars().all())
 
+    async def list_by_resource_ids_and_keys(
+        self, resource_ids: list[int], tag_keys: list[str],
+    ) -> list[CmdbResourceTag]:
+        """按资源 ID 集合 + 标签键集合批量取标签（跨来源，优先级由调用方裁决）。"""
+        if not resource_ids or not tag_keys:
+            return []
+        result = await self._session.execute(
+            select(CmdbResourceTag).where(
+                CmdbResourceTag.resource_id.in_(resource_ids),
+                CmdbResourceTag.tag_key.in_(tag_keys),
+            )
+        )
+        return list(result.scalars().all())
+
     async def find_resources_by_tag(
         self, tag_key: str, tag_value: str | None = None,
     ) -> list[int]:

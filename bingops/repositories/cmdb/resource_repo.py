@@ -64,6 +64,47 @@ class CmdbResourceRepo:
         )
         return list(result.scalars().all())
 
+    async def list_sd_hosts(
+        self,
+        *,
+        model_codes: list[str],
+        statuses: list[str],
+        region: str | None = None,
+    ) -> list[tuple[CmdbResource, str]]:
+        """服务发现用主机资源（联模型取 code；非软删 + 指定运行态 + IP 非空）。
+
+        按 id 升序稳定排序，保证每次快照输出顺序一致（便于 diff 调试）。
+        """
+        ip_expr = func.coalesce(
+            CmdbResource.fields["private_ip"].astext,
+            CmdbResource.fields["internal_ip"].astext,
+            CmdbResource.fields["ip"].astext,
+        )
+        query = (
+            select(CmdbResource, CmdbModel.code)
+            .join(CmdbModel, CmdbResource.model_id == CmdbModel.id)
+            .where(
+                CmdbModel.code.in_(model_codes),
+                CmdbResource.deleted_at.is_(None),
+                CmdbResource.status.in_(statuses),
+                ip_expr.isnot(None),
+            )
+            .order_by(CmdbResource.id.asc())
+        )
+        if region:
+            query = query.where(CmdbResource.region == region)
+        result = await self._session.execute(query)
+        return [(res, code) for res, code in result.all()]
+
+    async def list_alive_by_model_codes(self, model_codes: list[str]) -> list[CmdbResource]:
+        """一组模型 code 下全部未软删资源（SD 寻祖用：vpc 类实例 id → provider_id 映射）。"""
+        result = await self._session.execute(
+            select(CmdbResource)
+            .join(CmdbModel, CmdbResource.model_id == CmdbModel.id)
+            .where(CmdbModel.code.in_(model_codes), CmdbResource.deleted_at.is_(None))
+        )
+        return list(result.scalars().all())
+
     async def get_by_provider_id(
         self,
         model_id: int,

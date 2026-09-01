@@ -60,6 +60,13 @@ class CmdbRelationshipRepo:
         result = await self._session.execute(query)
         return list(result.scalars().all())
 
+    async def list_belongs_to_edges(self) -> list[tuple[int, int]]:
+        """全量 belongs_to 边 (child_id, parent_id)（SD 寻祖用，量级假设可全量载入）。"""
+        result = await self._session.execute(
+            select(CmdbBelongsTo.child_id, CmdbBelongsTo.parent_id)
+        )
+        return [(child, parent) for child, parent in result.all()]
+
     # ── 关联关系 (Relates To) ────────────────────────────────────────────────────
 
     async def create_relates_to(self, relation: CmdbRelatesTo) -> CmdbRelatesTo:
