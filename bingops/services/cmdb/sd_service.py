@@ -18,7 +18,6 @@ import logging
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bingops.models.cmdb.resource import CmdbResource
 from bingops.repositories.cmdb.relationship_repo import CmdbRelationshipRepo
 from bingops.repositories.cmdb.resource_repo import CmdbResourceRepo
 from bingops.repositories.cmdb.tag_repo import CmdbTagRepo
@@ -41,6 +40,10 @@ _TAG_SOURCE_PRIORITY = ("manual", "cloud")
 
 # 向上寻祖 vpc 的深度上限（ECS 两跳，k8s_node 可能跨三跳以上）
 _MAX_ANCESTOR_DEPTH = 5
+
+# 同 IP 去重保留优先级（越小越优先）：k8s_node 与宿主机云主机是同一台机器、
+# 同一内网 IP，云主机侧 vpc/zone labels 更齐备，去重时让位保留云主机
+_MODEL_DEDUP_PRIORITY = {"k8s_node": 1}
 
 # vpc 类模型 code（实际库为厂商前缀命名：aliyun_vpc 等，预设 vpc 一并列出兼容）
 _VPC_MODEL_CODES = ("vpc", "aliyun_vpc", "aws_vpc", "gcp_vpc")
@@ -139,6 +142,11 @@ async def build_host_target_groups(
 
     groups: list[dict] = []
     seen_ips: set[str] = set()
+    # 去重保留顺序显式化：云主机模型优先于 k8s_node，同级按 id 稳定排序
+    hosts = sorted(
+        hosts,
+        key=lambda pair: (_MODEL_DEDUP_PRIORITY.get(pair[1], 0), pair[0].id),
+    )
     for res, _model_code in hosts:
         ip = _extract_ip(res.fields or {})
         if ip is None or ip in seen_ips:
