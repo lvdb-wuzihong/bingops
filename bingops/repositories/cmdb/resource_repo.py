@@ -277,10 +277,13 @@ class CmdbResourceRepo:
         return {row[0]: row[1] for row in result.all()}
 
     async def count_by_status(self) -> dict[str, int]:
-        """按状态统计。"""
+        """按状态统计（NULL = 无状态概念的资源类型，不入分布）。"""
         result = await self._session.execute(
             select(CmdbResource.status, func.count())
-            .where(CmdbResource.deleted_at.is_(None))
+            .where(
+                CmdbResource.deleted_at.is_(None),
+                CmdbResource.status.is_not(None),
+            )
             .group_by(CmdbResource.status)
         )
         return {row[0]: row[1] for row in result.all()}

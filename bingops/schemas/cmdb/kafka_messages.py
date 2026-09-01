@@ -93,7 +93,10 @@ class CloudResourceMessage(BaseModel):
     name: str = Field(default="", description="资源名称")
     region: str | None = Field(default=None, description="地域")
     zone: str | None = Field(default=None, description="可用区")
-    status: str = Field(default="unknown", description="资源状态")
+    status: str | None = Field(
+        default=None,
+        description="资源状态（running/stopped/maintenance/unknown）；None = 该资源类型无生命周期状态，不适用",
+    )
     attributes: dict = Field(default_factory=dict, description="扩展属性")
 
     # 云标签（由采集器从云 API 同步）

@@ -38,7 +38,8 @@ class CmdbResource(BaseMixin, Base):
     cloud_account: Mapped[str | None] = mapped_column(String(128), nullable=True)
     region: Mapped[str | None] = mapped_column(String(64), nullable=True)
     zone: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    status: Mapped[str] = mapped_column(String(32), nullable=False, default="unknown")
+    # 资源状态；NULL = 该资源类型无生命周期状态（采集端不硬塞），unknown = 有状态概念但识别失败
+    status: Mapped[str | None] = mapped_column(String(32), nullable=True, default="unknown")
 
     # 动态字段（按模型定义填充）
     fields: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)

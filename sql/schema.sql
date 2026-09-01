@@ -164,7 +164,7 @@ CREATE TABLE cmdb_resources (
     cloud_account     VARCHAR(128),                   -- 云账号 ID（K8s: cluster_id）
     region            VARCHAR(64),
     zone              VARCHAR(64),
-    status            VARCHAR(32)  NOT NULL DEFAULT 'unknown',
+    status            VARCHAR(32)  DEFAULT 'unknown', -- running|stopped|maintenance|unknown；NULL = 资源类型无生命周期状态
     fields            JSONB        NOT NULL DEFAULT '{}', -- 动态字段（按模型定义过滤后落库）
     resource_version  VARCHAR(64),                    -- 幂等版本号（K8s resourceVersion）
     synced_at         TIMESTAMPTZ,
