@@ -47,7 +47,7 @@ class Ticket(BaseMixin, Base):
     related_resource_id: Mapped[int | None] = mapped_column(
         BigInteger, ForeignKey("cmdb_resources.id", ondelete="SET NULL"), nullable=True,
     )
-    # 变更工单携带的执行意图（P3 审批挂接）
+    # 下发时处理人选定的 runbook（执行工具；建单不指定）
     runbook_id: Mapped[int | None] = mapped_column(
         BigInteger, ForeignKey("runbooks.id"), nullable=True,
     )
@@ -56,6 +56,9 @@ class Ticket(BaseMixin, Base):
     approval_status: Mapped[str | None] = mapped_column(
         String(16), nullable=True,
     )  # none|pending|approved|rejected
+    risk_level: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="low",
+    )  # 事项 default_risk 快照，驱动审批门控
     catalog_item_id: Mapped[int | None] = mapped_column(
         BigInteger, ForeignKey("ticket_catalog.id"), nullable=True,
     )
@@ -159,9 +162,6 @@ class TicketCatalog(BaseMixin, Base):
     difficulty: Mapped[str] = mapped_column(String(16), nullable=False, default="simple")
     default_risk: Mapped[str] = mapped_column(String(16), nullable=False, default="low")
     default_type: Mapped[str] = mapped_column(String(32), nullable=False, default="request")
-    default_runbook_id: Mapped[int | None] = mapped_column(
-        BigInteger, ForeignKey("runbooks.id"), nullable=True,
-    )
     default_group_id: Mapped[int | None] = mapped_column(
         BigInteger, ForeignKey("ticket_groups.id"), nullable=True,
     )

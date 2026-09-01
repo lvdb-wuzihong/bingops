@@ -22,9 +22,6 @@ class TicketCreate(BaseModel):
     related_resource_id: int | None = Field(
         default=None, description="已废弃：关联资源 ID，改用 target_resource_ids（兼容保留）",
     )
-    runbook_id: int | None = Field(default=None, description="变更工单携带的 Runbook ID")
-    job_params: dict = Field(default_factory=dict, description="执行参数（随审批通过后下发）")
-    code_ref: str | None = Field(default=None, max_length=128, description="git tag 快照")
     catalog_item_id: int | None = Field(default=None, description="服务目录事项 ID（二级）")
     group_id: int | None = Field(default=None, description="处理组 ID（驱动值班自动派单）")
     business_app_id: int | None = Field(
@@ -66,6 +63,7 @@ class TicketCommentCreate(BaseModel):
 class DispatchRequest(BaseModel):
     """补齐执行配置并下发请求（运维角色填写，提单人不接触）。"""
 
+    runbook_id: int = Field(description="执行所选 Runbook（同一事项可对应多个 runbook）")
     code_ref: str = Field(min_length=1, max_length=128, description="git tag 快照")
     params: dict = Field(
         default_factory=dict, description="执行参数（按 runbook params_schema 校验）",
@@ -177,6 +175,7 @@ class TicketResponse(BaseModel):
     job_params: dict = Field(default_factory=dict)
     code_ref: str | None = None
     approval_status: str | None = None
+    risk_level: str = "low"
     catalog_item_id: int | None = None
     catalog_item_name: str | None = None
     catalog_category_name: str | None = None
@@ -202,7 +201,6 @@ class CatalogCreate(BaseModel):
     difficulty: str = Field(default="simple", description="simple|medium|hard")
     default_risk: str = Field(default="low", description="low|medium|high")
     default_type: str = Field(default="request", description="语义 ticket_type")
-    default_runbook_id: int | None = None
     default_group_id: int | None = Field(default=None, description="默认处理组（路由配置化）")
     sort_order: int = 0
 
@@ -214,7 +212,6 @@ class CatalogUpdate(BaseModel):
     difficulty: str | None = None
     default_risk: str | None = None
     default_type: str | None = None
-    default_runbook_id: int | None = None
     default_group_id: int | None = None
     is_active: bool | None = None
     sort_order: int | None = None
@@ -238,7 +235,6 @@ class ItemCreate(BaseModel):
     difficulty: str = Field(default="simple", description="simple|medium|hard")
     default_risk: str = Field(default="low", description="low|medium|high")
     default_type: str = Field(default="request", description="语义 ticket_type")
-    default_runbook_id: int | None = None
     default_group_id: int | None = Field(default=None, description="覆盖分类的默认处理组")
     sort_order: int = 0
 
@@ -253,7 +249,6 @@ class CatalogResponse(BaseModel):
     difficulty: str
     default_risk: str
     default_type: str
-    default_runbook_id: int | None = None
     default_group_id: int | None = None
     is_active: bool
     sort_order: int

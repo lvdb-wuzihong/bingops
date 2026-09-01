@@ -41,7 +41,6 @@ def _catalog_to_response(item: TicketCatalog) -> dict:
         difficulty=item.difficulty,
         default_risk=item.default_risk,
         default_type=item.default_type,
-        default_runbook_id=item.default_runbook_id,
         is_active=item.is_active,
         sort_order=item.sort_order,
         created_at=item.created_at,

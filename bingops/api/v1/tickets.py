@@ -65,6 +65,7 @@ def _to_response(ticket: Ticket) -> dict:
         job_params=ticket.job_params,
         code_ref=ticket.code_ref,
         approval_status=ticket.approval_status,
+        risk_level=ticket.risk_level,
         catalog_item_id=ticket.catalog_item_id,
         catalog_item_name=ticket.catalog_item.name if ticket.catalog_item else None,
         catalog_category_name=(
@@ -333,10 +334,10 @@ async def dispatch_ticket(
     session: AsyncSession = Depends(get_db_session),
     current_user: User = require_permission("job:create"),
 ):
-    """运维补齐执行配置（git tag + 参数 + 执行目标）并下发；审批通过或低危直通后可用。"""
+    """运维选定 runbook 并补齐执行配置（git tag + 参数 + 目标）下发；审批通过或 low 风险可用。"""
     ticket = await ticket_service.dispatch_ticket_job(
-        session, ticket_id, payload.code_ref, payload.params, current_user,
-        target_resource_ids=payload.target_resource_ids or None,
+        session, ticket_id, payload.runbook_id, payload.code_ref, payload.params,
+        current_user, target_resource_ids=payload.target_resource_ids or None,
     )
     return success_response(data=_to_response(ticket), message="Ticket dispatched")
 

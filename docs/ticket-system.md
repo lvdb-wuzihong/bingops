@@ -176,9 +176,9 @@ psql -U <user> -d <dbname> -f sql/schema.sql
 
 ### 11.2 审批策略（风险分级）
 
-- 阈值：`runbook.risk_level ∈ {medium, high, critical}`（`job_service.APPROVAL_RISK_LEVELS`）
-- 达标：创建时工单进入 `pending_approval`（approval_status=pending），需 `POST /{id}/approve` 审批；通过→转 open 并自动下发 job；拒绝→cancelled。创建人不得自批（超管除外）
-- 低危：自动直通，创建即下发（填单即执行）
+- 阈值：`runbook.risk_level ∈ {medium, high, critical}`（`job_service.APPROVAL_RISK_LEVELS`）——v20 修正：建单侧审批改由事项 default_risk 快照驱动，此阈值仅保留为 job 下发侧兜底，见 §13.2.1
+- 达标：创建时工单进入 `pending_approval`（approval_status=pending），需 `POST /{id}/approve` 审批；通过→转 open；拒绝→cancelled。创建人不得自批（超管除外）
+- 低危：自动直通转 open；**下发一律由运维显式执行**（v20 起无创建/审批自动下发）
 - 高危兜底门控：`job:create` 时中高危 runbook 必须携带已审批工单（超管除外），绕道直接下发被拒绝（403）
 - 审批门禁态禁止通过 `/{id}/status` 绕过流转（422）
 - 下发失败（如封禁期命中、Kafka 不可用）：工单保留，失败原因落入流转记录（[dispatch-failed]）
@@ -230,14 +230,14 @@ psql -U <user> -d <dbname> -f sql/schema.sql
 
 | 表 | 说明 |
 |----|------|
-| `ticket_catalog` | 两级服务目录：一级分类（云账号与权限/资源交付与变更/K8s 平台/发布与配置变更/故障与排查/日常运维支持）→ 二级事项；事项携带 difficulty/default_risk/default_type/default_runbook_id |
+| `ticket_catalog` | 两级服务目录：一级分类（云账号与权限/资源交付与变更/K8s 平台/发布与配置变更/故障与排查/日常运维支持/主机与 OS）→ 二级事项；事项携带 difficulty/default_risk/default_type/default_group_id |
 | `ticket_groups` | 处理组（name + members JSONB），派单/值班最小单位，与 RBAC 角色解耦 |
 | `oncall_schedules` | 值班表：日期 × 组 × 三线（tier1 自动派单/tier2 升级建议/tier3 变更审批来源），同组同日期唯一 |
 | tickets 扩列 | `catalog_item_id`、`group_id`、`difficulty`（目录快照）、`started_at`（开始处理时间） |
 
 ### 12.2 建单语义（目录驱动）
 
-- 选二级事项建单 → 快照 difficulty；未显式传 ticket_type 时取事项 `default_type`；未传 runbook 时取事项 `default_runbook_id`（预绑执行意图，接入 P3 审批/直通链路）
+- 选二级事项建单 → 快照 difficulty 与 default_risk（`tickets.risk_level`，驱动审批门控）；未显式传 ticket_type 时取事项 `default_type`；runbook 不预绑——下发时由处理人选择（v20）
 - 带处理组且未显式指派 → 按当日值班 tier1 轮转自动派单（复刻多维表格“新增工单自动赋值处理人”自动化），落 `[auto-oncall]` 流转记录
 - 处理时长不再手工填：响应时长 = started_at - created_at，处理时长 = resolved_at - started_at（open→in_progress 时自动写 started_at）
 
@@ -301,16 +301,15 @@ admin 全量；operator 管理但无删除；viewer/auditor 只读。目录删�
 
 | 角色 | 动作 | 接口 |
 |------|------|------|
-| 提单人 | 选事项+目标+描述，**不接触 runbook** | `POST /tickets` |
+| 提单人 | 选事项+关联应用+描述，**不接触 runbook/目标** | `POST /tickets` |
 | 审批人 | 中高危审批 | `POST /{id}/approve` |
-| 执行人（运维） | 补 git tag + 参数 → 下发 | `POST /{id}/dispatch`（`job:create`） |
+| 执行人（运维） | 选 runbook + 补 git tag + 参数 + 执行目标 → 下发 | `POST /{id}/dispatch`（`job:create`） |
 
-- runbook 绑定唯一来源：目录事项 `default_runbook_id`（配置化）
-- 建单时不强制 code_ref/params；`POST /{id}/dispatch` 校验：工单 open、runbook 可用、params 过 params_schema、无活跃执行（防重复下发）
-- 低危且建单即带 code_ref（运维 API 路径）仍自动下发；提单人路径由运维事后 dispatch
-- 新建表单最终字段：标题* arget_resource_ids` 批量调 `/cmdb/resources/{id}` 取 name 展示
-8. **下发弹窗动态表单（禁 JSON 文本框）**：按工单 `runbook_id` 调 `GET /api/v1/runbooks/{id}` 取 `params_schema` 逐条渲染控件——string→输入框（有 `enum`→下拉）、number→数字框、boolean→开关；`default` 作初值、`required` 标必填、`description` 作字段标题/提示；**执行目标资源多选为本弹窗必填项**（数据源 `/cmdb/resources/options`）；提交组装为 `params` + `target_resource_ids` 调 `POST /{id}/dispatch`。后端校验时自动回填 default，表单只收集用户实际填写项/ 类型 / 优先级 / 服务目录事项 / 执行目标 / 描述（**无 Runbook、无 git tag、无 JSON**）
-- 工单详情：有 runbook 且未下发时，对运维显示“补执行参数并下发”按钮
+- runbook 是执行工具而非事项属性（同一事项可对应多个 runbook，如「Agent/组件部署」→ node_exporter / 安全 agent 各用不同 playbook），**由处理人下发时选择**（v20；`ticket_catalog.default_runbook_id` 已移除）
+- 审批门控由事项 `default_risk` 快照（`tickets.risk_level`）驱动，与执行工具解耦；job 侧兜底不变：中高危 runbook 下发必须携带已审批工单
+- `POST /{id}/dispatch` 校验：工单 open、runbook 存在且启用、params 过 params_schema、目标非空、无活跃执行（防重复下发）
+- 新建表单最终字段：标题* / 类型 / 优先级 / 服务目录事项 / 关联应用（可选）/ 描述（**无 Runbook、无 git tag、无 JSON、无资源选择器**）
+- 工单详情：open 状态对运维显示“选 runbook 并下发”按钮
 
 ### 13.3 前端对接规范
 
@@ -320,7 +319,8 @@ admin 全量；operator 管理但无删除；viewer/auditor 只读。目录删�
 4. 目录事项为下拉（数据源：/ticket-catalog，仅列二级事项）；处理组/处理人不在新建表单出现（自动派生/自动分派）
 5. **处理组→处理人联动**（仅改派场景）：`POST /{id}/assign` 的人工改派弹窗用 `GET /ticket-groups/{id}/candidates`（组成员 ∪ 当日值班三线）列候选人；新建表单不出现处理人/处理组
 6. 新建工单弹窗字段：标题* / [类型][优先级] / 服务目录事项 / 关联应用（可选）/ 描述；**无资源选择器、无处理组/处理人**（组自动派生、人自动分派）
-7. 工单详情资源回显：按 `t
+7. 工单详情资源回显：按 `target_resource_ids` 批量调 `/cmdb/resources/{id}` 取 name 展示
+8. **下发弹窗动态表单（禁 JSON 文本框）**：先选 runbook（数据源 `GET /api/v1/runbooks` 列表），再按其 `params_schema` 逐条渲染控件——string→输入框（有 `enum`→下拉）、number→数字框、boolean→开关；`default` 作初值、`required` 标必填、`description` 作字段标题/提示；**执行目标资源多选为本弹窗必填项**（数据源 `/cmdb/resources/options`）；提交组装为 `runbook_id` + `params` + `target_resource_ids` 调 `POST /{id}/dispatch`。后端校验时自动回填 default，表单只收集用户实际填写项
 
 ---
 

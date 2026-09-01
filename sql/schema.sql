@@ -338,10 +338,11 @@ CREATE TABLE tickets (
     creator_id          BIGINT       NOT NULL REFERENCES users(id),
     assignee_id         BIGINT       REFERENCES users(id),
     related_resource_id BIGINT       REFERENCES cmdb_resources(id) ON DELETE SET NULL,
-    runbook_id          BIGINT       REFERENCES runbooks(id),   -- 变更工单携带的执行意图（P3）
+    runbook_id          BIGINT       REFERENCES runbooks(id),   -- 下发时处理人选定的 runbook（执行工具）
     job_params          JSONB        NOT NULL DEFAULT '{}',
     code_ref            VARCHAR(128),                            -- git tag 快照（同 job_executions）
     approval_status     VARCHAR(16),                             -- none|pending|approved|rejected
+    risk_level          VARCHAR(16)  NOT NULL DEFAULT 'low',     -- 事项 default_risk 快照，驱动审批门控
     catalog_item_id     BIGINT,       -- 服务目录事项（二级，FK 于表定义后补建）
     group_id            BIGINT,
     difficulty          VARCHAR(16),                             -- 建单时从目录快照 simple|medium|hard
@@ -413,7 +414,6 @@ CREATE TABLE ticket_catalog (
     difficulty         VARCHAR(16)  NOT NULL DEFAULT 'simple',  -- simple|medium|hard
     default_risk       VARCHAR(16)  NOT NULL DEFAULT 'low',     -- low|medium|high
     default_type       VARCHAR(32)  NOT NULL DEFAULT 'request', -- 语义 ticket_type
-    default_runbook_id BIGINT       REFERENCES runbooks(id),    -- 可执行事项预绑 runbook
     default_group_id   BIGINT       REFERENCES ticket_groups(id), -- 默认处理组（路由配置化）
     is_active          BOOLEAN      NOT NULL DEFAULT TRUE,
     sort_order         INT          NOT NULL DEFAULT 0,
