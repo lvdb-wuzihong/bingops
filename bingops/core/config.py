@@ -18,6 +18,9 @@ class Settings(BaseSettings):
     debug: bool = False
     log_level: str = "INFO"
 
+    # CORS：逗号分隔来源列表；"*" 放开全部（JWT 走 Authorization 头，无需凭据模式）
+    cors_origins: str = "*"
+
     # 日志文件输出：空字符串=不落盘（仅 stdout）；配置后按天轮转+gzip 压缩
     log_dir: str = ""
     log_retention_days: int = 7

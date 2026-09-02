@@ -11,6 +11,7 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -90,6 +91,17 @@ app = FastAPI(
 
 # 请求链路日志（request_id 分配 + 出入口记录 + 未捕获异常堆栈）
 app.add_middleware(RequestLoggingMiddleware)
+
+# CORS 跨域（默认放开全部；生产建议 BINGOPS_CORS_ORIGINS 收紧为指定源，逗号分隔）
+_origins = [o.strip() for o in settings.cors_origins.split(",") if o.strip()]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_origins,
+    # JWT 走 Authorization 头而非 Cookie：credentials 模式与 "*" 通配不兼容，保持 False
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Swagger UI 中显示 Bearer Token 认证按钮
 security = HTTPBearer(auto_error=False)
