@@ -20,6 +20,7 @@ async def search_resource_options(
     *,
     keyword: str | None = None,
     model_id: int | None = None,
+    status: str | None = None,
     limit: int = 20,
 ) -> list[dict]:
     """选择器轻量搜索（工单关联资源等下拉场景）。
@@ -27,7 +28,7 @@ async def search_resource_options(
     返回仅含渲染所需字段的字典列表：id/name/model_code/provider/region/status。
     """
     rows = await CmdbResourceRepo(session).search_options(
-        keyword=keyword, model_id=model_id, limit=limit,
+        keyword=keyword, model_id=model_id, status=status, limit=limit,
     )
     return [
         {

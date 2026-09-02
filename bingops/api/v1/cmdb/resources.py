@@ -108,13 +108,14 @@ async def create_resource(
 async def search_resource_options(
     keyword: str | None = None,
     model_id: int | None = None,
+    status: str | None = None,
     limit: int = Query(20, ge=1, le=50),
     session: AsyncSession = Depends(get_db_session),
     _user: User = require_permission("cmdb_resource:list"),
 ):
     """资源选择器轻量搜索（按名称/实例 ID 模糊匹配，下拉渲染用）。"""
     options = await resource_service.search_resource_options(
-        session, keyword=keyword, model_id=model_id, limit=limit,
+        session, keyword=keyword, model_id=model_id, status=status, limit=limit,
     )
     return success_response(data=options)
 

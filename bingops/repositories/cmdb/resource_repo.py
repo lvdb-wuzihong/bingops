@@ -352,6 +352,7 @@ class CmdbResourceRepo:
         *,
         keyword: str | None = None,
         model_id: int | None = None,
+        status: str | None = None,
         limit: int = 20,
     ) -> list[tuple[CmdbResource, str]]:
         """选择器轻量搜索：返回 (resource, model_code)，仅带渲染所需字段。"""
@@ -362,6 +363,8 @@ class CmdbResourceRepo:
         )
         if model_id is not None:
             query = query.where(CmdbResource.model_id == model_id)
+        if status is not None:
+            query = query.where(CmdbResource.status == status)
         if keyword:
             like_pattern = f"%{keyword}%"
             query = query.where(
