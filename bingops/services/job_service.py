@@ -211,6 +211,17 @@ async def _snapshot_targets(
     if missing:
         raise NotFoundError(f"Target resources not found: {missing}")
 
+    # 执行态硬校验：仅 running 可作为执行目标。
+    # stopped SSH 必失败、maintenance 变更中；unknown/NULL 按 fail-safe 从严拒绝。
+    not_ready = sorted(
+        (res.name, res.status or "null")
+        for res, _code in rows.values()
+        if res.status != "running"
+    )
+    if not_ready:
+        detail = ", ".join(f"{name}({status})" for name, status in not_ready)
+        raise ValidationError(f"targets not in running state: {detail}")
+
     targets = []
     for rid in resource_ids:
         res, code = rows[rid]
@@ -230,7 +241,9 @@ async def _snapshot_targets(
     return targets
 
 
-def _build_dispatch(execution: JobExecution, command: str) -> JobDispatchMessage:
+def _build_dispatch(
+    execution: JobExecution, command: str, steps: list[dict] | None = None,
+) -> JobDispatchMessage:
     return JobDispatchMessage(
         message_id=str(uuid.uuid4()),
         command=command,
@@ -239,13 +252,18 @@ def _build_dispatch(execution: JobExecution, command: str) -> JobDispatchMessage
         params=execution.params,
         connection=execution.connection,
         targets=[ExecutionTarget(**t) for t in execution.target_resources],
-        steps=[DispatchStep(**s) for s in execution.steps_snapshot],
+        steps=[
+            DispatchStep(**s)
+            for s in (steps if steps is not None else execution.steps_snapshot)
+        ],
     )
 
 
-async def _send_dispatch(execution: JobExecution, command: str) -> None:
+async def _send_dispatch(
+    execution: JobExecution, command: str, steps: list[dict] | None = None,
+) -> None:
     try:
-        await dispatcher.send_dispatch(_build_dispatch(execution, command))
+        await dispatcher.send_dispatch(_build_dispatch(execution, command, steps))
     except RuntimeError as exc:
         # Kafka 未启用/未注入：下发通道不可用，503 语义（配置类失败而非外部故障）
         raise ExternalServiceError("kafka", str(exc), http_status=503) from exc
@@ -380,6 +398,25 @@ async def cancel_execution(session: AsyncSession, execution_id: int) -> JobExecu
     return execution
 
 
+async def _completed_rollbackable_steps(
+    session: AsyncSession, execution: JobExecution,
+) -> list[dict]:
+    """回滚链过滤：已完成（do 步骤 status=success）且声明 rollbackable 的步骤。
+
+    runner 无状态，不知道哪些步骤跑过——控制面按 job_steps 过滤后下发；
+    未执行（失败步之后的 skipped）与失败步本身不进回滚链。
+    """
+    done = {
+        s.step_key
+        for s in await JobStepRepo(session).list_by_execution(execution.id)
+        if s.attempt_type == "do" and s.status == "success"
+    }
+    return [
+        s for s in execution.steps_snapshot or []
+        if s.get("rollbackable") and s.get("key") in done
+    ]
+
+
 async def trigger_rollback(session: AsyncSession, execution: JobExecution) -> JobExecution:
     """触发回滚下发（手动 API 与自动回滚共用）。"""
     if execution.status not in ROLLBACKABLE_SOURCE_STATUSES:
@@ -387,17 +424,23 @@ async def trigger_rollback(session: AsyncSession, execution: JobExecution) -> Jo
             "JobExecution",
             f"execution {execution.id} cannot rollback (status={execution.status})",
         )
-    rollbackable = [s.get("key") for s in execution.steps_snapshot if s.get("rollbackable")]
-    if not rollbackable:
-        raise ConflictError("JobExecution", "no rollbackable steps in this execution")
+    # 回滚链过滤（runner 无状态，控制面给什么跑什么）：仅已完成且 rollbackable 的步骤
+    rollback_steps = await _completed_rollbackable_steps(session, execution)
+    if not rollback_steps:
+        raise ConflictError(
+            "JobExecution", "no completed rollbackable steps in this execution",
+        )
 
-    await _send_dispatch(execution, "rollback")
+    await _send_dispatch(execution, "rollback", steps=rollback_steps)
     execution.status = "rolling_back"
     await JobExecutionRepo(session).update(execution)
     await session.commit()
     logger.info(
         "Job rollback dispatched",
-        extra={"execution_id": execution.id, "rollbackable_steps": rollbackable},
+        extra={
+            "execution_id": execution.id,
+            "rollback_steps": [s.get("key") for s in rollback_steps],
+        },
     )
     return execution
 

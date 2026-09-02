@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from bingops.core.exceptions import ConflictError
 from bingops.models.jobs import JobStep
 from bingops.repositories.jobs_repo import JobExecutionRepo, JobStepLogRepo, JobStepRepo
 from bingops.schemas.jobs import JobEventMessage
@@ -155,7 +156,16 @@ async def _handle_do_step_failure(session: AsyncSession, execution) -> None:
     if execution.rollback_policy == "auto" and has_done:
         execution.status = "failed"
         await JobExecutionRepo(session).update(execution)
-        await job_service.trigger_rollback(session, execution)
+        try:
+            await job_service.trigger_rollback(session, execution)
+        except ConflictError:
+            # 边角：成功步骤均非 rollbackable → 无回滚链，落 failed 终态
+            execution.finished_at = datetime.now(timezone.utc)
+            await JobExecutionRepo(session).update(execution)
+            logger.info(
+                "Auto rollback skipped (no completed rollbackable steps)",
+                extra={"execution_id": execution.id},
+            )
     else:
         execution.status = "failed"
         execution.finished_at = datetime.now(timezone.utc)

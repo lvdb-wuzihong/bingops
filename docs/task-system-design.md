@@ -60,6 +60,12 @@ category: restart
 target_models: [aliyun_ecs, gcp_compute]  # 目标范围硬校验；P1 默认即此两类
 risk_level: medium            # low/medium/high/critical，叠加环境维度提级（P3）
 auto_rollback: false          # opt-in 自动回滚，默认手动
+connection:                   # runner 据此渲染 inventory 变量；仅钥匙名，真钥匙在 Vault
+  ssh_user: ops               # 登录用户（非 root）
+  ssh_key_ref: prod-node-key  # Vault 键名
+  become: true                # 默认 false，需提权显式开
+  become_method: sudo
+  become_user: root
 params_schema:                # 条目 spec：type/required/default/enum/description
   svc: {type: string, required: true, description: 服务名}
   retries: {type: number, default: 1}   # default 下发时后端自动回填，表单只收用户填写项
@@ -90,9 +96,17 @@ steps:
 
 - 操作与逆操作同仓同文件，永不漂移；引擎回滚无需独立 rollback playbook 路径
 - 步内瞬时失败用 ansible 原生 `block/rescue/always` 自愈（如起服失败先尝试拉起），与步级回滚互补不替代
+
+### 3.3 编辑面约定：YAML 对人、JSON 对机器
+
+- **存储与 API 契约仅 JSON**（steps/params_schema 列 JSONB，API 收 list[dict]/dict）；后端不解析 YAML，单一文法、单一校验入口（`_validate_steps`）
+- **前端编辑面用 YAML**（Monaco + js-yaml@4，YAML 1.2 core schema，避 1.1 `yes/on` 布尔坑）：提交时 `yaml.load` → 校验 → JSON 调现有 API；编辑回显 `yaml.dump`（保插入序，往返无 diff 噪音）
+- 标量配置（name/category/risk_level/auto_rollback/target_models）用**结构化表单**；connection 是 runbook 定义的一部分（见 §3.1 示例），UI 以 5 个已知键的结构化表单编辑、序列化进 connection 字段，不进 YAML 自由区
+- YAML 校验仅为 UX 即时反馈；权威仍是后端 400
+- 与未来 GitLab runbook-as-code 演进同构：仓库与 UI 共用 YAML 语法，CI 转 JSON 同步进平台
 - **CI 门禁（P2）**：标 `rollbackable: true` 的 role 必须引用 `bingops_action`，防只写 do 忘写 undo
 
-### 3.3 版本语义
+### 3.4 版本语义
 
 - `runbooks.version` 整数，每次编辑 +1
 - 任务创建时 **runbook_version + steps + code_ref（git tag）三快照** 进 execution 行——在跑任务永远用创建时的定义与代码
@@ -135,6 +149,7 @@ step:      pending → running → success / failed / skipped / rolled_back / ro
 
 - **Inventory 源 = CMDB**：下发时 bingops 从目标快照生成 `[{resource_id, name, ip, ssh_user, ssh_key_ref}]`；runner 拼 inventory JSON，资源选择器能力在此变现
 - **目标范围硬校验**：runbook.`target_models` 声明 scope（默认 `[aliyun_ecs, gcp_compute]`），`create_execution` 对快照 model_code 越界即 400；前端选择器按 target_models 传 `model_id` 过滤（UX 层，不替代后端校验）；K8s 对象 P2 以 local 模式扩入
+- **执行态硬校验**：目标 `status` 必须 = `running`（stopped SSH 必失败、maintenance 变更中；unknown/NULL 按 fail-safe 从严 400，报错带资源名+实际状态）；前端选择器同步传 `status=running`
 - **网络可达**：runner 部署于同 VPC 直连 22 端口；跨 VPC/IDC 留 runbook 级 `proxy_hop` 字段（P1 不实现，渲染为 ProxyCommand）
 - **connection 契约**（runbook 级）：`ssh_user` 登录用户 / `ssh_key_ref` Vault 键名 / `become` 默认 false / `become_method` 默认 sudo / `become_user` 默认 root；**sudo 密码不进配置**：宿主机 NOPASSWD sudoers 由 bootstrap runbook 统刷，退路 `become_password_ref` 走 Vault+no_log；runner 渲染为 inventory 变量 `ansible_become*`
 
