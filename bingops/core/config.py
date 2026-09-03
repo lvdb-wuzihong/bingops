@@ -50,6 +50,10 @@ class Settings(BaseSettings):
     mcp_enabled: bool = False        # 挂载 /mcp 端点（streamable-http，无状态模式）
     mcp_write_enabled: bool = False  # 写工具总开关（默认关闭，见 mcp/tools/writes.py）
     mcp_agent_user_id: int = 0       # agent 系统账号（写工具操作者；0 = 未配置）
+    # DNS rebinding 防护（SDK 层 Host 校验）：生产必须把实际域名/服务名加进 allowed_hosts
+    mcp_dns_rebinding_protection: bool = True
+    mcp_allowed_hosts: str = "localhost:*,127.0.0.1:*,[::1]:*"  # 逗号分隔，支持 :* 端口通配
+    mcp_allowed_origins: str = ""  # 逗号分隔（仅浏览器类客户端携带 Origin 时校验；agent 可留空）
 
 
 class FeishuSettings(BaseSettings):
