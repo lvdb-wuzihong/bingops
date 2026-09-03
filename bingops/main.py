@@ -65,12 +65,23 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # 启动时注入数据库会话依赖
     app.dependency_overrides[dependencies.get_db_session] = get_async_session
 
+    # MCP 数据面：绑定会话工厂（工具不走 FastAPI DI，见 bingops/mcp/_shared.py）
+    if settings.mcp_enabled:
+        from bingops.mcp._shared import bind_session_factory
+        bind_session_factory(async_session_factory)
+
     # 启动 Kafka 消费者（仅在 kafka_enabled=true 时）
     if settings.kafka_enabled:
         from bingops.tasks.cmdb.startup import start_cmdb_kafka_consumer
         await start_cmdb_kafka_consumer(async_session_factory)
 
-    yield
+    # MCP streamable-http session manager 生命周期
+    if settings.mcp_enabled:
+        from bingops.mcp.server import mcp_lifespan
+        async with mcp_lifespan():
+            yield
+    else:
+        yield
 
     # 关闭时停止 Kafka 消费者
     if settings.kafka_enabled:
@@ -150,6 +161,11 @@ app.include_router(group_router)
 app.include_router(oncall_router)
 app.include_router(jobs.router)
 app.include_router(sd.router)
+
+# MCP 数据面（AI agent 工具，设计见 docs/ai-agent-mcp-design.md）
+if settings.mcp_enabled:
+    from bingops.mcp.server import mount_mcp
+    mount_mcp(app)
 
 
 # ── 健康检查 ───────────────────────────────────────────────────────────────────

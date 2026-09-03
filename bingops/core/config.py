@@ -46,6 +46,11 @@ class Settings(BaseSettings):
     kafka_cloud_topic_pattern: str = "cloud-sync-{provider}"
     kafka_enabled: bool = False
 
+    # MCP（AI agent 数据面，设计见 docs/ai-agent-mcp-design.md）
+    mcp_enabled: bool = False        # 挂载 /mcp 端点（streamable-http，无状态模式）
+    mcp_write_enabled: bool = False  # 写工具总开关（默认关闭，见 mcp/tools/writes.py）
+    mcp_agent_user_id: int = 0       # agent 系统账号（写工具操作者；0 = 未配置）
+
 
 class FeishuSettings(BaseSettings):
     """飞书 SSO 配置。"""

@@ -16,6 +16,7 @@ dependencies = [
     "structlog>=24.0,<25",
     "email-validator>=2.0,<3",
     "aiokafka>=0.12,<1",
+    "mcp>=1.9,<2",
 ]
 
 [project.optional-dependencies]
