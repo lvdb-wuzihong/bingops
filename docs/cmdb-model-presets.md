@@ -19,10 +19,10 @@
 
 | 项 | 进度 | 说明 |
 |-----|------|------|
-| 分类 | 4 个 ✅ | 阿里云 / K8S / 谷歌云 / DNS；中间件分组用到再建 |
-| 模型 | 34 个 | 在用模型**全部录齐**（k8s_ingress 字段/关系 2026-08-25 补录完成）；待建仅：`apisix_route` 缓做（§3.1）、`selfhosted_*` 在用哪个建哪个（§3.2） |
-| 字段 | 198 个 | §2 修正项**清零**（ecs.memory_gb=number、dns_zone.dns_servers=json 均已重建）；§2.5 裁决项全部落地 |
-| 关系约束 | **56/56 已录** | 全部正确；apisix_route 的 3 条（#20/#40/#48）随缓做不占坑，见 §4 头部注 |
+| 分类 | 5 个 ✅ | 阿里云 / K8S / 谷歌云 / DNS / AWS（2026-09-09 已建）；中间件分组用到再建 |
+| 模型 | 43 个 ✅ | 库内全部已录（34 原有 + AWS 批次 9：account/vpc/eip/ec2/sg/s3/cloudfront/elb/alb）；apisix_route 缓做（§3.1）；selfhosted_* 在用哪个建哪个（§3.2） |
+| 字段 | 236 个 ✅ | §2 修正项清零；AWS 批次 38 字段已录（与附录 A2 零漂移实测）；枚举 options 全部内联 |
+| 关系约束 | **71/71 已录** | 全部正确（2026-09-07 实测：AWS 批次 13 条 #59-#71 全部落地 + dns→aws_eip / k8s_node→aws_ec2 两条扩展提前录）；apisix 的 3 条随缓做不占坑；模型种子 SQL 已入库仓（`sql/seed_cmdb_models.sql`，71 关系全量，幂等） |
 | 选项库 | 0 ✅ 已清空 | API 标 deprecated 休眠 |
 | 实例/边 | 生产产出中 | 存活资源 **1048**（aliyun 701 / gcp 347），belongs_to 边 989；**K8s↔云全链路桥接边代码闭环**（附录 B #34）：承载于/CSI/LB/DNAT/解析目标/路由上游全落地，其中 csi/lb/dnat kind 边待生产数据验证 |
 | 同步任务 | 多任务支持 | v8 迁移放开 (task_type, target_id) 唯一约束；消费端门控 = 启用任务并集（附录 B #24） |
@@ -123,7 +123,8 @@ ConfigMap/Secret 待“配置影响面分析”立项再议。
 > relation_type 只有 belongs_to（从属/树）与 relates_to（关联/图）两种，业务语义写在关系名。
 >
 > 录入进度（2026-08-25 实测）：56 条全部正确（含 ingress #57/#58、gcp_redis 网络归属）；
-> #20/#40/#48 随 apisix_route 缓做不占坑；#49/#50/#51 按原策略缓录。
+> #20/#40/#48 随 apisix_route 缓做不占坑；#49/#50/#51 按原策略缓录；
+> **AWS 批次（#59-#71，2026-09-09 已全部录入）**：关系名全部复用现有语义（跨云同构，消费端 DESC_* 常量直接复用），唯 #71「分发源」是新语义（CDN 回源，消费端需新增常量）；另有 2 条扩展已提前录（dns_record→aws_eip「解析目标」、k8s_node→aws_ec2「承载于」，为 #45-47 跨厂商扩展与 EKS 预留，不占新号）。模型定义全量种子见 `sql/seed_cmdb_models.sql`。
 
 ### 4.1 从属关系（belongs_to）
 
@@ -165,6 +166,14 @@ ConfigMap/Secret 待“配置影响面分析”立项再议。
 | 52 | aliyun_oss | aliyun_account | n:1 | 账号归属 |
 | 53 | gcp_cloudsql | gcp_vpc | n:1 | 网络归属 |
 | 54 | gcp_disk | gcp_account | n:1 | 账号归属（游离盘无实例父，挂账号） |
+| 59 | aws_vpc | aws_account | n:1 | 账号归属（AWS 批次） |
+| 60 | aws_ec2 | aws_vpc | n:1 | 网络归属（AWS 批次） |
+| 61 | aws_security_group | aws_vpc | n:1 | 网络归属（AWS 批次） |
+| 62 | aws_elb | aws_vpc | n:1 | 网络归属（AWS 批次） |
+| 63 | aws_alb | aws_vpc | n:1 | 网络归属（AWS 批次） |
+| 64 | aws_s3 | aws_account | n:1 | 账号归属（AWS 批次；bucket 全局资源） |
+| 65 | aws_cloudfront | aws_account | n:1 | 账号归属（AWS 批次；CloudFront 全局，region 留空） |
+| 69 | aws_eip | aws_account | n:1 | 账号归属（AWS 批次；EIP 是账号级资源，对齐 #2） |
 
 ### 4.2 关联关系（relates_to）
 
@@ -189,6 +198,11 @@ ConfigMap/Secret 待“配置影响面分析”立项再议。
 | 44 | k8s_pv | aliyun_nas | n:1 | CSI 桥接（volume_handle 解析文件系统 ID） |
 | 57 | k8s_ingress | k8s_namespace | n:1 | 命名空间归属 |
 | 58 | k8s_ingress | k8s_service | n:n | 路由上游（backend service 名匹配） |
+| 66 | aws_ec2 | aws_security_group | n:n | 绑定安全组（AWS 批次；对齐 #28） |
+| 67 | aws_elb | aws_ec2 | n:n | 负载均衡后端（AWS 批次；Classic Instances 成员直挂，对齐 #29） |
+| 68 | aws_alb | aws_ec2 | n:n | 负载均衡后端（AWS 批次；target group targets 解析，对齐 #30） |
+| 70 | aws_eip | aws_ec2 | n:n | 绑定（AWS 批次；kind=bind，对齐 #31 直绑语义；DNAT 暴露随 AWS NAT GW 未来扩展） |
+| 71 | aws_cloudfront | aws_s3 | n:n | 分发源（AWS 批次；origins[].domain_name 解析桶名匹配 S3 provider_id；origin 为 ALB DNS 名时匹配 aws_alb 同语义扩展，不占新号） |
 | 55 | gcp_disk | gcp_compute | n:n | 挂载于（users 列表匹配） |
 | 56 | k8s_pv | gcp_disk | 1:1 | CSI 桥接（kind=csi） |
 | 45 | dns_record | aliyun_eip | n:n | 解析目标（A 记录按 IP） |
@@ -301,6 +315,131 @@ ConfigMap/Secret 待“配置影响面分析”立项再议。
 
 从属：gcp_disk belongs_to gcp_account (n:1，账号归属，游离盘无实例父)；
 关联：gcp_disk relates_to gcp_compute (n:n，挂载于)、k8s_pv relates_to gcp_disk (1:1，CSI 桥接 kind=csi)。
+
+---
+
+## 附录 A2：AWS 批次模型规格（✅ 已全部录入，2026-09-09；规格留档）
+
+> 通用约定：`provider='aws'`、模型 code 前缀 `aws_`；UI 先建「AWS」分类。
+> 字段 code 跨云对齐（instance_type/private_ip/public_ip/os/spot/rules+rules_hash/dns_name/listeners 等同名同义），跨云审计依赖。
+> **关系名全部复用现有语义**（网络归属/账号归属/绑定安全组/负载均衡后端），消费端 DESC_* 常量直接复用。
+> **ELB 与 ALB 拆分为两个模型**（同 CLB/NLB 拆分决策）：Classic 直挂实例、无路由规则；ALB 七层 host/path 路由 + target group 二级解析，入口形态与后端解析链路根本不同。NLB（四层）未点名，用到再补（规格同 ALB 去路由规则）。
+> **`aws_account` + `aws_vpc` 已确认同批建（2026-09-07）**：ec2/sg/elb/alb 的从属边父级 + 建树根（同 aliyun_account/gcp_account 先例）。
+
+### aws_account
+
+| 字段名 | code | 类型 | 分组 | 必填 | 说明 |
+|--------|------|------|------|------|------|
+| 别名 | alias | string | 基础信息 | 否 | accounts.yaml display_name |
+
+零云 API 配置驱动根节点（同 aliyun_account/gcp_account 先例）：provider_id = 12 位 AWS 账号 ID；owner/account_type 人工补充不预置。
+
+### aws_vpc
+
+| 字段名 | code | 类型 | 分组 | 必填 | 说明 |
+|--------|------|------|------|------|------|
+| CIDR 块 | cidr_block | string | 基础信息 | 是 | 对齐 aliyun_vpc/gcp_vpc 同 code |
+| 默认 VPC | is_default | boolean | 基础信息 | 否 | |
+
+> AWS VPC 无原生 name，展示名取 Tags.Name（同 NAS 用 Description 先例）；有真实 Status（available/pending → running/maintenance）。
+
+从属：aws_vpc belongs_to aws_account (n:1，账号归属)。
+
+### aws_eip（Elastic IP，2026-09-07 补充）
+
+| 字段名 | code | 类型 | 分组 | 必填 | 说明 |
+|--------|------|------|------|------|------|
+| 公网 IP | ip_address | string | 基础信息 | 是 | 对齐 aliyun_eip 同 code；DNS A 记录解析目标锚点 |
+| 私网 IP | private_ip | string | 网络配置 | 否 | 关联 ENI 的私网地址 |
+| 绑定实例 | bind_instance_id | string | 同步保留 | 否 | 关联 EC2 的实例 ID，建边依据（孤儿认领；对齐 aliyun_eip 同 code） |
+
+> provider_id = AllocationId；AWS EIP 无带宽/预付费概念，不预置 charge_type/bandwidth（不臆造）。
+
+从属：aws_eip belongs_to aws_account (n:1，账号归属；EIP 是账号级资源，对齐 #2)。
+关联：aws_eip → aws_ec2 relates_to「绑定」(kind=bind，对齐 #31 直绑语义)；dns_record → aws_eip 解析目标（#45 跨厂商扩展，A 记录按 ip_address）。
+
+### aws_ec2
+
+| 字段名 | code | 类型 | 分组 | 必填 | 说明 |
+|--------|------|------|------|------|------|
+| 实例规格 | instance_type | string | 基础信息 | 是 | t3.medium；对齐 aliyun_ecs 同 code |
+| 操作系统 | os | string | 基础信息 | 否 | Platform/PlatformDetails 推断（windows/linux），AMI name 兜底；对齐 gcp_compute 同 code |
+| 是否抢占式 | spot | boolean | 基础信息 | 否 | instance_lifecycle=spot；对齐 gcp_compute 同 code |
+| 内网 IP | private_ip | string | 网络配置 | 否 | 跨云同名 |
+| 公网 IP | public_ip | string | 网络配置 | 否 | 跨云同名 |
+| 创建时间 | creation_time | date | 基础信息 | 否 | launch_time；对齐 aliyun_ecs 同 code |
+| VPC ID | vpc_id | string | 同步保留 | 否 | 建边依据（孤儿认领） |
+| 子网 ID | subnet_id | string | 同步保留 | 否 | 不建 subnet 模型，锚点保留 |
+| AMI ID | image_id | string | 同步保留 | 否 | os 兜底推断源 |
+
+从属：aws_ec2 belongs_to aws_vpc (n:1，网络归属)。
+关联：aws_ec2 → aws_security_group relates_to (n:n，绑定安全组)；aws_elb/alb → aws_ec2 relates_to (n:n，负载均衡后端)；k8s_node → aws_ec2 (1:1，承载于) 为 EKS 预留缓录。
+
+### aws_security_group
+
+| 字段名 | code | 类型 | 分组 | 必填 | 说明 |
+|--------|------|------|------|------|------|
+| 规则列表 | rules | json | 规则配置 | 是 | ingress+egress 合并归一化（direction 区分），排序保哈希稳定；对齐 aliyun_security_group 同 code |
+| 规则哈希 | rules_hash | string | 规则配置 | 是 | compute_rules_hash，同 aliyun sg |
+| 描述 | description | string | 基础信息 | 否 | |
+| VPC ID | vpc_id | string | 同步保留 | 否 | 建边依据 |
+
+从属：aws_security_group belongs_to aws_vpc (n:1，网络归属)。
+
+### aws_s3
+
+| 字段名 | code | 类型 | 分组 | 必填 | 说明 |
+|--------|------|------|------|------|------|
+| 访问控制 | acl | string | 基础信息 | 否 | canned ACL（private/public-read…）；对齐 aliyun_oss 同 code |
+| 版本控制 | versioning | boolean | 基础信息 | 否 | Enabled→true（Suspended 同 aliyun_oss 口径→false） |
+| 公共访问阻断 | block_public_access | boolean | 基础信息 | 否 | PublicAccessBlock 四项全开→true；false 需关注（公共暴露面审计信号） |
+| 外网端点 | endpoint | string | 网络配置 | 否 | {bucket}.s3.{region}.amazonaws.com；对齐同 code |
+| 创建时间 | creation_time | date | 基础信息 | 否 | CreationDate |
+
+> region 走通用列（bucket 所在区域）；bucket 是全局命名、区域级资源；容量需 CloudWatch 指标，API 不直给不预置。provider_id = bucket 名（对齐 aliyun_oss）。
+
+从属：aws_s3 belongs_to aws_account (n:1，账号归属)。
+
+### aws_cloudfront
+
+| 字段名 | code | 类型 | 分组 | 必填 | 说明 |
+|--------|------|------|------|------|------|
+| 分发域名 | domain_name | string | 基础信息 | 是 | dxxx.cloudfront.net；展示名兼解析匹配锚点 |
+| 自定义域名 | aliases | json | 路由配置 | 否 | CNAME 列表；dns_record 解析目标二期锚点 |
+| 源站列表 | origins | json | 路由配置 | 否 | [{origin_id,domain_name,...}]；#71 分发源边锚点（s3 域名解析桶名 / ALB DNS 名匹配） |
+| HTTP 版本 | http_version | string | 基础信息 | 否 | |
+
+> CloudFront 是全局资源（region 留空，同 gcp_vpc 纪律）；无阿里云/GCP 对应预置模型（CDN 类）；status 取 Enabled/Disabled→running/stopped（真实状态）；provider_id = DistributionId。
+
+从属：aws_cloudfront belongs_to aws_account (n:1，账号归属)。
+
+### aws_elb（Classic Load Balancer）
+
+| 字段名 | code | 类型 | 分组 | 必填 | 说明 |
+|--------|------|------|------|------|------|
+| 服务域名 | dns_name | string | 网络配置 | 是 | xxx.elb.amazonaws.com；对齐 aliyun_nlb 同 code，解析目标锚点 |
+| 网络形态 | scheme | string | 基础信息 | 否 | internet-facing/internal |
+| 监听列表 | listeners | json | 路由配置 | 否 | [{protocol,load_balancer_port,instance_port}]；对齐 aliyun_clb 同 code |
+| VPC ID | vpc_id | string | 同步保留 | 否 | 建边依据 |
+
+> 后端实例列表存下划线内部键（同 _backend_ecs_ids 惯例），不登记模型字段。
+
+从属：aws_elb belongs_to aws_vpc (n:1，网络归属)。
+关联：aws_elb → aws_ec2 relates_to (n:n，负载均衡后端；Instances 成员直挂)。
+
+### aws_alb（Application Load Balancer）
+
+| 字段名 | code | 类型 | 分组 | 必填 | 说明 |
+|--------|------|------|------|------|------|
+| 服务域名 | dns_name | string | 网络配置 | 是 | xxx.alb.amazonaws.com |
+| 网络形态 | scheme | string | 基础信息 | 否 | internet-facing/internal |
+| 监听与路由 | listeners | json | 路由配置 | 否 | listener+rules 摘要 [{port,protocol,rules:[{host,path,target_group}]}]；ALB 核心是七层路由 |
+| 目标组 | target_groups | json | 路由配置 | 否 | [{name,protocol,target_type,...}]；后端解析锚点（对齐 aliyun_nlb server_groups 模式） |
+| IP 类型 | ip_address_type | string | 网络配置 | 否 | ipv4/dualstack |
+| VPC ID | vpc_id | string | 同步保留 | 否 | 建边依据 |
+
+从属：aws_alb belongs_to aws_vpc (n:1，网络归属)。
+关联：aws_alb → aws_ec2 relates_to (n:n，负载均衡后端；target group targets type=instance 解析；ip 型 target 可能是 Pod IP，二期)。
 
 ---
 
