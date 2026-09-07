@@ -341,7 +341,7 @@ async def _resolve_host_for_node(
     res_repo: CmdbResourceRepo, model_repo: CmdbModelRepo, node: CmdbResource,
 ) -> CmdbResource | None:
     """按 instance_id 精确匹配优先、internal_ip 兜底解析节点承载的云主机。"""
-    host_code = {"aliyun": "aliyun_ecs", "gcp": "gcp_compute"}.get(node.provider)
+    host_code = {"aliyun": "aliyun_ecs", "gcp": "gcp_compute", "aws": "aws_ec2"}.get(node.provider)
     if not host_code:
         return None  # 自建集群无云主机对端
     model = await model_repo.get_model_by_code(host_code)
@@ -350,8 +350,8 @@ async def _resolve_host_for_node(
     fields = node.fields or {}
     instance_id = fields.get("instance_id")
     if instance_id:
-        if node.provider == "aliyun":
-            # ACK providerID 解析出 i-xxx，即 ECS provider_id
+        if node.provider in ("aliyun", "aws"):
+            # ACK/EKS providerID 解析出 i-xxx，即云主机 provider_id
             host = await res_repo.find_by_provider_id_any_account(
                 model.id, node.provider, instance_id,
             )

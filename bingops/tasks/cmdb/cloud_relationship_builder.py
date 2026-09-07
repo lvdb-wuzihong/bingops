@@ -40,6 +40,7 @@ DESC_FIREWALL_BELONG = "防火墙归属"
 DESC_RESOLVED_IN = "域归属"
 DESC_DNAT_EXPOSE = "DNAT 暴露"
 DESC_RESOLVE_TARGET = "解析目标"
+DESC_ORIGIN_SOURCE = "分发源"
 
 # relates_to kind 槽位：同对资源多种语义边共存（v9 迁移）
 KIND_BIND = "bind"
@@ -179,8 +180,98 @@ async def rebuild_cloud_relationships(
             session, rel_repo, res_repo, model_repo, resource, message,
             description=DESC_RESOLVED_IN,
         )
-        # 解析目标边（#45-47）：A 按 IP 匹配 EIP/CLB，CNAME 按 hostname 匹配 NLB
+        # 解析目标边（#45-47 跨厂商）：A 按 IP 匹配 EIP/CLB，CNAME 按 hostname 匹配 NLB/ALB/ELB
         await _rebuild_record_target_edges(session, rel_repo, res_repo, model_repo, resource)
+    elif model.code == "aws_vpc":
+        # VPC → 账号 belongs_to（账号归属），复用通用 parent 重建
+        await _rebuild_parent_edge(
+            session, rel_repo, res_repo, model_repo, resource, message,
+            description=DESC_ACCOUNT_BELONG,
+        )
+    elif model.code == "aws_ec2":
+        # EC2 → VPC belongs_to（网络归属）+ 绑定安全组（_security_group_ids）
+        await _rebuild_parent_edge(
+            session, rel_repo, res_repo, model_repo, resource, message,
+            description=DESC_NETWORK_BELONG,
+        )
+        await _rebuild_aws_relate_slot(
+            session, rel_repo, res_repo, model_repo, resource, message,
+            "aws_security_group",
+            (resource.fields or {}).get("_security_group_ids") or [],
+            DESC_BIND_SG,
+        )
+        # 反向孤儿认领：EKS 节点先于主机入库时补承载于边
+        await adopt_node_host_edges(
+            session, resource, resource.provider_id, (resource.fields or {}).get("private_ip"),
+        )
+    elif model.code == "aws_security_group":
+        # 安全组 → VPC belongs_to（网络归属），复用通用 parent 重建
+        await _rebuild_parent_edge(
+            session, rel_repo, res_repo, model_repo, resource, message,
+            description=DESC_NETWORK_BELONG,
+        )
+    elif model.code == "aws_eip":
+        # EIP：绑定 EC2 relates_to（kind=bind）+ DNS A 记录反向认领
+        await _rebuild_aws_relate_slot(
+            session, rel_repo, res_repo, model_repo, resource, message,
+            "aws_ec2",
+            [(resource.fields or {}).get("bind_instance_id") or ""],
+            DESC_BIND_ECS, kind=KIND_BIND,
+        )
+        await _adopt_dns_target_edges(
+            session, rel_repo, res_repo, model_repo,
+            message.provider, message.cloud_account,
+            (resource.fields or {}).get("ip_address") or "", "A",
+        )
+    elif model.code == "aws_elb":
+        # Classic ELB：→ VPC 网络归属 + 后端 EC2 负载均衡后端
+        await _rebuild_parent_edge(
+            session, rel_repo, res_repo, model_repo, resource, message,
+            description=DESC_NETWORK_BELONG,
+        )
+        await _rebuild_aws_relate_slot(
+            session, rel_repo, res_repo, model_repo, resource, message,
+            "aws_ec2",
+            (resource.fields or {}).get("_backend_instance_ids") or [],
+            DESC_LB_BACKEND,
+        )
+        await _adopt_dns_target_edges(
+            session, rel_repo, res_repo, model_repo,
+            message.provider, message.cloud_account,
+            (resource.fields or {}).get("dns_name") or "", "CNAME",
+        )
+    elif model.code == "aws_alb":
+        # ALB：→ VPC 网络归属 + target group 后端 EC2 负载均衡后端
+        await _rebuild_parent_edge(
+            session, rel_repo, res_repo, model_repo, resource, message,
+            description=DESC_NETWORK_BELONG,
+        )
+        await _rebuild_aws_relate_slot(
+            session, rel_repo, res_repo, model_repo, resource, message,
+            "aws_ec2",
+            (resource.fields or {}).get("_backend_instance_ids") or [],
+            DESC_LB_BACKEND,
+        )
+        await _adopt_dns_target_edges(
+            session, rel_repo, res_repo, model_repo,
+            message.provider, message.cloud_account,
+            (resource.fields or {}).get("dns_name") or "", "CNAME",
+        )
+    elif model.code == "aws_s3":
+        # S3 → 账号 belongs_to（账号归属），复用通用 parent 重建
+        await _rebuild_parent_edge(
+            session, rel_repo, res_repo, model_repo, resource, message,
+            description=DESC_ACCOUNT_BELONG,
+        )
+    elif model.code == "aws_cloudfront":
+        # CloudFront → 账号 belongs_to（账号归属）+ 分发源边（origins 解析）
+        await _rebuild_parent_edge(
+            session, rel_repo, res_repo, model_repo, resource, message,
+            description=DESC_ACCOUNT_BELONG,
+        )
+        await _rebuild_cloudfront_origin_edges(
+            session, rel_repo, res_repo, model_repo, resource,
+        )
     else:
         # 通用 parent 关系重建（VSwitch → VPC 等，无复杂多边场景）
         await _rebuild_parent_edge(session, rel_repo, res_repo, model_repo, resource, message)
@@ -578,9 +669,11 @@ async def _rebuild_record_target_edges(
     expected: set[int] = set()
     candidates: list[tuple[str, str]] = []
     if record_type == "A":
-        candidates = [("aliyun_eip", "ip_address"), ("aliyun_clb", "address")]
+        candidates = [("aliyun_eip", "ip_address"), ("aliyun_clb", "address"),
+                      ("aws_eip", "ip_address")]
     elif record_type == "CNAME":
-        candidates = [("aliyun_nlb", "dns_name")]
+        candidates = [("aliyun_nlb", "dns_name"), ("aws_alb", "dns_name"),
+                      ("aws_elb", "dns_name")]
     for code, field_code in candidates:
         model = await model_repo.get_model_by_code(code)
         if model is None:
@@ -848,6 +941,124 @@ async def _rebuild_ecs_edges(
             source_id=resource.id,
             target_id=sg_id,
             description=DESC_BIND_SG,
+            synced_at=now,
+            source="discovery",
+        ))
+
+
+# ── AWS 关系重建 ────────────────────────────────────────────────────────────
+
+
+async def _rebuild_aws_relate_slot(
+    session: AsyncSession,
+    rel_repo: CmdbRelationshipRepo,
+    res_repo: CmdbResourceRepo,
+    model_repo: CmdbModelRepo,
+    resource: CmdbResource,
+    message: CloudResourceMessage,
+    target_model_code: str,
+    target_provider_ids: list[str],
+    description: str,
+    kind: str = "",
+) -> None:
+    """按 (description, kind) 槽位重建 relates_to 边（同账号匹配，diff 跳过无变更）。
+
+    AWS 侧通用 relate 重建：ec2→sg（绑定安全组）、elb/alb→ec2（负载均衡后端）、
+    eip→ec2（绑定，kind=bind）。target_provider_ids 为对端 provider_id 列表，
+    空串自动忽略；对端不存在（如实例还没入库）静默降级为空集合（等下轮自愈）。
+    """
+    target_model = await model_repo.get_model_by_code(target_model_code)
+    if target_model is None:
+        return
+
+    expected: set[int] = set()
+    for pid in target_provider_ids:
+        if not pid:
+            continue
+        target = await res_repo.get_by_provider_id(
+            target_model.id, message.provider, pid, message.cloud_account,
+        )
+        if target:
+            expected.add(target.id)
+
+    current_relations = await rel_repo.get_relations_from(resource.id)
+    current_ids = {
+        r.target_id for r in current_relations
+        if r.description == description and r.kind == kind
+    }
+    if expected == current_ids:
+        return
+
+    # 槽位级替换：只删本槽位（description + kind），不踩其他语义边
+    for r in current_relations:
+        if r.description == description and r.kind == kind:
+            await rel_repo.delete_relates_to(r.id)
+    now = datetime.now(timezone.utc)
+    for target_id in sorted(expected):
+        await rel_repo.create_relates_to(CmdbRelatesTo(
+            source_id=resource.id,
+            target_id=target_id,
+            description=description,
+            kind=kind,
+            synced_at=now,
+            source="discovery",
+        ))
+
+
+async def _rebuild_cloudfront_origin_edges(
+    session: AsyncSession,
+    rel_repo: CmdbRelationshipRepo,
+    res_repo: CmdbResourceRepo,
+    model_repo: CmdbModelRepo,
+    resource: CmdbResource,
+) -> None:
+    """CloudFront → 源站 relates_to「分发源」（#71，槽位级管理）。
+
+    origins[].domain_name 按形态分流：
+    - {bucket}.s3[.region].amazonaws.com → aws_s3（provider_id = 桶名）
+    - *.elb.amazonaws.com → aws_alb（dns_name 匹配，跨账号查——DNS 名全局唯一）
+    - 自定义 origin（自定义域）不建模对端，跳过。
+    """
+    origins = (resource.fields or {}).get("origins") or []
+    expected_s3_ids: set[int] = set()
+    expected_alb_ids: set[int] = set()
+
+    s3_model = await model_repo.get_model_by_code("aws_s3")
+    alb_model = await model_repo.get_model_by_code("aws_alb")
+    for o in origins:
+        domain = (o.get("domain_name") or "").lower()
+        if not domain:
+            continue
+        if s3_model and ".s3" in domain and domain.endswith("amazonaws.com"):
+            bucket = domain.split(".", 1)[0]
+            # 桶名全局唯一，账号内匹配（同账号回源是常态）；跨账号源由 manual 边补
+            target = await res_repo.get_by_provider_id(
+                s3_model.id, "aws", bucket, resource.cloud_account,
+            )
+            if target:
+                expected_s3_ids.add(target.id)
+        elif alb_model and domain.endswith(".elb.amazonaws.com"):
+            # ALB DNS 名全局唯一；elb classic 同后缀，先 ALB 后 ELB
+            target = await res_repo.find_by_field_text(alb_model.id, "dns_name", domain)
+            if target:
+                expected_alb_ids.add(target.id)
+
+    current_relations = await rel_repo.get_relations_from(resource.id)
+    current = {
+        r.target_id for r in current_relations if r.description == DESC_ORIGIN_SOURCE
+    }
+    expected_all = expected_s3_ids | expected_alb_ids
+    if expected_all == current:
+        return
+    for r in current_relations:
+        if r.description == DESC_ORIGIN_SOURCE:
+            await rel_repo.delete_relates_to(r.id)
+    now = datetime.now(timezone.utc)
+    for target_id in sorted(expected_all):
+        await rel_repo.create_relates_to(CmdbRelatesTo(
+            source_id=resource.id,
+            target_id=target_id,
+            description=DESC_ORIGIN_SOURCE,
             synced_at=now,
             source="discovery",
         ))
