@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 
 from pydantic import BaseModel, Field
 
@@ -288,8 +288,8 @@ class OncallCreate(BaseModel):
     """创建值班排班请求（支持日期范围批量建单）。"""
 
     group_id: int
-    oncall_date: datetime = Field(description="值班日期（范围建单时为起始日）")
-    end_date: datetime | None = Field(
+    oncall_date: date = Field(description="值班日期（YYYY-MM-DD；范围建单时为起始日）")
+    end_date: date | None = Field(
         default=None, description="结束日期（含）；空=仅 oncall_date 单日",
     )
     tier1: list[int] = Field(default_factory=list, description="一线值班用户 ID")
@@ -313,7 +313,7 @@ class OncallResponse(BaseModel):
     id: int
     group_id: int
     group_name: str | None = None
-    oncall_date: datetime
+    oncall_date: date
     tier1: list[int] = Field(default_factory=list)
     tier2: list[int] = Field(default_factory=list)
     tier3: list[int] = Field(default_factory=list)

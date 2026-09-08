@@ -275,8 +275,8 @@ async def create_oncall(
             f"oncall users not in group members: {sorted(outside)}",
         )
 
-    start = payload.oncall_date.date()
-    end = payload.end_date.date() if payload.end_date is not None else start
+    start = payload.oncall_date
+    end = payload.end_date if payload.end_date is not None else start
     if end < start:
         raise ValidationError("end_date must not be earlier than oncall_date")
     span = (end - start).days + 1

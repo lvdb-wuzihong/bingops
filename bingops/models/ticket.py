@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 from sqlalchemy import BigInteger, Boolean, Date, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
@@ -196,7 +196,7 @@ class OncallSchedule(BaseMixin, Base):
     group_id: Mapped[int] = mapped_column(
         BigInteger, ForeignKey("ticket_groups.id", ondelete="CASCADE"), nullable=False,
     )
-    oncall_date: Mapped[datetime] = mapped_column(Date, nullable=False)
+    oncall_date: Mapped[date] = mapped_column(Date, nullable=False)
     tier1: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
     tier2: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
     tier3: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
