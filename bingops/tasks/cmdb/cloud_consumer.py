@@ -131,14 +131,26 @@ async def _handle_upsert(session: AsyncSession, message: CloudResourceMessage) -
         return
 
     if existing:
-        # 更新：先算字段级 diff 记审计，再覆盖
+        # 更新：先合并人工补充字段、算字段级 diff 记审计，再覆盖
         was_revived = existing.deleted_at is not None
-        changes = _diff_resource(existing, message, attributes)
+        # 人工补充字段保留：模型字段存在但本条消息未产出的存量值保留。
+        # 场景：API 不返回的治理字段（如 redis public_connection_string，
+        # OpenAPI 无公网地址查询来源，人工从控制台录入）——采集器产出的键
+        # 以消息为准整体替换，人工键不被每轮同步抹掉。
+        model_codes = {f.code for f in await model_repo.list_fields(model.id)}
+        preserved = {
+            k: existing.fields[k]
+            for k in model_codes - attributes.keys()
+            if k in (existing.fields or {})
+        }
+        fields = {**preserved, **attributes}
+
+        changes = _diff_resource(existing, message, fields)
         existing.name = message.name
         existing.region = message.region
         existing.zone = message.zone
         existing.status = message.status
-        existing.fields = attributes
+        existing.fields = fields
         existing.resource_version = message.resource_version
         existing.synced_at = datetime.now(timezone.utc)
         existing.source = "discovery"

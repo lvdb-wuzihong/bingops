@@ -232,15 +232,22 @@ ConfigMap/Secret 待“配置影响面分析”立项再议。
 | 存储容量(GB) | storage_gb | number | 基础信息 | 是 | |
 | 内网连接地址 | private_connection_string | string | 网络配置 | 否 | 命名对齐 gcp_cloudsql 的 private_ip/public_ip |
 | 公网连接地址 | public_connection_string | string | 网络配置 | 否 | 公网暴露面审计依据，未开通则不填 |
+| 代理内网连接地址 | proxy_endpoint | string | 网络配置 | 否 | 数据库代理内网地址（DescribeDBProxy NetType=InnerString），未开代理不填 |
+| 代理外网连接地址 | proxy_public_endpoint | string | 网络配置 | 否 | 数据库代理外网地址（NetType=OuterString），公网暴露面审计依据，未开代理/外网不填 |
 | 端口 | port | number | 网络配置 | 否 | 内外网通常同端口 |
 | 付费类型 | charge_type | enum | 计费信息 | 否 | options 同已录模型 |
 | 到期时间 | expired_at | date | 计费信息 | 否 | 包年包月续费提醒依据 |
 | VSwitch ID | vswitch_id | string | 同步保留 | 否 | 建边依据（孤儿认领） |
 
-> 采集契约：主接口 `DescribeDBInstances`/`DescribeDBInstanceAttribute` **不返回连接地址**（后者仅含内网
-> ConnectionString）；内外网地址均需逐实例调 `DescribeDBInstanceNetInfo`，按 `NetType=Private/Public`
-> 拆分填充（同 cloud-sync-design §7 ACK enrichment 的二次调用模式）。实例规模小 + 30min 档，N+1 可接受；
-> 若后续规模变大，降为仅对内容哈希变化的实例补调。
+> 采集契约（已实现，2026-09-08）：主接口 `DescribeDBInstances`/`DescribeDBInstanceAttribute` **不返回公网/代理地址**
+> （后者仅含内网 ConnectionString）；内外网由逐实例调 `DescribeDBInstanceNetInfo` 按 `IPType=Private/Public`
+> 拆分填充；代理地址见下方内外网分列注记（NetInfo 仅作触发信号）。实例规模小 + 30min 档，N+1 可接受；若后续规模变大，降为仅对内容哈希变化的实例补调。
+> 【代理地址内外网分列，2026-09-08】NetInfo 仅含代理地址单条目，无法表达代理内外网；权威来源改为逐实例
+> `DescribeDBProxy`（**仅当 NetInfo 出现 IPType=Proxy 条目即代理已开通时调用**），`DBProxyConnectStringItems`
+> 条目按 `DBProxyConnectStringNetType` 拆分：InnerString→proxy_endpoint、OuterString→proxy_public_endpoint。
+> 【旧单字段 connection_string 已废弃】原公网覆盖语义会导致内网地址丢失，改为内外网分列。
+> 【字段变更已 SQL 落地】v22+v23 迁移（2026-09-08 已在测试库执行，**线上待执行 v22+v23**）：删旧字段 +
+> 存量内网地址迁入 private + 四字段补录（private/public/proxy/proxy_public）。
 
 从属：aliyun_rds belongs_to aliyun_vswitch (n:1，网络归属)。
 
@@ -251,11 +258,21 @@ ConfigMap/Secret 待“配置影响面分析”立项再议。
 | 引擎版本 | engine_version | string | 基础信息 | 是 | 版本审计 |
 | 实例规格 | instance_class | string | 基础信息 | 是 | |
 | 容量(MB) | capacity_mb | number | 基础信息 | 是 | |
-| 连接地址 | connection_string | string | 网络配置 | 否 | |
+| 内网带宽(MB/s) | bandwidth | number | 基础信息 | 是 | 列表 API Bandwidth 内联返回，零额外调用 |
+| 连接地址 | connection_string | string | 网络配置 | 否 | 内网连接地址（API ConnectionDomain） |
+| 公网连接地址 | public_connection_string | string | 网络配置 | 否 | **人工补充字段**：Redis OpenAPI 无公网地址查询来源，从控制台复制录入；消费端保留人工值不被同步抹除 |
 | 端口 | port | number | 网络配置 | 否 | |
 | VSwitch ID | vswitch_id | string | 同步保留 | 否 | 建边依据（孤儿认领） |
 
 从属：aliyun_redis belongs_to aliyun_vswitch (n:1，网络归属)。
+
+> 采集契约（2026-09-08 SDK 核对）：Redis OpenAPI（r-kvstore 2015-01-01）**不返回公网连接地址**——
+> DescribeInstances / DescribeInstanceAttribute 仅含内网 ConnectionDomain；公网地址域名格式
+> `<自定义前缀>.redis.rds.aliyuncs.com` 与内网同构无法程序化区分（DescribeInstanceMultiVip
+> 是多 LB 查询与公网无关；AllocateInstancePublicConnection 是申请写操作）。故 public_connection_string
+> 为人工补充字段，采集器不产出；消费端按「模型字段存在但消息未产出」保留存量人工值（v22 同步落地）。
+> 【带宽，2026-09-08】DescribeInstances 列表内联返回 Bandwidth（内网带宽 MB/s），零额外调用采集；
+> `DescribeIntranetAttribute`（IntranetBandwidth/突发带宽/带宽预付费）仅在需要带宽计费细节时引入，暂不采集。
 
 ### aliyun_amqp（阿里云 RabbitMQ）
 
@@ -482,3 +499,4 @@ ConfigMap/Secret 待“配置影响面分析”立项再议。
 | 33 | **LB 桥接边完成**（2026-08-24） | #38/#39：service lb_ingress（status.loadBalancer 首条目）IP 形态→aliyun_clb.address、hostname 形态→aliyun_nlb.dns_name（ipaddress 解析区分）；kind=lb 槽位与 selector 边隔离；selector 边改 kind=selector + 按描述删除（兼容存量 kind='' 边）；云侧 CLB/NLB upsert 时 adopt_service_lb_edges 反向孤儿认领。repo 加 find_by_field_text（JSONB astext 匹配）/delete_relates_to_by_source_description |
 | 34 | **模型录入与桥接边全景闭环**（2026-08-25 实测） | 34 模型 / 198 字段 / 56 关系全部录齐（ingress #57/#58、gcp_redis 补录收尾）；§2 字段修正清零、§2.5 裁决全落地（amqp support_node/port 已删、serverless option 已补、ecs.memory_gb/dns_zone.dns_servers 已重建）。生产规模：存活资源 1048（aliyun 701/gcp 347）、belongs_to 989 条。**未决仅**：① csi/lb/dnat kind 边生产验证（代码已闭环，kind 分布实测仅 bind=5，需后端部署生效后观察）；② rds 单/双连接地址决策（§2.5 #3）；③ dns→ingress 解析目标变体（锚点已就绪）；④ ECS disk_size_gb 补采（可选） |
 | 35 | **AWS 采集器全量实现**（2026-09-09） | boto3（wheel 核对 service-2.json/paginators）：ec2 describe_vpcs/addresses（无分页器单调用全量）/instances（NextToken）/security_groups（NextToken）；s3 list_buckets（ContinuationToken）+ 逐桶 acl 推断（AllUsers grants→canned）/versioning/public_access_block（NoSuchPublicAccessBlockConfiguration benign→False）；cloudfront list_distributions（Marker/IsTruncated，全局资源）；elb classic describe_load_balancers（Marker）；alb elbv2 过滤 Type=application + listeners/rules/target_groups/target_health 链。accounts.yaml aws 条目用 access_key_id/secret_access_key（+可选 session_token），SUPPORTED_PROVIDERS 加 aws；regions 空=ec2 describe_regions 自动发现（过滤 not-opted-in）。provider_id：全局唯一 ID 裸用，elb/alb 用 {region}/{name}（撞键纪律）；SG rules 与 aliyun 同构 + compute_rules_hash；无状态资源（eip/sg/elb/s3）status=None。消费端：_rebuild_aws_relate_slot 通用槽位重建（ec2→sg、eip→ec2 kind=bind、elb/alb→ec2 负载均衡后端）、_rebuild_cloudfront_origin_edges 分发源（#71）、dns_record 解析目标 candidates 扩展 aws、EKS 节点承载于（_resolve_host_for_node 加 aws） |
+| 36 | **RDS 连接地址内外网分列 + 代理地址落地**（2026-09-08） | §2.5 #3 决策闭环：旧单字段 connection_string（公网覆盖内网语义）废弃，改 private_connection_string/public_connection_string 分列（附录 A 规格落地，**UI 待补录三字段：private/public_connection_string + proxy_endpoint，并删旧 connection_string**）；采集器一次 NetInfo 按 IPType=Private/Public/Proxy 拆分（代理地址也在 NetInfo，免调 DescribeDBProxy）；port 回归内网端口语义；生产库实测 6 实例全部内网地址（无 .pub. 形态），公网/代理字段待实例开启后自动补全 |
