@@ -285,10 +285,13 @@ class GroupResponse(BaseModel):
 
 
 class OncallCreate(BaseModel):
-    """创建值班排班请求。"""
+    """创建值班排班请求（支持日期范围批量建单）。"""
 
     group_id: int
-    oncall_date: datetime = Field(description="值班日期")
+    oncall_date: datetime = Field(description="值班日期（范围建单时为起始日）")
+    end_date: datetime | None = Field(
+        default=None, description="结束日期（含）；空=仅 oncall_date 单日",
+    )
     tier1: list[int] = Field(default_factory=list, description="一线值班用户 ID")
     tier2: list[int] = Field(default_factory=list, description="二线支持用户 ID")
     tier3: list[int] = Field(default_factory=list, description="三线支持用户 ID")

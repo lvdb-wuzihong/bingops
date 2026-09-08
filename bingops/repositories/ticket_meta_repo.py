@@ -100,6 +100,18 @@ class OncallScheduleRepo:
         )
         return result.scalar_one_or_none()
 
+    async def get_by_ids(self, schedule_ids: list[int]) -> list[OncallSchedule]:
+        """批量重查（带 group 预加载），范围建单提交后回显用。"""
+        if not schedule_ids:
+            return []
+        result = await self._session.execute(
+            select(OncallSchedule)
+            .options(selectinload(OncallSchedule.group))
+            .where(OncallSchedule.id.in_(schedule_ids))
+            .order_by(OncallSchedule.oncall_date.asc())
+        )
+        return list(result.scalars().all())
+
     async def get_by_group_and_date(
         self, group_id: int, oncall_date: date,
     ) -> OncallSchedule | None:

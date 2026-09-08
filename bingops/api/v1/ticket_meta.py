@@ -251,10 +251,21 @@ async def create_oncall(
     session: AsyncSession = Depends(get_db_session),
     _user: User = require_permission("oncall:create"),
 ):
-    """创建值班排班（同组同日期唯一）。"""
-    schedule = await ticket_meta_service.create_oncall(session, payload)
+    """创建值班排班（支持日期范围批量；同组同日期唯一，范围内已排班日跳过并回报）。"""
+    created, skipped = await ticket_meta_service.create_oncall(session, payload)
+    if payload.end_date is None:
+        return success_response(
+            data=_oncall_to_response(created[0]),
+            message="Oncall schedule created",
+            http_status=201,
+        )
     return success_response(
-        data=_oncall_to_response(schedule), message="Oncall schedule created", http_status=201,
+        data={
+            "created": [_oncall_to_response(s) for s in created],
+            "skipped": [d.isoformat() for d in skipped],
+        },
+        message=f"{len(created)} oncall schedules created, {len(skipped)} days skipped",
+        http_status=201,
     )
 
 

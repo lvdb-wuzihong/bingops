@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -254,8 +254,17 @@ async def list_oncall(
     )
 
 
-async def create_oncall(session: AsyncSession, payload: OncallCreate) -> OncallSchedule:
-    """创建值班排班（同组同日期唯一）。"""
+# 范围建单上限（天）：防误操作一次排超长区间
+MAX_ONCALL_RANGE_DAYS = 31
+
+
+async def create_oncall(
+    session: AsyncSession, payload: OncallCreate,
+) -> tuple[list[OncallSchedule], list[date]]:
+    """创建值班排班；end_date 非空时按天展开批量创建（范围录入、按天存储）。
+
+    范围内已排班的日期跳过并经 skipped 回报；单日模式（end_date 空）保留 409 语义。
+    """
     group = await TicketGroupRepo(session).get_by_id(payload.group_id)
     if group is None:
         raise NotFoundError("TicketGroup", str(payload.group_id))
@@ -266,36 +275,61 @@ async def create_oncall(session: AsyncSession, payload: OncallCreate) -> OncallS
             f"oncall users not in group members: {sorted(outside)}",
         )
 
-    repo = OncallScheduleRepo(session)
-    oncall_date = payload.oncall_date.date()
-    existing = await repo.get_by_group_and_date(payload.group_id, oncall_date)
-    if existing is not None:
-        raise ConflictError(
-            "OncallSchedule",
-            f"schedule already exists for group {payload.group_id} on {oncall_date}",
+    start = payload.oncall_date.date()
+    end = payload.end_date.date() if payload.end_date is not None else start
+    if end < start:
+        raise ValidationError("end_date must not be earlier than oncall_date")
+    span = (end - start).days + 1
+    if span > MAX_ONCALL_RANGE_DAYS:
+        raise ValidationError(
+            f"oncall range too long: {span} days (max {MAX_ONCALL_RANGE_DAYS})",
         )
 
-    schedule = OncallSchedule(
-        group_id=payload.group_id,
-        oncall_date=oncall_date,
-        tier1=payload.tier1,
-        tier2=payload.tier2,
-        tier3=payload.tier3,
-        note=payload.note,
-    )
-    schedule = await repo.create(schedule)
+    repo = OncallScheduleRepo(session)
+    created_ids: list[int] = []
+    skipped: list[date] = []
+    for offset in range(span):
+        day = start + timedelta(days=offset)
+        existing = await repo.get_by_group_and_date(payload.group_id, day)
+        if existing is not None:
+            if payload.end_date is None:
+                raise ConflictError(
+                    "OncallSchedule",
+                    f"schedule already exists for group {payload.group_id} on {day}",
+                )
+            skipped.append(day)
+            continue
+        schedule = await repo.create(OncallSchedule(
+            group_id=payload.group_id,
+            oncall_date=day,
+            tier1=payload.tier1,
+            tier2=payload.tier2,
+            tier3=payload.tier3,
+            note=payload.note,
+        ))
+        created_ids.append(schedule.id)
+
+    if not created_ids:
+        raise ConflictError(
+            "OncallSchedule",
+            f"range {start}~{end} already fully scheduled for group {payload.group_id}",
+        )
     await session.commit()
 
     # 提交后重查（带 selectinload group），避免响应层懒加载触发 MissingGreenlet
-    reloaded = await repo.get_by_id(schedule.id)
-    if reloaded is not None:
-        schedule = reloaded
+    created = await repo.get_by_ids(created_ids)
 
     logger.info(
         "Oncall schedule created",
-        extra={"schedule_id": schedule.id, "group_id": payload.group_id, "date": str(oncall_date)},
+        extra={
+            "group_id": payload.group_id,
+            "date_from": str(start),
+            "date_to": str(end),
+            "created_count": len(created),
+            "skipped_count": len(skipped),
+        },
     )
-    return schedule
+    return created, skipped
 
 
 async def update_oncall(

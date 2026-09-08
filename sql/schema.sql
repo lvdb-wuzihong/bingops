@@ -323,6 +323,59 @@ CREATE INDEX idx_cmdb_change_type     ON cmdb_change_logs (change_type);
 CREATE INDEX idx_cmdb_change_time     ON cmdb_change_logs (created_at);
 
 -- ============================================================================
+-- 任务系统 runbook 定义（前置于工单系统：tickets.runbook_id 与
+-- job_executions.runbook_id 外键依赖 runbooks，初始化顺序必须先建）
+-- ============================================================================
+
+CREATE TABLE runbooks (
+    id            BIGSERIAL PRIMARY KEY,
+    name          VARCHAR(128) NOT NULL UNIQUE,
+    category      VARCHAR(64),
+    description   TEXT,
+    params_schema JSONB        NOT NULL DEFAULT '{}',
+    steps         JSONB        NOT NULL DEFAULT '[]',
+    connection    JSONB        NOT NULL DEFAULT '{}',   -- {ssh_user, ssh_key_ref, become, become_method, become_user}
+    target_models JSONB        NOT NULL DEFAULT '["aliyun_ecs", "gcp_compute"]',
+    version       INT          NOT NULL DEFAULT 1,
+    risk_level    VARCHAR(16)  NOT NULL DEFAULT 'low',
+    auto_rollback BOOLEAN      NOT NULL DEFAULT FALSE,
+    is_active     BOOLEAN      NOT NULL DEFAULT TRUE,
+    created_by    BIGINT       REFERENCES users(id) ON DELETE SET NULL,
+    created_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    updated_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+-- 工单处理组（派单/值班的最小单位，与 RBAC 角色解耦；前置：
+-- ticket_catalog.default_group_id 与 tickets.group_id 外键依赖）
+CREATE TABLE ticket_groups (
+    id          BIGSERIAL PRIMARY KEY,
+    name        VARCHAR(128) NOT NULL UNIQUE,
+    description TEXT,
+    members     JSONB        NOT NULL DEFAULT '[]',   -- 用户 ID 数组
+    is_active   BOOLEAN      NOT NULL DEFAULT TRUE,
+    created_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    updated_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+-- 两级服务目录（parent_id=NULL 为一级分类；事项挂难度/默认风险/默认类型/默认处理组；
+-- 前置：tickets.catalog_item_id 外键依赖）
+CREATE TABLE ticket_catalog (
+    id                 BIGSERIAL PRIMARY KEY,
+    name               VARCHAR(128) NOT NULL UNIQUE,
+    parent_id          BIGINT       REFERENCES ticket_catalog(id) ON DELETE CASCADE,
+    description        TEXT,
+    difficulty         VARCHAR(16)  NOT NULL DEFAULT 'simple',  -- simple|medium|hard
+    default_risk       VARCHAR(16)  NOT NULL DEFAULT 'low',     -- low|medium|high
+    default_type       VARCHAR(32)  NOT NULL DEFAULT 'request', -- 语义 ticket_type
+    default_group_id   BIGINT       REFERENCES ticket_groups(id), -- 默认处理组（路由配置化）
+    is_active          BOOLEAN      NOT NULL DEFAULT TRUE,
+    sort_order         INT          NOT NULL DEFAULT 0,
+    created_at         TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    updated_at         TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+CREATE INDEX idx_ticket_catalog_parent ON ticket_catalog (parent_id);
+
+-- ============================================================================
 -- 工单系统
 -- ============================================================================
 
@@ -343,8 +396,8 @@ CREATE TABLE tickets (
     code_ref            VARCHAR(128),                            -- git tag 快照（同 job_executions）
     approval_status     VARCHAR(16),                             -- none|pending|approved|rejected
     risk_level          VARCHAR(16)  NOT NULL DEFAULT 'low',     -- 事项 default_risk 快照，驱动审批门控
-    catalog_item_id     BIGINT,       -- 服务目录事项（二级，FK 于表定义后补建）
-    group_id            BIGINT,
+    catalog_item_id     BIGINT       REFERENCES ticket_catalog(id), -- 服务目录事项（二级）
+    group_id            BIGINT       REFERENCES ticket_groups(id),  -- 处理组路由
     difficulty          VARCHAR(16),                             -- 建单时从目录快照 simple|medium|hard
     started_at          TIMESTAMPTZ,                             -- 开始处理时间（响应时长计算）
     target_resource_ids JSONB        NOT NULL DEFAULT '[]',      -- 执行目标资源 ID 列表（运维下发时填写，多选唯一入口）
@@ -405,34 +458,6 @@ CREATE TABLE change_freezes (
 
 CREATE INDEX idx_change_freeze_time ON change_freezes (starts_at, ends_at);
 
--- 两级服务目录（parent_id=NULL 为一级分类；事项挂难度/默认风险/默认类型/默认 runbook）
-CREATE TABLE ticket_catalog (
-    id                 BIGSERIAL PRIMARY KEY,
-    name               VARCHAR(128) NOT NULL UNIQUE,
-    parent_id          BIGINT       REFERENCES ticket_catalog(id) ON DELETE CASCADE,
-    description        TEXT,
-    difficulty         VARCHAR(16)  NOT NULL DEFAULT 'simple',  -- simple|medium|hard
-    default_risk       VARCHAR(16)  NOT NULL DEFAULT 'low',     -- low|medium|high
-    default_type       VARCHAR(32)  NOT NULL DEFAULT 'request', -- 语义 ticket_type
-    default_group_id   BIGINT       REFERENCES ticket_groups(id), -- 默认处理组（路由配置化）
-    is_active          BOOLEAN      NOT NULL DEFAULT TRUE,
-    sort_order         INT          NOT NULL DEFAULT 0,
-    created_at         TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    updated_at         TIMESTAMPTZ  NOT NULL DEFAULT NOW()
-);
-CREATE INDEX idx_ticket_catalog_parent ON ticket_catalog (parent_id);
-
--- 工单处理组（派单/值班的最小单位，与 RBAC 角色解耦）
-CREATE TABLE ticket_groups (
-    id          BIGSERIAL PRIMARY KEY,
-    name        VARCHAR(128) NOT NULL UNIQUE,
-    description TEXT,
-    members     JSONB        NOT NULL DEFAULT '[]',   -- 用户 ID 数组
-    is_active   BOOLEAN      NOT NULL DEFAULT TRUE,
-    created_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    updated_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW()
-);
-
 -- 运维值班表（日期 × 组 × 三线支持；tier1 自动派单来源，tier3 变更审批来源）
 CREATE TABLE oncall_schedules (
     id          BIGSERIAL PRIMARY KEY,
@@ -448,35 +473,9 @@ CREATE TABLE oncall_schedules (
 );
 CREATE INDEX idx_oncall_date ON oncall_schedules (oncall_date);
 
--- tickets 对目录/处理组的外键（表定义顺序原因，后置补建）
-ALTER TABLE tickets
-    ADD CONSTRAINT fk_tickets_catalog_item
-    FOREIGN KEY (catalog_item_id) REFERENCES ticket_catalog(id);
-ALTER TABLE tickets
-    ADD CONSTRAINT fk_tickets_group
-    FOREIGN KEY (group_id) REFERENCES ticket_groups(id);
-
 -- ============================================================================
--- 任务系统（runbook + job 执行引擎，设计见 docs/task-system-design.md）
+-- 任务系统 job 执行明细
 -- ============================================================================
-
-CREATE TABLE runbooks (
-    id            BIGSERIAL PRIMARY KEY,
-    name          VARCHAR(128) NOT NULL UNIQUE,
-    category      VARCHAR(64),
-    description   TEXT,
-    params_schema JSONB        NOT NULL DEFAULT '{}',
-    steps         JSONB        NOT NULL DEFAULT '[]',
-    connection    JSONB        NOT NULL DEFAULT '{}',   -- {ssh_user, ssh_key_ref, become, become_method, become_user}
-    target_models JSONB        NOT NULL DEFAULT '["aliyun_ecs", "gcp_compute"]',
-    version       INT          NOT NULL DEFAULT 1,
-    risk_level    VARCHAR(16)  NOT NULL DEFAULT 'low',
-    auto_rollback BOOLEAN      NOT NULL DEFAULT FALSE,
-    is_active     BOOLEAN      NOT NULL DEFAULT TRUE,
-    created_by    BIGINT       REFERENCES users(id) ON DELETE SET NULL,
-    created_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    updated_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW()
-);
 
 CREATE TABLE job_executions (
     id               BIGSERIAL PRIMARY KEY,
