@@ -550,6 +550,17 @@ CREATE TABLE monitoring_sources (
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE notify_channels (
+    id         BIGSERIAL PRIMARY KEY,
+    name       VARCHAR(64)  NOT NULL UNIQUE,   -- 渠道名称（如 feishu-prod-group）
+    type       VARCHAR(16)  NOT NULL,          -- feishu_webhook（预留 dingtalk|wecom 扩展）
+    secret_ref VARCHAR(128) NOT NULL,          -- webhook URL 凭据引用名（URL 含 secret）
+    extra      JSONB NOT NULL DEFAULT '{}',    -- 非敏感参数（@手机号列表等）
+    enabled    BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE alert_events (
     id             BIGSERIAL PRIMARY KEY,
     source         VARCHAR(32)  NOT NULL,
@@ -600,6 +611,7 @@ CREATE TABLE alert_rules (
     detail_limit          INT        NOT NULL DEFAULT 10,
     grafana_url           TEXT,
     feishu_card_template  JSONB,
+    notify_channel_id     BIGINT REFERENCES notify_channels(id),
     created_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     updated_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     CONSTRAINT uq_alert_rules_source_code UNIQUE (source, code)
@@ -631,7 +643,8 @@ BEGIN
             'runbooks', 'job_executions', 'job_steps',
             'change_freezes',
             'ticket_catalog', 'ticket_groups', 'oncall_schedules',
-            'monitoring_sources', 'alert_events', 'alert_rules'
+            'monitoring_sources', 'alert_events', 'alert_rules',
+            'notify_channels'
         ])
     LOOP
         EXECUTE format(
@@ -757,7 +770,11 @@ INSERT INTO permissions (code, name) VALUES
 ('monitoring_source:list',   '查看监控数据源'),
 ('monitoring_source:create', '创建监控数据源'),
 ('monitoring_source:update', '更新监控数据源'),
-('monitoring_source:delete', '删除监控数据源')
+('monitoring_source:delete', '删除监控数据源'),
+('notify_channel:list',   '查看通知渠道'),
+('notify_channel:create', '创建通知渠道'),
+('notify_channel:update', '更新通知渠道'),
+('notify_channel:delete', '删除通知渠道')
 ON CONFLICT (code) DO NOTHING;
 
 -- admin 角色分配所有权限（须在全部权限插入后执行）

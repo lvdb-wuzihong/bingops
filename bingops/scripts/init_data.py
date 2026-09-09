@@ -114,6 +114,10 @@ PERMISSIONS: list[tuple[str, str]] = [
     ("monitoring_source:create", "创建监控数据源"),
     ("monitoring_source:update", "更新监控数据源"),
     ("monitoring_source:delete", "删除监控数据源"),
+    ("notify_channel:list", "查看通知渠道"),
+    ("notify_channel:create", "创建通知渠道"),
+    ("notify_channel:update", "更新通知渠道"),
+    ("notify_channel:delete", "删除通知渠道"),
 ]
 
 ROLES: list[tuple[str, str, str, bool]] = [

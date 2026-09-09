@@ -11,13 +11,14 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
-from bingops.models.alert import AlertEvent, AlertRule, MonitoringSource
+from bingops.models.alert import AlertEvent, AlertRule, MonitoringSource, NotifyChannel
 
 VALID_SOURCES = ("ck-log-alert", "n9e")
 VALID_STATUSES = ("firing", "resolved", "error")
 VALID_SEVERITIES = (1, 2, 3)
 VALID_GROUP_BYS = ("source", "rule_code", "group_id", "day")
 VALID_SOURCE_TYPES = ("clickhouse", "victoria", "prometheus")
+VALID_CHANNEL_TYPES = ("feishu_webhook",)
 
 
 # ── Webhook 契约 ──────────────────────────────────────────────────────────────
@@ -89,6 +90,9 @@ class AlertRuleCreate(BaseModel):
     detail_limit: int = Field(default=10, ge=1)
     grafana_url: str | None = None
     feishu_card_template: dict | None = None
+    notify_channel_id: int | None = Field(
+        default=None, description="绑定通知渠道（空 = 通知由执行器默认处理）",
+    )
 
 
 class AlertRuleUpdate(BaseModel):
@@ -107,6 +111,7 @@ class AlertRuleUpdate(BaseModel):
     detail_limit: int | None = Field(default=None, ge=1)
     grafana_url: str | None = None
     feishu_card_template: dict | None = None
+    notify_channel_id: int | None = None
 
 
 class AlertRuleResponse(BaseModel):
@@ -128,6 +133,7 @@ class AlertRuleResponse(BaseModel):
     detail_limit: int
     grafana_url: str | None
     feishu_card_template: dict | None
+    notify_channel_id: int | None
     created_at: datetime
     updated_at: datetime
 
@@ -207,6 +213,7 @@ def rule_to_response(rule: AlertRule) -> dict:
         detail_limit=rule.detail_limit,
         grafana_url=rule.grafana_url,
         feishu_card_template=rule.feishu_card_template,
+        notify_channel_id=rule.notify_channel_id,
         created_at=rule.created_at,
         updated_at=rule.updated_at,
     ).model_dump(mode="json")
@@ -297,6 +304,15 @@ class AgentSourceConfig(BaseModel):
     secure: bool
 
 
+class AgentNotifyChannel(BaseModel):
+    """分发体中的通知渠道（secret_ref 引用，发送动作在执行器）。"""
+
+    name: str
+    type: str
+    secret_ref: str
+    extra: dict
+
+
 class AgentRuleConfig(BaseModel):
     """分发体中的单条启用规则。"""
 
@@ -316,9 +332,56 @@ class AgentRuleConfig(BaseModel):
     feishu_card_template: dict | None
     notify_enabled: bool
     source: AgentSourceConfig | None = None
+    notify_channel: AgentNotifyChannel | None = None
 
 
 class AgentConfigResponse(BaseModel):
     """GET /api/v1/alerts/agent/config 响应体。"""
 
     rules: list[AgentRuleConfig]
+
+
+# ── 通知渠道 DTO ─────────────────────────────────────────────────────────────
+
+
+class NotifyChannelCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=64)
+    type: Literal["feishu_webhook"]
+    secret_ref: str = Field(
+        min_length=1, max_length=128,
+        description="webhook URL 凭据引用名（URL 含 secret，平台不落真地址）",
+    )
+    extra: dict = Field(default_factory=dict, description="非敏感参数（@手机号列表等）")
+    enabled: bool = True
+
+
+class NotifyChannelUpdate(BaseModel):
+    type: Literal["feishu_webhook"] | None = None
+    secret_ref: str | None = Field(default=None, max_length=128)
+    extra: dict | None = None
+    enabled: bool | None = None
+
+
+class NotifyChannelResponse(BaseModel):
+    id: int
+    name: str
+    type: str
+    secret_ref: str
+    extra: dict
+    enabled: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+def channel_to_response(channel: NotifyChannel) -> dict:
+    """ORM 通知渠道转响应字典。"""
+    return NotifyChannelResponse(
+        id=channel.id,
+        name=channel.name,
+        type=channel.type,
+        secret_ref=channel.secret_ref,
+        extra=channel.extra or {},
+        enabled=channel.enabled,
+        created_at=channel.created_at,
+        updated_at=channel.updated_at,
+    ).model_dump(mode="json")

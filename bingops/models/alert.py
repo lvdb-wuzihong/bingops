@@ -110,12 +110,29 @@ class MonitoringSource(BaseMixin, Base):
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
 
+class NotifyChannel(BaseMixin, Base):
+    """告警通知渠道登记（发送动作仍在执行器，平台只登记配置并随分发体下发）。
+
+    凭据红线：webhook URL 含 secret，只存 secret_ref 引用名，真 URL 在执行器侧 env。
+    """
+
+    __tablename__ = "notify_channels"
+
+    name: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    # feishu_webhook（预留 dingtalk | wecom 扩展）
+    type: Mapped[str] = mapped_column(String(16), nullable=False)
+    secret_ref: Mapped[str] = mapped_column(String(128), nullable=False)
+    extra: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)  # @手机号等
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
+
 class AlertRule(BaseMixin, Base):
     """告警规则（二期起为分发源：绑定数据源 + 评估契约字段）。
 
     code 对齐执行器侧 rule_code，是两侧唯一对齐键，变更须人工同步（二期分发后消除）。
     eval_sql 契约：单行两列 error_count + log_details（存量 ck-log-alert SQL 原样可贴）。
     for_rounds：连续 M 轮达标才报 firing（防抖，执行器侧实现，平台无 pending 态）。
+    notify_channel_id 可空：空 = 分发体不带渠道，通知由执行器默认处理。
     """
 
     __tablename__ = "alert_rules"
@@ -146,3 +163,6 @@ class AlertRule(BaseMixin, Base):
     detail_limit: Mapped[int] = mapped_column(Integer, nullable=False, default=10)
     grafana_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     feishu_card_template: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    notify_channel_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("notify_channels.id"), nullable=True,
+    )

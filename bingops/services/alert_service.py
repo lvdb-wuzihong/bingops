@@ -23,7 +23,12 @@ from bingops.core.exceptions import (
     PermissionDeniedError,
     ValidationError,
 )
-from bingops.models.alert import AlertEvent, AlertRule, MonitoringSource
+from bingops.models.alert import (
+    AlertEvent,
+    AlertRule,
+    MonitoringSource,
+    NotifyChannel,
+)
 from bingops.models.cmdb.resource import CmdbResource
 from bingops.models.ticket import Ticket
 from bingops.models.user import User
@@ -31,10 +36,12 @@ from bingops.repositories.alert_repo import (
     AlertEventRepo,
     AlertRuleRepo,
     MonitoringSourceRepo,
+    NotifyChannelRepo,
 )
 from bingops.schemas.alert import (
     VALID_SEVERITIES,
     AgentConfigResponse,
+    AgentNotifyChannel,
     AgentRuleConfig,
     AgentSourceConfig,
     AlertRuleCreate,
@@ -42,6 +49,8 @@ from bingops.schemas.alert import (
     AlertWebhookPayload,
     MonitoringSourceCreate,
     MonitoringSourceUpdate,
+    NotifyChannelCreate,
+    NotifyChannelUpdate,
 )
 
 logger = logging.getLogger(f"bingops.{__name__}")
@@ -447,6 +456,7 @@ async def create_rule(session: AsyncSession, payload: AlertRuleCreate) -> AlertR
         detail_limit=payload.detail_limit,
         grafana_url=payload.grafana_url,
         feishu_card_template=payload.feishu_card_template,
+        notify_channel_id=payload.notify_channel_id,
     ))
     await session.commit()
     logger.info(
@@ -468,6 +478,8 @@ async def update_rule(
         await _validate_group_exists(session, payload.group_id)
     if payload.source_id is not None:
         await _validate_source_exists(session, payload.source_id)
+    if payload.notify_channel_id is not None:
+        await _validate_channel_exists(session, payload.notify_channel_id)
 
     for field, value in payload.model_dump(exclude_unset=True).items():
         setattr(rule, field, value)
@@ -509,6 +521,24 @@ async def _validate_source_exists(
         return
     if await MonitoringSourceRepo(session).get_by_id(source_id) is None:
         raise NotFoundError("MonitoringSource", str(source_id))
+
+
+async def _validate_channel_exists(
+    session: AsyncSession, channel_id: int | None,
+) -> None:
+    if channel_id is None:
+        return
+    if await NotifyChannelRepo(session).get_by_id(channel_id) is None:
+        raise NotFoundError("NotifyChannel", str(channel_id))
+
+
+async def _validate_channel_exists(
+    session: AsyncSession, channel_id: int | None,
+) -> None:
+    if channel_id is None:
+        return
+    if await NotifyChannelRepo(session).get_by_id(channel_id) is None:
+        raise NotFoundError("NotifyChannel", str(channel_id))
 
 
 # ── 统计（§9） ───────────────────────────────────────────────────────────────
@@ -608,7 +638,7 @@ async def build_agent_config(session: AsyncSession) -> dict:
     """
     pairs = await AlertRuleRepo(session).list_agent_rules()
     rules: list[AgentRuleConfig] = []
-    for rule, src in pairs:
+    for rule, src, channel in pairs:
         rules.append(AgentRuleConfig(
             id=rule.id,
             code=rule.code,
@@ -635,6 +665,76 @@ async def build_agent_config(session: AsyncSession) -> dict:
                 password_ref=src.password_ref,
                 secure=src.secure,
             ),
+            # 渠道被禁用时置 None：通知由执行器默认处理（评估与回报照常）
+            notify_channel=(
+                AgentNotifyChannel(
+                    name=channel.name,
+                    type=channel.type,
+                    secret_ref=channel.secret_ref,
+                    extra=channel.extra or {},
+                )
+                if channel is not None and channel.enabled else None
+            ),
         ))
     logger.info("Agent config dispatched", extra={"rule_count": len(rules)})
     return AgentConfigResponse(rules=rules).model_dump(mode="json")
+
+
+# ── 通知渠道 CRUD（二期：§12 渠道登记，发送仍在执行器） ──────────────────────
+
+
+async def list_channels(session: AsyncSession) -> list[NotifyChannel]:
+    return await NotifyChannelRepo(session).list_all()
+
+
+async def create_channel(
+    session: AsyncSession, payload: NotifyChannelCreate,
+) -> NotifyChannel:
+    channel = await NotifyChannelRepo(session).create(NotifyChannel(
+        name=payload.name,
+        type=payload.type,
+        secret_ref=payload.secret_ref,
+        extra=payload.extra,
+        enabled=payload.enabled,
+    ))
+    await session.commit()
+    logger.info(
+        "Notify channel created",
+        extra={"channel_id": channel.id, "channel_name": channel.name},
+    )
+    return channel
+
+
+async def update_channel(
+    session: AsyncSession, channel_id: int, payload: NotifyChannelUpdate,
+) -> NotifyChannel:
+    channel = await NotifyChannelRepo(session).get_by_id(channel_id)
+    if channel is None:
+        raise NotFoundError("NotifyChannel", str(channel_id))
+
+    for field, value in payload.model_dump(exclude_unset=True).items():
+        setattr(channel, field, value)
+
+    channel = await NotifyChannelRepo(session).update(channel)
+    await session.commit()
+    logger.info("Notify channel updated", extra={"channel_id": channel_id})
+    return channel
+
+
+async def delete_channel(session: AsyncSession, channel_id: int) -> None:
+    """删除通知渠道；仍有规则绑定时阻断（避免规则通知悬空）。"""
+    channel = await NotifyChannelRepo(session).get_by_id(channel_id)
+    if channel is None:
+        raise NotFoundError("NotifyChannel", str(channel_id))
+
+    bound = await session.execute(
+        select(AlertRule.id).where(AlertRule.notify_channel_id == channel_id)
+    )
+    if bound.first() is not None:
+        raise ConflictError(
+            f"Notify channel {channel_id} is bound by alert rules"
+        )
+
+    await NotifyChannelRepo(session).delete(channel)
+    await session.commit()
+    logger.info("Notify channel deleted", extra={"channel_id": channel_id})

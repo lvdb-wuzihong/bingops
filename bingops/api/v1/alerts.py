@@ -25,6 +25,9 @@ from bingops.schemas.alert import (
     AlertWebhookPayload,
     MonitoringSourceCreate,
     MonitoringSourceUpdate,
+    NotifyChannelCreate,
+    NotifyChannelUpdate,
+    channel_to_response,
     event_to_response,
     rule_to_response,
     source_to_response,
@@ -34,6 +37,9 @@ from bingops.services import alert_service
 router = APIRouter(prefix="/api/v1/alerts", tags=["alerts"])
 source_router = APIRouter(
     prefix="/api/v1/monitoring-sources", tags=["monitoring-sources"],
+)
+channel_router = APIRouter(
+    prefix="/api/v1/notify-channels", tags=["notify-channels"],
 )
 
 
@@ -232,4 +238,51 @@ async def delete_monitoring_source(
 ) -> dict:
     """删除监控数据源（有启用规则绑定时阻断，避免孤儿规则）。"""
     await alert_service.delete_source(session, source_id)
+    return success_response(message="deleted")
+
+
+# ── 通知渠道 CRUD（/api/v1/notify-channels） ──────────────────────────
+
+
+@channel_router.get("")
+async def list_notify_channels(
+    session: AsyncSession = Depends(get_db_session),
+    _user: User = require_permission("notify_channel:list"),
+) -> dict:
+    """通知渠道列表（凭据只含引用名；发送动作在执行器）。"""
+    channels = await alert_service.list_channels(session)
+    return success_response(data=[channel_to_response(ch) for ch in channels])
+
+
+@channel_router.post("")
+async def create_notify_channel(
+    payload: NotifyChannelCreate,
+    session: AsyncSession = Depends(get_db_session),
+    _user: User = require_permission("notify_channel:create"),
+) -> dict:
+    """登记通知渠道。"""
+    channel = await alert_service.create_channel(session, payload)
+    return success_response(data=channel_to_response(channel), message="created")
+
+
+@channel_router.put("/{channel_id}")
+async def update_notify_channel(
+    channel_id: int,
+    payload: NotifyChannelUpdate,
+    session: AsyncSession = Depends(get_db_session),
+    _user: User = require_permission("notify_channel:update"),
+) -> dict:
+    """更新通知渠道（凭据引用/启停）。"""
+    channel = await alert_service.update_channel(session, channel_id, payload)
+    return success_response(data=channel_to_response(channel))
+
+
+@channel_router.delete("/{channel_id}")
+async def delete_notify_channel(
+    channel_id: int,
+    session: AsyncSession = Depends(get_db_session),
+    _user: User = require_permission("notify_channel:delete"),
+) -> dict:
+    """删除通知渠道（有规则绑定时阻断，避免规则通知悬空）。"""
+    await alert_service.delete_channel(session, channel_id)
     return success_response(message="deleted")

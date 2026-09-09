@@ -9,7 +9,12 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bingops.core.exceptions import ConflictError
-from bingops.models.alert import AlertEvent, AlertRule, MonitoringSource
+from bingops.models.alert import (
+    AlertEvent,
+    AlertRule,
+    MonitoringSource,
+    NotifyChannel,
+)
 
 # 统计分组的列映射（day 维度按 first_seen_at 截断到天）
 _GROUP_DIMS = {
@@ -180,16 +185,26 @@ class AlertRuleRepo:
         )
         return result.scalar_one_or_none()
 
-    async def list_agent_rules(self) -> list[tuple[AlertRule, MonitoringSource]]:
-        """启用规则 + 启用数据源联查（分发体输入；未绑定源的规则不分发）。"""
+    async def list_all(self) -> list[AlertRule]:
+        result = await self.session.execute(select(AlertRule).order_by(AlertRule.id))
+        return list(result.scalars().all())
+
+    async def list_agent_rules(
+        self,
+    ) -> list[tuple[AlertRule, MonitoringSource, NotifyChannel | None]]:
+        """启用规则 + 启用数据源联查（分发体输入；未绑定源的规则不分发）。
+
+        渠道为 LEFT JOIN：未绑定渠道或渠道被禁用时返回 None（通知由执行器默认处理）。
+        """
         query = (
-            select(AlertRule, MonitoringSource)
+            select(AlertRule, MonitoringSource, NotifyChannel)
             .join(MonitoringSource, AlertRule.source_id == MonitoringSource.id)
+            .outerjoin(NotifyChannel, AlertRule.notify_channel_id == NotifyChannel.id)
             .where(AlertRule.enabled.is_(True), MonitoringSource.enabled.is_(True))
             .order_by(AlertRule.id)
         )
         result = await self.session.execute(query)
-        return [(row[0], row[1]) for row in result.all()]
+        return [(row[0], row[1], row[2]) for row in result.all()]
 
 
 class MonitoringSourceRepo:
@@ -221,5 +236,38 @@ class MonitoringSourceRepo:
     async def list_all(self) -> list[MonitoringSource]:
         result = await self.session.execute(
             select(MonitoringSource).order_by(MonitoringSource.id)
+        )
+        return list(result.scalars().all())
+
+
+class NotifyChannelRepo:
+    def __init__(self, session: AsyncSession) -> None:
+        self.session = session
+
+    async def create(self, channel: NotifyChannel) -> NotifyChannel:
+        self.session.add(channel)
+        try:
+            await self.session.flush()
+        except IntegrityError as exc:
+            raise ConflictError(f"notify channel already exists: {channel.name}") from exc
+        return channel
+
+    async def update(self, channel: NotifyChannel) -> NotifyChannel:
+        await self.session.flush()
+        return channel
+
+    async def delete(self, channel: NotifyChannel) -> None:
+        await self.session.delete(channel)
+        await self.session.flush()
+
+    async def get_by_id(self, channel_id: int) -> NotifyChannel | None:
+        result = await self.session.execute(
+            select(NotifyChannel).where(NotifyChannel.id == channel_id)
+        )
+        return result.scalar_one_or_none()
+
+    async def list_all(self) -> list[NotifyChannel]:
+        result = await self.session.execute(
+            select(NotifyChannel).order_by(NotifyChannel.id)
         )
         return list(result.scalars().all())
