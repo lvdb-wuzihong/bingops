@@ -275,6 +275,15 @@ def report_event(cfg: dict, rule: dict, status: str, total: int,
 
 二期实施：**ck-log-alert 仅作逻辑参考，不改造**；分发 API 按执行器 agent 身份（静态 token，复用 X-Agent-Token）拉取启用规则 + 源引用（只带引用不带凭据），eval_sql 契约为单行两列 error_count + log_details（存量 SQL 原样可贴）；`config.yaml` 退役；notify 协议转正；stale 超时可被执行器真实 resolved 事件取代；新增 `alert_mutes` 屏蔽表（labels 匹配 + 时间窗，与变更封禁窗口联动）与 firing 升级策略（持续未响应升级通知，WatchAlert escalation 同款）。卡片模板作为配置数据进 alert_rules（执行器拉取后自行渲染发送），**通知仍由执行器发送**，平台不建通知媒介（三期再议）。
 
+**凭据取值约定（执行器侧实现）**：`password_ref` / `secret_ref` 是执行器侧 env 变量名，取值 `os.environ[ref]`；约定值 **`NO_AUTH`** = 数据源无认证，连接时不带凭据（仅限内网/白名单可达，加认证后改为 env 变量名）：
+
+```python
+def resolve_credential(ref: str) -> str | None:
+    if ref == "NO_AUTH":
+        return None          # 不带认证参数
+    return os.environ[ref]   # 缺失则 fail fast，不静默降级
+```
+
 三期触发条件（评估循环是否内聚进平台再议）：多 VPC 多执行器实例化 / 规则数显著增长 / 执行器已薄至「拉取 → 评估 → 回报」三步。届时成本 = 三大件（评估调度器 + 多副本协调、数据源查询客户端、飞书通知媒介进平台），收益 = 少维护一个执行器组件；故障域耦合（平台发版 = 告警盲窗）是永久代价，由真实数据权衡。
 
 ## 13. 实施顺序

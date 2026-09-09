@@ -19,6 +19,9 @@ VALID_SEVERITIES = (1, 2, 3)
 VALID_GROUP_BYS = ("source", "rule_code", "group_id", "day")
 VALID_SOURCE_TYPES = ("clickhouse", "victoria", "prometheus")
 VALID_CHANNEL_TYPES = ("feishu_webhook",)
+# 凭据约定：password_ref/secret_ref 填此值 = 数据源无认证（执行器连接时不带凭据）；
+# 仅限内网/白名单可达的数据源使用，加认证后应改为 env 变量名
+NO_AUTH_REF = "NO_AUTH"
 
 
 # ── Webhook 契约 ──────────────────────────────────────────────────────────────
@@ -231,7 +234,8 @@ class MonitoringSourceCreate(BaseModel):
     username: str | None = Field(default=None, max_length=64)
     password_ref: str = Field(
         min_length=1, max_length=128,
-        description="凭据引用名（真凭据在执行器侧 env；平台不落密码）",
+        description="凭据引用名（执行器侧 env 变量名，平台不落密码）；"
+                    "数据源无认证时填 NO_AUTH（仅限内网/白名单可达）",
     )
     secure: bool = False
     region: str | None = Field(default=None, max_length=64)
