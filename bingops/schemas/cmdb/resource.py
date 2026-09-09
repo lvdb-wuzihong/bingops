@@ -42,7 +42,8 @@ class ResourceResponse(BaseModel):
     cloud_account: str | None = None
     region: str | None = None
     zone: str | None = None
-    status: str
+    # 可空：NULL = 该资源类型无生命周期状态（不适用），unknown = 有状态概念但识别失败
+    status: str | None = None
     fields: dict = Field(default_factory=dict)
     resource_version: str | None = None
     synced_at: datetime | None = None
