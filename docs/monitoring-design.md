@@ -196,6 +196,8 @@ error 回报 → 独立落行（status='error'），不进状态机、不开单�
 
 ## 7. 工单 / 值班联动
 
+> **全局总闸 `BINGOPS_ALERT_TICKET_ENABLED`（当前默认 false，用户决策：先不关联）**：关闭时告警只落事件与状态机，不创建/流转任何工单（`_try_open_ticket` / `_after_resolved` 直接短路）；开启后仍受规则级 `notify_enabled` 细粒度控制。
+
 - 首次 firing：按 `alert_rules.group_id` 找处理组 → 复用现有自动派单链路（当日值班 tier1 轮转优先，回退组成员轮转）自动开单；标题 `[告警] {rule_name}`，内容带时间窗、total_count、details 摘要、source/rule_code。
 - 同一活跃 firing 生命周期内**只开一张单**（唯一约束保证）；resolved 时工单按工单状态机流转至 resolved。
 - `notify_enabled=false` 的规则只落事件不开单（低噪规则白名单）。

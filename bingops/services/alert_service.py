@@ -247,9 +247,12 @@ async def _try_open_ticket(
 ) -> None:
     """首次 firing 自动开单：按规则映射处理组走现有值班自动派单链路。
 
+    全局总闸 alert_ticket_enabled 关闭时直接短路（告警不碰工单，用户决策）。
     未知 rule_code / notify_enabled=false / 操作者未配置 → 只记事件不开单
     （「有数无单」可观测可补配，而不是失败）。
     """
+    if not settings.alert_ticket_enabled:
+        return
     if rule is None:
         logger.warning(
             "Alert rule mapping not found, ticket skipped",
@@ -321,7 +324,12 @@ def _ticket_description(event: AlertEvent) -> str:
 
 
 async def _after_resolved(session: AsyncSession, event: AlertEvent) -> None:
-    """告警恢复后联动工单流转；未开单/操作者缺失/流转非法时降级为日志。"""
+    """告警恢复后联动工单流转；未开单/操作者缺失/流转非法时降级为日志。
+
+    全局总闸 alert_ticket_enabled 关闭时不碰工单（历史遗留关联也保持原状）。
+    """
+    if not settings.alert_ticket_enabled:
+        return
     if event.ticket_id is None:
         return
     operator = await _get_alert_operator(session)

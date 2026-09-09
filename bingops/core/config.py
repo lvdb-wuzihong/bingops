@@ -51,6 +51,9 @@ class Settings(BaseSettings):
     alert_agent_token: str = ""
     # 告警自动开单的系统操作者用户 ID；0 = 未配置，只记事件不开单
     alert_operator_id: int = 0
+    # 告警↔工单联动总闸（默认关闭：告警只落事件与状态机，不创建/流转任何工单；
+    # 开启后仍受规则级 notify_enabled 细粒度控制）
+    alert_ticket_enabled: bool = False
 
     # MCP（AI agent 数据面，设计见 docs/ai-agent-mcp-design.md）
     mcp_enabled: bool = False        # 挂载 /mcp 端点（streamable-http，无状态模式）
