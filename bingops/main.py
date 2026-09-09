@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
@@ -13,13 +14,12 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from fastapi.security import HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from bingops.api import dependencies
 from bingops.api.middleware.request_logging import RequestLoggingMiddleware
-from bingops.api.v1 import auth, jobs, roles, sd, tickets, users
-from bingops.api.v1.ticket_meta import catalog_router, group_router, oncall_router
+from bingops.api.v1 import alerts, auth, jobs, roles, sd, tickets, users
 from bingops.api.v1.cmdb import apps as cmdb_apps
 from bingops.api.v1.cmdb import changes as cmdb_changes
 from bingops.api.v1.cmdb import models as cmdb_models
@@ -27,6 +27,7 @@ from bingops.api.v1.cmdb import relationships as cmdb_relationships
 from bingops.api.v1.cmdb import resources as cmdb_resources
 from bingops.api.v1.cmdb import sync_tasks as cmdb_sync_tasks
 from bingops.api.v1.cmdb import tags as cmdb_tags
+from bingops.api.v1.ticket_meta import catalog_router, group_router, oncall_router
 from bingops.core.config import settings
 from bingops.core.exceptions import (
     AuthenticationError,
@@ -37,6 +38,7 @@ from bingops.core.exceptions import (
     ValidationError,
 )
 from bingops.core.logging import setup_logging
+from bingops.services import alert_service
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +50,7 @@ engine = create_async_engine(settings.database_url, echo=settings.debug, pool_si
 async_session_factory = async_sessionmaker(engine, expire_on_commit=False)
 
 
-async def get_async_session() -> AsyncGenerator[AsyncSession, None]:
+async def get_async_session() -> AsyncGenerator[AsyncSession]:
     """注入数据库会话。"""
     async with async_session_factory() as session:
         try:
@@ -60,7 +62,7 @@ async def get_async_session() -> AsyncGenerator[AsyncSession, None]:
 
 # ── 应用生命周期 ───────────────────────────────────────────────────────────────
 @asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     """启动/关闭钩子。"""
     # 启动时注入数据库会话依赖
     app.dependency_overrides[dependencies.get_db_session] = get_async_session
@@ -75,6 +77,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         from bingops.tasks.cmdb.startup import start_cmdb_kafka_consumer
         await start_cmdb_kafka_consumer(async_session_factory)
 
+    # 告警 stale 扫描（60s 周期，幂等 UPDATE，多副本无害；docs/monitoring-design.md §6）
+    alert_sweep_task = asyncio.create_task(
+        alert_service.alert_stale_sweep_loop(async_session_factory)
+    )
+
     # MCP streamable-http session manager 生命周期
     if settings.mcp_enabled:
         from bingops.mcp.server import mcp_lifespan
@@ -82,6 +89,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             yield
     else:
         yield
+
+    # 关闭时停止告警 stale 扫描
+    alert_sweep_task.cancel()
 
     # 关闭时停止 Kafka 消费者
     if settings.kafka_enabled:
@@ -160,6 +170,7 @@ app.include_router(catalog_router)
 app.include_router(group_router)
 app.include_router(oncall_router)
 app.include_router(jobs.router)
+app.include_router(alerts.router)
 app.include_router(sd.router)
 
 # MCP 数据面（AI agent 工具，设计见 docs/ai-agent-mcp-design.md）

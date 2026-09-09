@@ -46,6 +46,12 @@ class Settings(BaseSettings):
     kafka_cloud_topic_pattern: str = "cloud-sync-{provider}"
     kafka_enabled: bool = False
 
+    # 告警事件闭环（docs/monitoring-design.md）
+    # webhook 机器对机器鉴权（X-Agent-Token）；空 = 拒绝全部回报（fail closed）
+    alert_agent_token: str = ""
+    # 告警自动开单的系统操作者用户 ID；0 = 未配置，只记事件不开单
+    alert_operator_id: int = 0
+
     # MCP（AI agent 数据面，设计见 docs/ai-agent-mcp-design.md）
     mcp_enabled: bool = False        # 挂载 /mcp 端点（streamable-http，无状态模式）
     mcp_write_enabled: bool = False  # 写工具总开关（默认关闭，见 mcp/tools/writes.py）

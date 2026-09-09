@@ -530,6 +530,56 @@ CREATE TABLE job_step_logs (
 CREATE INDEX idx_job_log_step ON job_step_logs (step_id, seq);
 
 -- ============================================================================
+-- 监控告警事件闭环层（设计见 docs/monitoring-design.md）
+-- ============================================================================
+
+CREATE TABLE alert_events (
+    id             BIGSERIAL PRIMARY KEY,
+    source         VARCHAR(32)  NOT NULL,
+    rule_code      VARCHAR(128) NOT NULL,
+    rule_name      VARCHAR(255),
+    status         VARCHAR(16)  NOT NULL DEFAULT 'firing',  -- firing | resolved | error
+    window_start   TIMESTAMPTZ,
+    window_end     TIMESTAMPTZ,
+    first_seen_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    last_seen_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    resolved_at    TIMESTAMPTZ,
+    resolve_reason VARCHAR(32),                             -- resolved_event | stale_timeout
+    total_count    BIGINT       NOT NULL DEFAULT 0,
+    severity       SMALLINT     NOT NULL DEFAULT 2,         -- 对齐夜莺：1严重 2中等 3轻微
+    labels         JSONB        NOT NULL DEFAULT '{}',
+    resource_ids   JSONB        NOT NULL DEFAULT '[]',      -- CMDB 尽力匹配
+    details        JSONB,                                   -- 来源明细黑盒
+    error          TEXT,
+    ticket_id      BIGINT,                                  -- 逻辑引用 tickets.id
+    group_id       BIGINT,
+    created_at     TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    updated_at     TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+-- 活跃 firing 唯一：同源同规则同时刻只有一条进行中事件（幂等合并的数据库保证）
+CREATE UNIQUE INDEX uq_alert_active_firing
+    ON alert_events (source, rule_code) WHERE status = 'firing';
+CREATE INDEX idx_alert_events_status_time ON alert_events (status, first_seen_at);
+CREATE INDEX idx_alert_events_last_seen ON alert_events (last_seen_at) WHERE status = 'firing';
+
+CREATE TABLE alert_rules (
+    id               BIGSERIAL PRIMARY KEY,
+    source           VARCHAR(32)  NOT NULL,
+    code             VARCHAR(128) NOT NULL,   -- 对齐执行器 rule_code
+    name             VARCHAR(255),
+    group_id         BIGINT,                  -- 开单处理组（ticket_groups.id）
+    stale_minutes    INT          NOT NULL DEFAULT 5,   -- 建议 2~3 × 执行器评估间隔
+    default_severity SMALLINT     NOT NULL DEFAULT 2,   -- payload 未带 severity 时取值
+    static_labels    JSONB        NOT NULL DEFAULT '{}', -- 平台侧补齐 labels
+    notify_enabled   BOOLEAN      NOT NULL DEFAULT TRUE, -- false = 只记录不开单
+    enabled          BOOLEAN      NOT NULL DEFAULT TRUE,
+    created_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    updated_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    CONSTRAINT uq_alert_rules_source_code UNIQUE (source, code)
+);
+
+-- ============================================================================
 -- 触发器：自动维护 updated_at
 -- ============================================================================
 
@@ -554,7 +604,8 @@ BEGIN
             'tickets',
             'runbooks', 'job_executions', 'job_steps',
             'change_freezes',
-            'ticket_catalog', 'ticket_groups', 'oncall_schedules'
+            'ticket_catalog', 'ticket_groups', 'oncall_schedules',
+            'alert_events', 'alert_rules'
         ])
     LOOP
         EXECUTE format(
@@ -672,7 +723,11 @@ INSERT INTO permissions (code, name) VALUES
 ('oncall:list',           '查看值班表'),
 ('oncall:create',         '创建值班排班'),
 ('oncall:update',         '更新值班排班'),
-('oncall:delete',         '删除值班排班')
+('oncall:delete',         '删除值班排班'),
+('alert:list',            '查看告警事件与规则映射'),
+('alert:create',          '创建告警规则映射'),
+('alert:update',          '更新告警规则映射'),
+('alert:delete',          '删除告警规则映射')
 ON CONFLICT (code) DO NOTHING;
 
 -- admin 角色分配所有权限（须在全部权限插入后执行）

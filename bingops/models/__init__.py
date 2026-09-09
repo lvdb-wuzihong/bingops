@@ -5,6 +5,7 @@
 """
 
 from bingops.models import (
+    alert,  # noqa: F401
     base,  # noqa: F401
     cmdb,  # noqa: F401
     jobs,  # noqa: F401

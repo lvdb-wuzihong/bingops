@@ -142,6 +142,7 @@ CREATE TABLE alert_events (
     total_count    BIGINT       NOT NULL DEFAULT 0,
     severity       SMALLINT     NOT NULL DEFAULT 2,              -- 对齐夜莺：1严重 2中等 3轻微
     labels         JSONB        NOT NULL DEFAULT '{}',
+    resource_ids   JSONB        NOT NULL DEFAULT '[]',      -- CMDB 尽力匹配（§8）
     details        JSONB,
     error          TEXT,
     ticket_id      BIGINT,                             -- 逻辑引用 tickets.id
