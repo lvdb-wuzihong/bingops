@@ -649,6 +649,7 @@ async def build_agent_config(session: AsyncSession) -> dict:
     for rule, src, channel in pairs:
         rules.append(AgentRuleConfig(
             id=rule.id,
+            source=rule.source,
             code=rule.code,
             name=rule.name,
             interval_minutes=rule.interval_minutes,
@@ -663,7 +664,7 @@ async def build_agent_config(session: AsyncSession) -> dict:
             grafana_url=rule.grafana_url,
             feishu_card_template=rule.feishu_card_template,
             notify_enabled=rule.notify_enabled,
-            source=AgentSourceConfig(
+            datasource=AgentSourceConfig(
                 name=src.name,
                 type=src.type,
                 host=src.host,

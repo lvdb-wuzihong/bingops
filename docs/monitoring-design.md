@@ -10,7 +10,7 @@
 | # | 决策 | 结论 |
 |---|------|------|
 | 1 | 平台定位 | bingops 只做监控**控制面 + 告警事件闭环层**（无状态）；不存指标采样、不做评估循环、不做查询代理 |
-| 2 | 评估引擎归属 | 指标 = 夜莺（每套 VM 注册为数据源，**永久不做进 bingops**）；CK 日志/SQL 类 = 平台管数据源与规则（二期起）+ 独立执行器评估（一期 `ck-log-alert` 现状 → 二期薄化为通用执行器）。评估循环不进 bingops 主进程 |
+| 2 | 评估引擎归属 | **夜莺退役（2026-09-09 决策）**，夜莺与 ck-log-alert 均只作实现参考；评估统一由独立执行器（alert-executor）承担——双评估器：clickhouse（SQL 契约）+ victoria/prometheus（PromQL 表达式自带比较，vector 非空即触发）。评估循环不进 bingops 主进程 |
 | 3 | 事件收敛 | 所有来源的告警 → bingops `POST /api/v1/alerts/webhook` 唯一入口；统一事件表，统计才有全局意义 |
 | 4 | resolved 双轨语义 | 夜莺自带恢复事件直传；ck-log-alert **永不报恢复**（低于阈值静默跳过，保持现状），平台按规则级 `stale_minutes` 超时推导 resolved |
 | 5 | 契约豁免 | webhook 为机器对机器接口：裸响应不套 `{"code","message","data"}` 统一信封外的强约束（见 §4.2 折中），不绑用户权限码，`X-Agent-Token` 静态鉴权 + 同 VPC 网络隔离 |
@@ -27,8 +27,10 @@
 ```
 各 VPC:  vmagent ──http_sd──→ bingops /sd/v1/nodes（按 vpc/region/model_codes 过滤，已有）
               └─remote_write→ 本 VPC VictoriaMetrics ──→ Grafana（查询/看板）
-                                              └─数据源──→ 夜莺（指标告警评估）
-集中:    日志/tracing ──→ ClickHouse ──SQL──→ ck-log-alert（crontab 每分钟）──→ 飞书卡片
+集中:    日志/tracing ──→ ClickHouse
+
+演进（2026-09-09）：夜莺与 ck-log-alert 进入退役计划，评估统一由 alert-executor 承担
+（迁移过渡期双跑对账，详见 §11/§12）。
 ```
 
 - CMDB 的 SD labels（`provider/region/zone/vpc/env/app/hostname`）是资源 ↔ 指标 ↔ 告警的统一 join key。
@@ -37,12 +39,13 @@
 ## 2. 总体架构：评估引擎可以多，闭环层只有一个
 
 ```
-┌─ 评估引擎层（现状保持，独立演进）──────────────────────────────────┐
-│  夜莺 N9e（指标）                      ck-log-alert（CK 日志）      │
-│  评估 → 发通知 ─┐                      crontab → SQL → 发飞书卡片 ─┤← 主路，平台旁路故障不影响
-└────────────────┼──────────────────────────────────┼───────────────┘
-                 │ webhook（firing/resolved）        │ webhook（firing/error）
-                 ▼                                  ▼
+┌─ 评估执行面（alert-executor，独立进程；夜莺/ck-log-alert 退役后由它统一承担）─────┐
+│  PromQL 评估器（victoria/prometheus 源）    SQL 评估器（clickhouse 源）           │
+│  表达式自带比较，vector 非空即触发           聚合 SQL，单行两列契约                  │
+│  拉分发体 → 评估 → 发飞书（渠道 secret_ref）→ 回报事件 ─┤← 主路，平台旁路故障不影响  │
+└──────────────────────────┼─────────────────────────────────────┘
+                           │ webhook（firing/resolved/error）
+                           ▼
         bingops POST /api/v1/alerts/webhook（X-Agent-Token）
                  └─ alert_events 表（uq_active_firing 幂等合并）
                       ├─ stale 扫描（后台循环 60s，幂等 UPDATE）
@@ -245,7 +248,9 @@ def report_event(cfg: dict, rule: dict, status: str, total: int,
 
 顺带修复隐患：`interval_minutes` 默认值两处不一致（`build_query` 默认 1 / `run()` 默认 5），统一为一个默认值。
 
-## 11. 夜莺侧接入
+## 11. 夜莺侧接入（迁移过渡期）
+
+> **演进更新（2026-09-09）：夜莺进入退役计划**。本节仅适用于过渡期：指标规则逐条迁至平台（PromQL 原样贴入 eval_sql，绑 victoria 数据源），执行器接管后夜莺侧同步禁用对应规则，双跑对账；清零后夜莺下线，指标告警由执行器 PromQL 评估器承担（vector 非空即触发）。
 
 通知媒介追加 webhook 指向同一端点（`source: "n9e"`），恢复事件直传 `status: "resolved"`；映射表里为涉及规则配 `group_id`。零代码，纯配置。
 
@@ -257,7 +262,7 @@ def report_event(cfg: dict, rule: dict, status: str, total: int,
 |------|------|------|
 | 数据源管理 | bingops（类 Grafana/夜莺体验） | type（clickhouse / victoria / prometheus）、名称、非敏感连接参数、`password_ref`（决策 8 红线）、环境/VPC 归属 |
 | 告警规则配置 | bingops UI | eval_sql / threshold / 窗口 / stale_minutes / 处理组，绑定数据源 |
-| 评估执行 | 独立执行器（**新建项目 alert-executor**，以 ck-log-alert 为逻辑参考原型：去重聚合 SQL / 单行两列输出契约 error_count+log_details / 三段式卡片+Grafana 毫秒跳转；独立仓库，决策 9） | 进程内节拍循环：拉规则 + 源引用 → 连数据源评估 → 报事件 + 发飞书 |
+| 评估执行 | 独立执行器（**新建项目 alert-executor**，双评估器：clickhouse SQL 契约 error_count+log_details〔参考 ck-log-alert：去重聚合/三段式卡片/Grafana 毫秒跳转〕+ victoria prometheus PromQL〔表达式自带比较，vector 非空即触发，夜莺退役后接管指标〕；独立仓库，决策 9） | 进程内节拍循环：拉规则 + 源引用 → 按源类型选评估器 → 报事件 + 发飞书 |
 | 事件闭环 | bingops | webhook / 状态机 / 工单 / 统计（本文 §4~§9，一期交付） |
 
 **调度与锁语义（刻意无分布式锁）**：
@@ -312,4 +317,4 @@ def resolve_credential(ref: str) -> str | None:
 | v8 告警规则/通知规则分离 | alert_rules 检测字段与通知字段分组演进 | 二期表结构 |
 | WatchAlert escalation | firing 持续未响应升级通知 | 二期候选 |
 | Cur/HisEvent 分表 | 单表 + status + `uq_active_firing` 部分索引（等价更简） | 不搬 |
-| 多租户 / 订阅 / 通知媒介体系 / 评估引擎 | — | 不搬（通知留执行器与夜莺） |
+| 多租户 / 订阅 / 通知媒介体系 / 平台内嵌评估引擎 | — | 不搬（评估与通知在执行器；夜莺退役后指标评估并入执行器 PromQL 评估器，仍不进平台进程） |

@@ -13,7 +13,9 @@ from pydantic import BaseModel, Field, model_validator
 
 from bingops.models.alert import AlertEvent, AlertRule, MonitoringSource, NotifyChannel
 
-VALID_SOURCES = ("ck-log-alert", "n9e")
+VALID_SOURCES = ("ck-log-alert", "n9e", "bingops")
+# 平台原生规则的默认告警来源标识（夜莺退役后新规则统一用此值）
+DEFAULT_RULE_SOURCE = "bingops"
 VALID_STATUSES = ("firing", "resolved", "error")
 VALID_SEVERITIES = (1, 2, 3)
 VALID_GROUP_BYS = ("source", "rule_code", "group_id", "day")
@@ -321,6 +323,7 @@ class AgentRuleConfig(BaseModel):
     """分发体中的单条启用规则。"""
 
     id: int
+    source: str = Field(description="告警来源标识，执行器回报事件时原样带回")
     code: str
     name: str | None
     interval_minutes: int
@@ -335,7 +338,9 @@ class AgentRuleConfig(BaseModel):
     grafana_url: str | None
     feishu_card_template: dict | None
     notify_enabled: bool
-    source: AgentSourceConfig | None = None
+    datasource: AgentSourceConfig | None = Field(
+        description="绑定数据源配置；回报事件的 source 取上方告警来源标识",
+    )
     notify_channel: AgentNotifyChannel | None = None
 
 
