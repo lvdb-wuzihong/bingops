@@ -1,7 +1,7 @@
-"""告警事件闭环层 API 路由（webhook + 事件列表 + 统计 + 规则映射）。
+"""告警事件闭环层 API 路由（webhook + 事件列表 + 统计 + 规则映射 + 数据源）。
 
-契约豁免说明（语义分化）：POST /webhook 为机器对机器接口
-（ck-log-alert / 夜莺回调），鉴权走 X-Agent-Token 静态 token，
+契约豁免说明（语义分化）：POST /webhook 与 GET /agent/config 为机器对机器接口
+（ck-log-alert / 夜莺回调 / 执行器拉取），鉴权走 X-Agent-Token 静态 token，
 不绑定用户 JWT/权限码；响应仍使用平台统一信封。
 其余端点为管理面，走标准 require_permission。
 """
@@ -23,12 +23,18 @@ from bingops.schemas.alert import (
     AlertRuleCreate,
     AlertRuleUpdate,
     AlertWebhookPayload,
+    MonitoringSourceCreate,
+    MonitoringSourceUpdate,
     event_to_response,
     rule_to_response,
+    source_to_response,
 )
 from bingops.services import alert_service
 
 router = APIRouter(prefix="/api/v1/alerts", tags=["alerts"])
+source_router = APIRouter(
+    prefix="/api/v1/monitoring-sources", tags=["monitoring-sources"],
+)
 
 
 # ── Webhook（机器对机器，X-Agent-Token） ─────────────────────────────────────
@@ -58,6 +64,23 @@ async def report_alert_event(
     _verify_agent_token(x_agent_token)
     result = await alert_service.handle_webhook_event(session, payload)
     return success_response(data=result, message="ok")
+
+
+# ── Agent 分发（执行器拉取，X-Agent-Token） ──────────────────────────────────
+
+
+@router.get("/agent/config")
+async def get_agent_config(
+    x_agent_token: str | None = Header(default=None, alias="X-Agent-Token"),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict:
+    """执行器拉取启用规则 + 数据源（凭据只带引用名，红线决策 8）。
+
+    规则变更生效延迟 ≤ 一个执行器评估周期；拉取方向恒为执行器→平台。
+    """
+    _verify_agent_token(x_agent_token)
+    config = await alert_service.build_agent_config(session)
+    return success_response(data=config, message="ok")
 
 
 # ── 事件列表 ─────────────────────────────────────────────────────────────────
@@ -162,4 +185,51 @@ async def delete_alert_rule(
 ) -> dict:
     """删除规则映射（事件保留，仅停止开单联动）。"""
     await alert_service.delete_rule(session, rule_id)
+    return success_response(message="deleted")
+
+
+# ── 监控数据源 CRUD（/api/v1/monitoring-sources） ───────────────────────────
+
+
+@source_router.get("")
+async def list_monitoring_sources(
+    session: AsyncSession = Depends(get_db_session),
+    _user: User = require_permission("monitoring_source:list"),
+) -> dict:
+    """监控数据源列表（多套 CH/VM；凭据只含引用名）。"""
+    sources = await alert_service.list_sources(session)
+    return success_response(data=[source_to_response(src) for src in sources])
+
+
+@source_router.post("")
+async def create_monitoring_source(
+    payload: MonitoringSourceCreate,
+    session: AsyncSession = Depends(get_db_session),
+    _user: User = require_permission("monitoring_source:create"),
+) -> dict:
+    """注册监控数据源。"""
+    src = await alert_service.create_source(session, payload)
+    return success_response(data=source_to_response(src), message="created")
+
+
+@source_router.put("/{source_id}")
+async def update_monitoring_source(
+    source_id: int,
+    payload: MonitoringSourceUpdate,
+    session: AsyncSession = Depends(get_db_session),
+    _user: User = require_permission("monitoring_source:update"),
+) -> dict:
+    """更新监控数据源（连接参数/凭据引用/启停）。"""
+    src = await alert_service.update_source(session, source_id, payload)
+    return success_response(data=source_to_response(src))
+
+
+@source_router.delete("/{source_id}")
+async def delete_monitoring_source(
+    source_id: int,
+    session: AsyncSession = Depends(get_db_session),
+    _user: User = require_permission("monitoring_source:delete"),
+) -> dict:
+    """删除监控数据源（有启用规则绑定时阻断，避免孤儿规则）。"""
+    await alert_service.delete_source(session, source_id)
     return success_response(message="deleted")

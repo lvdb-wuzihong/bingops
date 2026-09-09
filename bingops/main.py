@@ -171,6 +171,7 @@ app.include_router(group_router)
 app.include_router(oncall_router)
 app.include_router(jobs.router)
 app.include_router(alerts.router)
+app.include_router(alerts.source_router)
 app.include_router(sd.router)
 
 # MCP 数据面（AI agent 工具，设计见 docs/ai-agent-mcp-design.md）

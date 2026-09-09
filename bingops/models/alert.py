@@ -13,6 +13,7 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     DateTime,
+    ForeignKey,
     Index,
     Integer,
     SmallInteger,
@@ -87,10 +88,34 @@ class AlertEvent(BaseMixin, Base):
     group_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
 
+class MonitoringSource(BaseMixin, Base):
+    """监控数据源注册表（多套 CH/VM，凭据红线：只存 password_ref 引用名）。
+
+    真凭据留在执行器侧 env，平台不落任何密码（决策 8，同 job-dispatch 只带钥匙名）。
+    """
+
+    __tablename__ = "monitoring_sources"
+
+    name: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    # clickhouse | victoria | prometheus
+    type: Mapped[str] = mapped_column(String(16), nullable=False)
+    host: Mapped[str] = mapped_column(String(255), nullable=False)
+    port: Mapped[int] = mapped_column(Integer, nullable=False)
+    database_name: Mapped[str | None] = mapped_column(String(64), nullable=True)  # CH database
+    username: Mapped[str | None] = mapped_column(String(64), nullable=True)  # 只读账号
+    password_ref: Mapped[str] = mapped_column(String(128), nullable=False)
+    secure: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)  # TLS
+    region: Mapped[str | None] = mapped_column(String(64), nullable=True)  # 环境/VPC 归属
+    vpc: Mapped[str | None] = mapped_column(String(128), nullable=True)  # VPC provider_id
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
+
 class AlertRule(BaseMixin, Base):
-    """规则映射元数据（一期平台侧配置源，非分发源）。
+    """告警规则（二期起为分发源：绑定数据源 + 评估契约字段）。
 
     code 对齐执行器侧 rule_code，是两侧唯一对齐键，变更须人工同步（二期分发后消除）。
+    eval_sql 契约：单行两列 error_count + log_details（存量 ck-log-alert SQL 原样可贴）。
+    for_rounds：连续 M 轮达标才报 firing（防抖，执行器侧实现，平台无 pending 态）。
     """
 
     __tablename__ = "alert_rules"
@@ -110,3 +135,14 @@ class AlertRule(BaseMixin, Base):
     static_labels: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     notify_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    # ── 二期：评估契约字段（分发源） ──
+    source_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("monitoring_sources.id"), nullable=True,
+    )
+    eval_sql: Mapped[str | None] = mapped_column(Text, nullable=True)
+    threshold: Mapped[int] = mapped_column(BigInteger, nullable=False, default=1)
+    interval_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    for_rounds: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    detail_limit: Mapped[int] = mapped_column(Integer, nullable=False, default=10)
+    grafana_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    feishu_card_template: Mapped[dict | None] = mapped_column(JSONB, nullable=True)

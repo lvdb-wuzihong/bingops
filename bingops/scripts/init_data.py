@@ -110,6 +110,10 @@ PERMISSIONS: list[tuple[str, str]] = [
     ("alert:create", "创建告警规则映射"),
     ("alert:update", "更新告警规则映射"),
     ("alert:delete", "删除告警规则映射"),
+    ("monitoring_source:list", "查看监控数据源"),
+    ("monitoring_source:create", "创建监控数据源"),
+    ("monitoring_source:update", "更新监控数据源"),
+    ("monitoring_source:delete", "删除监控数据源"),
 ]
 
 ROLES: list[tuple[str, str, str, bool]] = [

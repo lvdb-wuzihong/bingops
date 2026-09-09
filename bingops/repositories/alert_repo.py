@@ -8,7 +8,8 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bingops.models.alert import AlertEvent, AlertRule
+from bingops.core.exceptions import ConflictError
+from bingops.models.alert import AlertEvent, AlertRule, MonitoringSource
 
 # 统计分组的列映射（day 维度按 first_seen_at 截断到天）
 _GROUP_DIMS = {
@@ -153,7 +154,7 @@ class AlertRuleRepo:
         try:
             await self.session.flush()
         except IntegrityError as exc:
-            raise ValueError(f"alert rule already exists: {rule.source}/{rule.code}") from exc
+            raise ConflictError(f"alert rule already exists: {rule.source}/{rule.code}") from exc
         return rule
 
     async def update(self, rule: AlertRule) -> AlertRule:
@@ -179,6 +180,46 @@ class AlertRuleRepo:
         )
         return result.scalar_one_or_none()
 
-    async def list_all(self) -> list[AlertRule]:
-        result = await self.session.execute(select(AlertRule).order_by(AlertRule.id))
+    async def list_agent_rules(self) -> list[tuple[AlertRule, MonitoringSource]]:
+        """启用规则 + 启用数据源联查（分发体输入；未绑定源的规则不分发）。"""
+        query = (
+            select(AlertRule, MonitoringSource)
+            .join(MonitoringSource, AlertRule.source_id == MonitoringSource.id)
+            .where(AlertRule.enabled.is_(True), MonitoringSource.enabled.is_(True))
+            .order_by(AlertRule.id)
+        )
+        result = await self.session.execute(query)
+        return [(row[0], row[1]) for row in result.all()]
+
+
+class MonitoringSourceRepo:
+    def __init__(self, session: AsyncSession) -> None:
+        self.session = session
+
+    async def create(self, src: MonitoringSource) -> MonitoringSource:
+        self.session.add(src)
+        try:
+            await self.session.flush()
+        except IntegrityError as exc:
+            raise ConflictError(f"monitoring source already exists: {src.name}") from exc
+        return src
+
+    async def update(self, src: MonitoringSource) -> MonitoringSource:
+        await self.session.flush()
+        return src
+
+    async def delete(self, src: MonitoringSource) -> None:
+        await self.session.delete(src)
+        await self.session.flush()
+
+    async def get_by_id(self, source_id: int) -> MonitoringSource | None:
+        result = await self.session.execute(
+            select(MonitoringSource).where(MonitoringSource.id == source_id)
+        )
+        return result.scalar_one_or_none()
+
+    async def list_all(self) -> list[MonitoringSource]:
+        result = await self.session.execute(
+            select(MonitoringSource).order_by(MonitoringSource.id)
+        )
         return list(result.scalars().all())

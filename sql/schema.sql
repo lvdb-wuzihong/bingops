@@ -533,6 +533,23 @@ CREATE INDEX idx_job_log_step ON job_step_logs (step_id, seq);
 -- 监控告警事件闭环层（设计见 docs/monitoring-design.md）
 -- ============================================================================
 
+CREATE TABLE monitoring_sources (
+    id            BIGSERIAL PRIMARY KEY,
+    name          VARCHAR(64)  NOT NULL UNIQUE,   -- 数据源名称（executor 连接标识）
+    type          VARCHAR(16)  NOT NULL,          -- clickhouse | victoria | prometheus
+    host          VARCHAR(255) NOT NULL,
+    port          INT          NOT NULL,
+    database_name VARCHAR(64),                    -- CH database；VM/prometheus 留空
+    username      VARCHAR(64),                    -- 只读账号（红线：禁 default/写权限）
+    password_ref  VARCHAR(128) NOT NULL,          -- 凭据引用名（凭据在 executor 侧 env）
+    secure        BOOLEAN      NOT NULL DEFAULT FALSE,  -- TLS
+    region        VARCHAR(64),                    -- 环境/VPC 归属（值域对齐 CMDB region）
+    vpc           VARCHAR(128),                   -- VPC provider_id（可选）
+    enabled       BOOLEAN      NOT NULL DEFAULT TRUE,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE alert_events (
     id             BIGSERIAL PRIMARY KEY,
     source         VARCHAR(32)  NOT NULL,
@@ -574,6 +591,15 @@ CREATE TABLE alert_rules (
     static_labels    JSONB        NOT NULL DEFAULT '{}', -- 平台侧补齐 labels
     notify_enabled   BOOLEAN      NOT NULL DEFAULT TRUE, -- false = 只记录不开单
     enabled          BOOLEAN      NOT NULL DEFAULT TRUE,
+    -- 二期：评估契约字段（分发源）
+    source_id             BIGINT REFERENCES monitoring_sources(id),
+    eval_sql              TEXT,      -- 契约：单行两列 error_count + log_details
+    threshold             BIGINT     NOT NULL DEFAULT 1,
+    interval_minutes      INT        NOT NULL DEFAULT 1,
+    for_rounds            INT        NOT NULL DEFAULT 1,  -- 连续 M 轮达标才报 firing
+    detail_limit          INT        NOT NULL DEFAULT 10,
+    grafana_url           TEXT,
+    feishu_card_template  JSONB,
     created_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     updated_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     CONSTRAINT uq_alert_rules_source_code UNIQUE (source, code)
@@ -605,7 +631,7 @@ BEGIN
             'runbooks', 'job_executions', 'job_steps',
             'change_freezes',
             'ticket_catalog', 'ticket_groups', 'oncall_schedules',
-            'alert_events', 'alert_rules'
+            'monitoring_sources', 'alert_events', 'alert_rules'
         ])
     LOOP
         EXECUTE format(
@@ -727,7 +753,11 @@ INSERT INTO permissions (code, name) VALUES
 ('alert:list',            '查看告警事件与规则映射'),
 ('alert:create',          '创建告警规则映射'),
 ('alert:update',          '更新告警规则映射'),
-('alert:delete',          '删除告警规则映射')
+('alert:delete',          '删除告警规则映射'),
+('monitoring_source:list',   '查看监控数据源'),
+('monitoring_source:create', '创建监控数据源'),
+('monitoring_source:update', '更新监控数据源'),
+('monitoring_source:delete', '删除监控数据源')
 ON CONFLICT (code) DO NOTHING;
 
 -- admin 角色分配所有权限（须在全部权限插入后执行）

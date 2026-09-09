@@ -18,20 +18,30 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bingops.core.config import settings
 from bingops.core.exceptions import (
+    ConflictError,
     NotFoundError,
     PermissionDeniedError,
     ValidationError,
 )
-from bingops.models.alert import AlertEvent, AlertRule
+from bingops.models.alert import AlertEvent, AlertRule, MonitoringSource
 from bingops.models.cmdb.resource import CmdbResource
 from bingops.models.ticket import Ticket
 from bingops.models.user import User
-from bingops.repositories.alert_repo import AlertEventRepo, AlertRuleRepo
+from bingops.repositories.alert_repo import (
+    AlertEventRepo,
+    AlertRuleRepo,
+    MonitoringSourceRepo,
+)
 from bingops.schemas.alert import (
     VALID_SEVERITIES,
+    AgentConfigResponse,
+    AgentRuleConfig,
+    AgentSourceConfig,
     AlertRuleCreate,
     AlertRuleUpdate,
     AlertWebhookPayload,
+    MonitoringSourceCreate,
+    MonitoringSourceUpdate,
 )
 
 logger = logging.getLogger(f"bingops.{__name__}")
@@ -418,6 +428,7 @@ async def list_rules(session: AsyncSession) -> list[AlertRule]:
 async def create_rule(session: AsyncSession, payload: AlertRuleCreate) -> AlertRule:
     _validate_rule_payload(payload.default_severity)
     await _validate_group_exists(session, payload.group_id)
+    await _validate_source_exists(session, payload.source_id)
     rule = await AlertRuleRepo(session).create(AlertRule(
         source=payload.source,
         code=payload.code,
@@ -428,6 +439,14 @@ async def create_rule(session: AsyncSession, payload: AlertRuleCreate) -> AlertR
         static_labels=payload.static_labels,
         notify_enabled=payload.notify_enabled,
         enabled=payload.enabled,
+        source_id=payload.source_id,
+        eval_sql=payload.eval_sql,
+        threshold=payload.threshold,
+        interval_minutes=payload.interval_minutes,
+        for_rounds=payload.for_rounds,
+        detail_limit=payload.detail_limit,
+        grafana_url=payload.grafana_url,
+        feishu_card_template=payload.feishu_card_template,
     ))
     await session.commit()
     logger.info(
@@ -447,6 +466,8 @@ async def update_rule(
         _validate_rule_payload(payload.default_severity)
     if payload.group_id is not None:
         await _validate_group_exists(session, payload.group_id)
+    if payload.source_id is not None:
+        await _validate_source_exists(session, payload.source_id)
 
     for field, value in payload.model_dump(exclude_unset=True).items():
         setattr(rule, field, value)
@@ -481,6 +502,15 @@ async def _validate_group_exists(session: AsyncSession, group_id: int | None) ->
         raise NotFoundError("TicketGroup", str(group_id))
 
 
+async def _validate_source_exists(
+    session: AsyncSession, source_id: int | None,
+) -> None:
+    if source_id is None:
+        return
+    if await MonitoringSourceRepo(session).get_by_id(source_id) is None:
+        raise NotFoundError("MonitoringSource", str(source_id))
+
+
 # ── 统计（§9） ───────────────────────────────────────────────────────────────
 
 
@@ -502,3 +532,109 @@ async def stats_summary(
         "active_firing_total": active_total,
         "avg_resolve_seconds": round(avg_seconds, 1) if avg_seconds is not None else None,
     }
+
+
+# ── 监控数据源 CRUD（二期：§12 数据源注册表） ─────────────────────────────────
+
+
+async def list_sources(session: AsyncSession) -> list[MonitoringSource]:
+    return await MonitoringSourceRepo(session).list_all()
+
+
+async def create_source(
+    session: AsyncSession, payload: MonitoringSourceCreate,
+) -> MonitoringSource:
+    src = await MonitoringSourceRepo(session).create(MonitoringSource(
+        name=payload.name,
+        type=payload.type,
+        host=payload.host,
+        port=payload.port,
+        database_name=payload.database_name,
+        username=payload.username,
+        password_ref=payload.password_ref,
+        secure=payload.secure,
+        region=payload.region,
+        vpc=payload.vpc,
+        enabled=payload.enabled,
+    ))
+    await session.commit()
+    logger.info(
+        "Monitoring source created",
+        extra={"source_id": src.id, "source_name": src.name, "source_type": src.type},
+    )
+    return src
+
+
+async def update_source(
+    session: AsyncSession, source_id: int, payload: MonitoringSourceUpdate,
+) -> MonitoringSource:
+    src = await MonitoringSourceRepo(session).get_by_id(source_id)
+    if src is None:
+        raise NotFoundError("MonitoringSource", str(source_id))
+
+    for field, value in payload.model_dump(exclude_unset=True).items():
+        setattr(src, field, value)
+
+    src = await MonitoringSourceRepo(session).update(src)
+    await session.commit()
+    logger.info("Monitoring source updated", extra={"source_id": source_id})
+    return src
+
+
+async def delete_source(session: AsyncSession, source_id: int) -> None:
+    """删除数据源；仍有规则绑定时阻断（避免分发体出现孤儿规则）。"""
+    src = await MonitoringSourceRepo(session).get_by_id(source_id)
+    if src is None:
+        raise NotFoundError("MonitoringSource", str(source_id))
+
+    bound = await AlertRuleRepo(session).list_agent_rules()
+    if any(rule.source_id == source_id for rule, _src in bound):
+        raise ConflictError(
+            f"Monitoring source {source_id} is bound by enabled alert rules"
+        )
+
+    await MonitoringSourceRepo(session).delete(src)
+    await session.commit()
+    logger.info("Monitoring source deleted", extra={"source_id": source_id})
+
+
+# ── Agent 分发（二期：§12 分发 API） ─────────────────────────────────────────
+
+
+async def build_agent_config(session: AsyncSession) -> dict:
+    """组装执行器拉取的分发体：启用规则 + 启用数据源（凭据只带引用名）。
+
+    未绑定数据源或数据源被禁用的规则不分发（无法评估）。
+    """
+    pairs = await AlertRuleRepo(session).list_agent_rules()
+    rules: list[AgentRuleConfig] = []
+    for rule, src in pairs:
+        rules.append(AgentRuleConfig(
+            id=rule.id,
+            code=rule.code,
+            name=rule.name,
+            interval_minutes=rule.interval_minutes,
+            threshold=rule.threshold,
+            for_rounds=rule.for_rounds,
+            detail_limit=rule.detail_limit,
+            eval_sql=rule.eval_sql,
+            stale_minutes=rule.stale_minutes,
+            default_severity=rule.default_severity,
+            group_id=rule.group_id,
+            static_labels=rule.static_labels or {},
+            grafana_url=rule.grafana_url,
+            feishu_card_template=rule.feishu_card_template,
+            notify_enabled=rule.notify_enabled,
+            source=AgentSourceConfig(
+                name=src.name,
+                type=src.type,
+                host=src.host,
+                port=src.port,
+                database_name=src.database_name,
+                username=src.username,
+                password_ref=src.password_ref,
+                secure=src.secure,
+            ),
+        ))
+    logger.info("Agent config dispatched", extra={"rule_count": len(rules)})
+    return AgentConfigResponse(rules=rules).model_dump(mode="json")

@@ -255,7 +255,7 @@ def report_event(cfg: dict, rule: dict, status: str, total: int,
 |------|------|------|
 | 数据源管理 | bingops（类 Grafana/夜莺体验） | type（clickhouse / victoria / prometheus）、名称、非敏感连接参数、`password_ref`（决策 8 红线）、环境/VPC 归属 |
 | 告警规则配置 | bingops UI | eval_sql / threshold / 窗口 / stale_minutes / 处理组，绑定数据源 |
-| 评估执行 | 独立执行器（`ck-log-alert` → 通用 alert-executor，独立仓库，决策 9） | cron 触发：拉规则 + 源引用 → 连数据源评估 → 报事件 + 发飞书 |
+| 评估执行 | 独立执行器（**新建项目 alert-executor**，以 ck-log-alert 为逻辑参考原型：去重聚合 SQL / 单行两列输出契约 error_count+log_details / 三段式卡片+Grafana 毫秒跳转；独立仓库，决策 9） | 进程内节拍循环：拉规则 + 源引用 → 连数据源评估 → 报事件 + 发飞书 |
 | 事件闭环 | bingops | webhook / 状态机 / 工单 / 统计（本文 §4~§9，一期交付） |
 
 **调度与锁语义（刻意无分布式锁）**：
@@ -273,7 +273,7 @@ def report_event(cfg: dict, rule: dict, status: str, total: int,
 - **拉取方向恒为执行器→平台**：执行器零入站端口，平台零 agent 状态（无注册/心跳/存活管理），故障自愈靠下一轮重拉；规则变更生效延迟 ≤ 一个调度周期；
 - **演进路径**：将来建 CEN/对等连接内网互通后通道整体收进内网（vmagent→平台与 executor→数据源一并受益）；CH/VM 实例数增长到单实例管理不动时，按数据源静态归属分片为多执行器（契约不变）。
 
-二期实施：分发 API 按执行器 agent 身份（静态 token）拉取启用规则 + 源引用（只带引用不带凭据），`config.yaml` 退役；notify 协议转正；stale 超时可被执行器真实 resolved 事件取代；新增 `alert_mutes` 屏蔽表（labels 匹配 + 时间窗，与变更封禁窗口联动）与 firing 升级策略（持续未响应升级通知，WatchAlert escalation 同款）。
+二期实施：**ck-log-alert 仅作逻辑参考，不改造**；分发 API 按执行器 agent 身份（静态 token，复用 X-Agent-Token）拉取启用规则 + 源引用（只带引用不带凭据），eval_sql 契约为单行两列 error_count + log_details（存量 SQL 原样可贴）；`config.yaml` 退役；notify 协议转正；stale 超时可被执行器真实 resolved 事件取代；新增 `alert_mutes` 屏蔽表（labels 匹配 + 时间窗，与变更封禁窗口联动）与 firing 升级策略（持续未响应升级通知，WatchAlert escalation 同款）。卡片模板作为配置数据进 alert_rules（执行器拉取后自行渲染发送），**通知仍由执行器发送**，平台不建通知媒介（三期再议）。
 
 三期触发条件（评估循环是否内聚进平台再议）：多 VPC 多执行器实例化 / 规则数显著增长 / 执行器已薄至「拉取 → 评估 → 回报」三步。届时成本 = 三大件（评估调度器 + 多副本协调、数据源查询客户端、飞书通知媒介进平台），收益 = 少维护一个执行器组件；故障域耦合（平台发版 = 告警盲窗）是永久代价，由真实数据权衡。
 

@@ -11,12 +11,13 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
-from bingops.models.alert import AlertEvent, AlertRule
+from bingops.models.alert import AlertEvent, AlertRule, MonitoringSource
 
 VALID_SOURCES = ("ck-log-alert", "n9e")
 VALID_STATUSES = ("firing", "resolved", "error")
 VALID_SEVERITIES = (1, 2, 3)
 VALID_GROUP_BYS = ("source", "rule_code", "group_id", "day")
+VALID_SOURCE_TYPES = ("clickhouse", "victoria", "prometheus")
 
 
 # ── Webhook 契约 ──────────────────────────────────────────────────────────────
@@ -76,6 +77,18 @@ class AlertRuleCreate(BaseModel):
     static_labels: dict = Field(default_factory=dict)
     notify_enabled: bool = True
     enabled: bool = True
+    # ── 二期：评估契约字段（分发源） ──
+    source_id: int | None = Field(default=None, description="绑定监控数据源 ID")
+    eval_sql: str | None = Field(
+        default=None,
+        description="评估 SQL，契约：单行两列 error_count + log_details；含 {window_minutes} 占位",
+    )
+    threshold: int = Field(default=1, ge=1)
+    interval_minutes: int = Field(default=1, ge=1)
+    for_rounds: int = Field(default=1, ge=1, description="连续 M 轮达标才报 firing（防抖）")
+    detail_limit: int = Field(default=10, ge=1)
+    grafana_url: str | None = None
+    feishu_card_template: dict | None = None
 
 
 class AlertRuleUpdate(BaseModel):
@@ -86,6 +99,14 @@ class AlertRuleUpdate(BaseModel):
     static_labels: dict | None = None
     notify_enabled: bool | None = None
     enabled: bool | None = None
+    source_id: int | None = None
+    eval_sql: str | None = None
+    threshold: int | None = Field(default=None, ge=1)
+    interval_minutes: int | None = Field(default=None, ge=1)
+    for_rounds: int | None = Field(default=None, ge=1)
+    detail_limit: int | None = Field(default=None, ge=1)
+    grafana_url: str | None = None
+    feishu_card_template: dict | None = None
 
 
 class AlertRuleResponse(BaseModel):
@@ -99,6 +120,14 @@ class AlertRuleResponse(BaseModel):
     static_labels: dict
     notify_enabled: bool
     enabled: bool
+    source_id: int | None
+    eval_sql: str | None
+    threshold: int
+    interval_minutes: int
+    for_rounds: int
+    detail_limit: int
+    grafana_url: str | None
+    feishu_card_template: dict | None
     created_at: datetime
     updated_at: datetime
 
@@ -170,6 +199,126 @@ def rule_to_response(rule: AlertRule) -> dict:
         static_labels=rule.static_labels or {},
         notify_enabled=rule.notify_enabled,
         enabled=rule.enabled,
+        source_id=rule.source_id,
+        eval_sql=rule.eval_sql,
+        threshold=rule.threshold,
+        interval_minutes=rule.interval_minutes,
+        for_rounds=rule.for_rounds,
+        detail_limit=rule.detail_limit,
+        grafana_url=rule.grafana_url,
+        feishu_card_template=rule.feishu_card_template,
         created_at=rule.created_at,
         updated_at=rule.updated_at,
     ).model_dump(mode="json")
+
+
+# ── 监控数据源 DTO ───────────────────────────────────────────────────────────
+
+
+class MonitoringSourceCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=64)
+    type: Literal["clickhouse", "victoria", "prometheus"]
+    host: str = Field(min_length=1, max_length=255)
+    port: int = Field(ge=1, le=65535)
+    database_name: str | None = Field(default=None, max_length=64)
+    username: str | None = Field(default=None, max_length=64)
+    password_ref: str = Field(
+        min_length=1, max_length=128,
+        description="凭据引用名（真凭据在执行器侧 env；平台不落密码）",
+    )
+    secure: bool = False
+    region: str | None = Field(default=None, max_length=64)
+    vpc: str | None = Field(default=None, max_length=128)
+    enabled: bool = True
+
+
+class MonitoringSourceUpdate(BaseModel):
+    host: str | None = Field(default=None, max_length=255)
+    port: int | None = Field(default=None, ge=1, le=65535)
+    database_name: str | None = None
+    username: str | None = None
+    password_ref: str | None = Field(default=None, max_length=128)
+    secure: bool | None = None
+    region: str | None = None
+    vpc: str | None = None
+    enabled: bool | None = None
+
+
+class MonitoringSourceResponse(BaseModel):
+    id: int
+    name: str
+    type: str
+    host: str
+    port: int
+    database_name: str | None
+    username: str | None
+    password_ref: str
+    secure: bool
+    region: str | None
+    vpc: str | None
+    enabled: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+def source_to_response(src: MonitoringSource) -> dict:
+    """ORM 数据源转响应字典。"""
+    return MonitoringSourceResponse(
+        id=src.id,
+        name=src.name,
+        type=src.type,
+        host=src.host,
+        port=src.port,
+        database_name=src.database_name,
+        username=src.username,
+        password_ref=src.password_ref,
+        secure=src.secure,
+        region=src.region,
+        vpc=src.vpc,
+        enabled=src.enabled,
+        created_at=src.created_at,
+        updated_at=src.updated_at,
+    ).model_dump(mode="json")
+
+
+# ── Agent 分发契约（executor 拉取；凭据只带引用名） ────────────────────────────
+
+
+class AgentSourceConfig(BaseModel):
+    """分发体中的数据源（非敏感连接参数 + password_ref 引用）。"""
+
+    name: str
+    type: str
+    host: str
+    port: int
+    database_name: str | None
+    username: str | None
+    password_ref: str
+    secure: bool
+
+
+class AgentRuleConfig(BaseModel):
+    """分发体中的单条启用规则。"""
+
+    id: int
+    code: str
+    name: str | None
+    interval_minutes: int
+    threshold: int
+    for_rounds: int
+    detail_limit: int
+    eval_sql: str | None
+    stale_minutes: int
+    default_severity: int
+    group_id: int | None
+    static_labels: dict
+    grafana_url: str | None
+    feishu_card_template: dict | None
+    notify_enabled: bool
+    source: AgentSourceConfig | None = None
+
+
+class AgentConfigResponse(BaseModel):
+    """GET /api/v1/alerts/agent/config 响应体。"""
+
+    rules: list[AgentRuleConfig]
