@@ -147,15 +147,17 @@ CREATE TABLE alert_events (
     labels         JSONB        NOT NULL DEFAULT '{}',
     resource_ids   JSONB        NOT NULL DEFAULT '[]',      -- CMDB 尽力匹配（§8）
     details        JSONB,
+    monitoring_source_id BIGINT,                            -- 数据源归属（v24，防同名规则跨源吞没）
     error          TEXT,
     ticket_id      BIGINT,                             -- 逻辑引用 tickets.id
     group_id       BIGINT,
     created_at     TIMESTAMPTZ  NOT NULL DEFAULT now(),
     updated_at     TIMESTAMPTZ  NOT NULL DEFAULT now()
 );
-CREATE UNIQUE INDEX uq_alert_active_firing ON alert_events (source, rule_code) WHERE status = 'firing';
+CREATE UNIQUE INDEX uq_alert_active_firing ON alert_events (source, rule_code, COALESCE(monitoring_source_id, 0)) WHERE status = 'firing';
 CREATE INDEX idx_alert_events_status_time ON alert_events (status, first_seen_at);
 CREATE INDEX idx_alert_events_last_seen ON alert_events (last_seen_at) WHERE status = 'firing';
+CREATE INDEX idx_alert_events_labels ON alert_events USING gin (labels);
 ```
 
 ### 5.2 alert_rules（平台侧元数据，一期非分发源）
@@ -276,7 +278,19 @@ def report_event(cfg: dict, rule: dict, status: str, total: int,
 - **单实例 executor**：一个 Deployment（bingops 同 VPC）按数据源注册表公网访问各 VPC 的 CH/VM，安全组源 IP 限定 executor 出口（VPC 内 K8s 经 NAT 网关出口 IP 固定，白名单可维护）——与 vmagent→平台完全同构；
 - **公网通道加固条件（上线前必做）**：CH 禁用 default 账号、executor 用专用只读账号（仅 SELECT 限定库表）+ TLS；VM 侧 TLS + 鉴权（vmauth 或反代）；数据源端口安全组仅对 executor 出口 IP 开放；残余风险 = 凭据强度，与 vmagent 通道一致，不新增安全等级；
 - **执行器永不直连平台 PG**：与控制面只走两个出站 HTTP（拉规则+源引用、报事件），凭据引用在执行器侧 env 解——runner「不写业务表」同款纪律，执行面经 API 契约通信、不共享数据库；executor→bingops API 同样走 X-Agent-Token + 平台侧白名单；
-- **运行形态**：Deployment 单副本 + 进程内节拍循环（每轮：拉配置 → 逐条评估 → 回报），优于 CronJob（无每分钟 Pod 冷启动）；进程内循环属执行器本职，不违反「评估循环不进 bingops 主进程」约束；重叠保护用进程内 flock；规则里的 interval_minutes 是查询窗口，循环频率是评估节拍，二者分化时再给规则加独立评估频率字段；
+- **运行形态**：Deployment 单副本 + 进程内节拍循环（每轮：拉配置 → 评估到期规则 → 回报），优于 CronJob（无每分钟 Pod 冷启动）；进程内循环属执行器本职，不违反「评估循环不进 bingops 主进程」约束；重叠保护用进程内 flock；**规则级扫描间隔 `eval_interval_seconds`（秒，默认 60）由执行器本地调度（next_due = last_eval + interval），与查询窗口 `interval_minutes` 独立**；
+
+**规则字段语义表（两类规则的字段职责，录入时对照）**：
+
+| 字段 | CH 日志规则 | VM 指标规则 |
+|---|---|---|
+| `eval_interval_seconds` | 扫描间隔（秒，多久评一次） | 同左 |
+| `interval_minutes` | 查询窗口（SQL `{window_minutes}` 占位） | 不参与（窗口写进 PromQL `[5m]`） |
+| `threshold` | 判定阈值（error_count ≥ threshold） | 不参与（比较写进表达式） |
+| `for_rounds` | 连续 M 轮达标才报 firing（防抖） | 同左（vector 非空计轮） |
+| `stale_minutes` | 恢复推导窗口（建议 2~3× 扫描间隔） | 同左 |
+| `eval_sql` | 聚合 SQL（单行两列 error_count+log_details） | PromQL 表达式（自带比较） |
+
 - **拉取方向恒为执行器→平台**：执行器零入站端口，平台零 agent 状态（无注册/心跳/存活管理），故障自愈靠下一轮重拉；规则变更生效延迟 ≤ 一个调度周期；
 - **演进路径**：将来建 CEN/对等连接内网互通后通道整体收进内网（vmagent→平台与 executor→数据源一并受益）；CH/VM 实例数增长到单实例管理不动时，按数据源静态归属分片为多执行器（契约不变）。
 
@@ -306,6 +320,14 @@ def resolve_credential(ref: str) -> str | None:
 - **Webhook 异步化（MQ/Redis Stream 缓冲）**：①「行锁竞争」是误解——部分唯一索引下不同规则的 INSERT 是不同行、完全并行，数千 INSERT/min 对 PG 是轻负载；②致命伤：notify 同步语义（响应体抑制判断）依赖同步处理，异步化会把通知状态逼回执行器，击穿「状态全在平台」设计。风暴场景的正解是渠道级聚合（Top N + 剩余计数），不是 MQ；
 - **一致性哈希分片（worker_id/total_workers）**：HPA 扩缩容时 N 变化 → 规则漂移 → for_rounds 计数失效 → 防抖抖动；动态共识复杂度违背无锁设计。静态归属分片（分片单位=数据源）更简更稳；
 - **防抖状态入 Redis**：计数丢失的后果是漏报几轮（方向安全：告警重启宁漏勿误），非误报；为可容忍代价引入 Redis 依赖不划算。「推给 PromQL FOR 语法」不可实现——FOR 是 rule engine 概念，裸 query 无此语义，必须执行器自维护（即 for_rounds）。
+
+**采纳项（2026-09-10 第二轮评审补充）**：
+- **唯一索引加数据源维度**：`uq_alert_active_firing` 改为 `(source, rule_code, COALESCE(monitoring_source_id, 0))`——修复平台原生规则（source 固定 bingops）跨数据源同名 code 互相吞没的正确性 bug；事件归属取规则绑定的数据源；
+- **error 顺延推导窗口**：评估失败（error 回报）时顺延活跃 firing 的 `last_seen_at`——评估失败=状态未知，保守保持告警，防数据源断连导致的 stale 假恢复风暴（优于「扫描时查 error 子查询」的冻结方案，实现更简）；
+- **执行器退化模式 RateLimiter**：平台不可用退化直发飞书时，同规则本地最小发送间隔（15min），防平台重启/发版期间飞书被刷屏（执行器实现职责）；
+- **labels GIN 索引**：支撑 app/env/hostname 的 JSONB 检索（零成本，表空期加入）。
+
+**第二轮部分拒绝**：webhook 同步临界区缩小（asyncio.Queue 解耦 CMDB 匹配/开单）——场景认知有误：CMDB 匹配是同库 IN 查询（毫秒级）而非「RPC 1~2s」，工单总闸默认关闭；进程内 Queue 还引入重启丢开单的交付语义问题。将来总闸开启+规模上去后再议「开单异步化」。
 
 ## 13. 实施顺序
 

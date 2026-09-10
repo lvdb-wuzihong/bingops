@@ -90,7 +90,10 @@ class AlertRuleCreate(BaseModel):
         description="评估 SQL，契约：单行两列 error_count + log_details；含 {window_minutes} 占位",
     )
     threshold: int = Field(default=1, ge=1)
-    interval_minutes: int = Field(default=1, ge=1)
+    interval_minutes: int = Field(default=1, ge=1, description="查询窗口（分钟）")
+    eval_interval_seconds: int = Field(
+        default=60, ge=10, description="规则级扫描间隔（秒），执行器按它调度本规则",
+    )
     for_rounds: int = Field(default=1, ge=1, description="连续 M 轮达标才报 firing（防抖）")
     detail_limit: int = Field(default=10, ge=1)
     grafana_url: str | None = None
@@ -112,6 +115,7 @@ class AlertRuleUpdate(BaseModel):
     eval_sql: str | None = None
     threshold: int | None = Field(default=None, ge=1)
     interval_minutes: int | None = Field(default=None, ge=1)
+    eval_interval_seconds: int | None = Field(default=None, ge=10)
     for_rounds: int | None = Field(default=None, ge=1)
     detail_limit: int | None = Field(default=None, ge=1)
     grafana_url: str | None = None
@@ -134,6 +138,7 @@ class AlertRuleResponse(BaseModel):
     eval_sql: str | None
     threshold: int
     interval_minutes: int
+    eval_interval_seconds: int
     for_rounds: int
     detail_limit: int
     grafana_url: str | None
@@ -214,6 +219,7 @@ def rule_to_response(rule: AlertRule) -> dict:
         eval_sql=rule.eval_sql,
         threshold=rule.threshold,
         interval_minutes=rule.interval_minutes,
+        eval_interval_seconds=rule.eval_interval_seconds,
         for_rounds=rule.for_rounds,
         detail_limit=rule.detail_limit,
         grafana_url=rule.grafana_url,
@@ -322,6 +328,7 @@ class AgentRuleConfig(BaseModel):
     threshold: int
     for_rounds: int
     detail_limit: int
+    eval_interval_seconds: int
     eval_sql: str | None
     stale_minutes: int
     default_severity: int

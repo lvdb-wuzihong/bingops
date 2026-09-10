@@ -577,17 +577,19 @@ CREATE TABLE alert_events (
     resource_ids   JSONB        NOT NULL DEFAULT '[]',      -- CMDB 尽力匹配
     details        JSONB,                                   -- 来源明细黑盒
     error          TEXT,
+    monitoring_source_id BIGINT,   -- 事件的数据源归属（规则绑定源；直报为 NULL）
     ticket_id      BIGINT,                                  -- 逻辑引用 tickets.id
     group_id       BIGINT,
     created_at     TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     updated_at     TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
 
--- 活跃 firing 唯一：同源同规则同时刻只有一条进行中事件（幂等合并的数据库保证）
+-- 活跃 firing 唯一：同源同规则同数据源只有一条进行中事件（幂等合并的数据库保证）
 CREATE UNIQUE INDEX uq_alert_active_firing
-    ON alert_events (source, rule_code) WHERE status = 'firing';
+    ON alert_events (source, rule_code, COALESCE(monitoring_source_id, 0)) WHERE status = 'firing';
 CREATE INDEX idx_alert_events_status_time ON alert_events (status, first_seen_at);
 CREATE INDEX idx_alert_events_last_seen ON alert_events (last_seen_at) WHERE status = 'firing';
+CREATE INDEX idx_alert_events_labels ON alert_events USING gin (labels);
 
 CREATE TABLE alert_rules (
     id               BIGSERIAL PRIMARY KEY,
@@ -605,6 +607,7 @@ CREATE TABLE alert_rules (
     eval_sql              TEXT,      -- 契约：单行两列 error_count + log_details
     threshold             BIGINT     NOT NULL DEFAULT 1,
     interval_minutes      INT        NOT NULL DEFAULT 1,
+    eval_interval_seconds INT        NOT NULL DEFAULT 60,  -- 规则级扫描间隔（秒），与查询窗口独立
     for_rounds            INT        NOT NULL DEFAULT 1,  -- 连续 M 轮达标才报 firing
     detail_limit          INT        NOT NULL DEFAULT 10,
     grafana_url           TEXT,

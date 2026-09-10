@@ -38,7 +38,9 @@ class AlertEvent(BaseMixin, Base):
     __table_args__ = (
         Index(
             "uq_alert_active_firing",
-            "source", "rule_code",
+            "source",
+            "rule_code",
+            text("COALESCE(monitoring_source_id, 0)"),
             unique=True,
             postgresql_where=text("status = 'firing'"),
         ),
@@ -48,6 +50,7 @@ class AlertEvent(BaseMixin, Base):
             "last_seen_at",
             postgresql_where=text("status = 'firing'"),
         ),
+        Index("idx_alert_events_labels", "labels", postgresql_using="gin"),
     )
 
     source: Mapped[str] = mapped_column(String(32), nullable=False)  # ck-log-alert | n9e
@@ -84,6 +87,8 @@ class AlertEvent(BaseMixin, Base):
     resource_ids: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
     details: Mapped[dict | list | None] = mapped_column(JSONB, nullable=True)  # 来源明细黑盒
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 事件的数据源归属（取自规则绑定的数据源；直报事件为 NULL，幂等归组时按 0 处理）
+    monitoring_source_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     ticket_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)  # 逻辑引用 tickets.id
     group_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
@@ -157,6 +162,8 @@ class AlertRule(BaseMixin, Base):
     eval_sql: Mapped[str | None] = mapped_column(Text, nullable=True)
     threshold: Mapped[int] = mapped_column(BigInteger, nullable=False, default=1)
     interval_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    # 规则级扫描间隔（秒）：执行器按它调度本规则；与 interval_minutes（查询窗口）独立
+    eval_interval_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=60)
     for_rounds: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     detail_limit: Mapped[int] = mapped_column(Integer, nullable=False, default=10)
     grafana_url: Mapped[str | None] = mapped_column(Text, nullable=True)

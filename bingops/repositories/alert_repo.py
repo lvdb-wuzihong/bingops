@@ -44,12 +44,22 @@ class AlertEventRepo:
         return result.scalar_one_or_none()
 
     async def get_active_firing(
-        self, source: str, rule_code: str,
+        self, source: str, rule_code: str, monitoring_source_id: int | None = None,
     ) -> AlertEvent | None:
+        """按 (source, rule_code, 数据源归属) 定位活跃 firing。
+
+        monitoring_source_id=None 匹配无归属的直报事件（与 COALESCE(id, 0) 归组语义一致）。
+        """
+        ds_cond = (
+            AlertEvent.monitoring_source_id.is_(None)
+            if monitoring_source_id is None
+            else AlertEvent.monitoring_source_id == monitoring_source_id
+        )
         result = await self.session.execute(
             select(AlertEvent).where(
                 AlertEvent.source == source,
                 AlertEvent.rule_code == rule_code,
+                ds_cond,
                 AlertEvent.status == "firing",
             )
         )

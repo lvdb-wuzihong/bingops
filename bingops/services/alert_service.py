@@ -85,9 +85,16 @@ async def handle_webhook_event(
     rule = await AlertRuleRepo(session).get_by_source_code(
         payload.source, payload.rule_code,
     )
+    # 事件的数据源归属：取规则绑定的数据源（幂等归组键的一部分，防跨数据源同名规则吞没）
+    ds_id = rule.source_id if rule else None
 
-    # error 旁路：独立落行，不进状态机、不开单
+    # error 旁路：独立落行不进状态机；但需顺延活跃 firing 的推导窗口——
+    # 评估失败说明「状态未知」，保守保持告警而非让 stale 超时制造假恢复
     if payload.status == "error":
+        active = await repo.get_active_firing(payload.source, payload.rule_code, ds_id)
+        if active is not None:
+            active.last_seen_at = now
+            await repo.update(active)
         event = await repo.create(AlertEvent(
             source=payload.source,
             rule_code=payload.rule_code,
@@ -100,6 +107,7 @@ async def handle_webhook_event(
             labels=_merged_labels(rule, payload.labels),
             details=payload.details,
             error=payload.error,
+            monitoring_source_id=ds_id,
             group_id=rule.group_id if rule else None,
         ))
         await session.commit()
@@ -115,7 +123,7 @@ async def handle_webhook_event(
 
     # resolved 直传（仅夜莺等自带恢复语义的来源）
     if payload.status == "resolved":
-        active = await repo.get_active_firing(payload.source, payload.rule_code)
+        active = await repo.get_active_firing(payload.source, payload.rule_code, ds_id)
         if active is None:
             # 无活跃 firing 的 resolved 属于迟到的重复通知，忽略即可
             logger.debug(
@@ -132,7 +140,7 @@ async def handle_webhook_event(
         return _webhook_result(active.id, notify=False, suppress_reason="resolved")
 
     # firing：合并或新建
-    active = await repo.get_active_firing(payload.source, payload.rule_code)
+    active = await repo.get_active_firing(payload.source, payload.rule_code, ds_id)
     if active is not None:
         # repeat 判断必须在更新 updated_at 之前（updated_at ≈ 上次通知基准）
         repeat_due = (
@@ -172,6 +180,7 @@ async def handle_webhook_event(
         labels=_merged_labels(rule, payload.labels),
         resource_ids=await _match_resources(session, payload.labels),
         details=payload.details,
+        monitoring_source_id=ds_id,
         group_id=rule.group_id if rule else None,
     ))
     try:
@@ -179,7 +188,7 @@ async def handle_webhook_event(
     except IntegrityError:
         # 并发兜底：活跃 firing 已被其他请求创建 → 退化为合并路径
         await session.rollback()
-        raced = await repo.get_active_firing(payload.source, payload.rule_code)
+        raced = await repo.get_active_firing(payload.source, payload.rule_code, ds_id)
         if raced is not None:
             raced.last_seen_at = now
             await repo.update(raced)
@@ -460,6 +469,7 @@ async def create_rule(session: AsyncSession, payload: AlertRuleCreate) -> AlertR
         eval_sql=payload.eval_sql,
         threshold=payload.threshold,
         interval_minutes=payload.interval_minutes,
+        eval_interval_seconds=payload.eval_interval_seconds,
         for_rounds=payload.for_rounds,
         detail_limit=payload.detail_limit,
         grafana_url=payload.grafana_url,
@@ -654,6 +664,7 @@ async def build_agent_config(session: AsyncSession) -> dict:
             threshold=rule.threshold,
             for_rounds=rule.for_rounds,
             detail_limit=rule.detail_limit,
+            eval_interval_seconds=rule.eval_interval_seconds,
             eval_sql=rule.eval_sql,
             stale_minutes=rule.stale_minutes,
             default_severity=rule.default_severity,
