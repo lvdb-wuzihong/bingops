@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, Header, Query
+from fastapi import APIRouter, Depends, Header, Query, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bingops.api.dependencies import get_db_session, require_permission
