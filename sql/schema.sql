@@ -543,8 +543,6 @@ CREATE TABLE monitoring_sources (
     username      VARCHAR(64),                    -- 只读账号（红线：禁 default/写权限）
     password_ref  VARCHAR(128) NOT NULL,          -- 凭据引用名（凭据在 executor 侧 env）
     secure        BOOLEAN      NOT NULL DEFAULT FALSE,  -- TLS
-    region        VARCHAR(64),                    -- 环境/VPC 归属（值域对齐 CMDB region）
-    vpc           VARCHAR(128),                   -- VPC provider_id（可选）
     enabled       BOOLEAN      NOT NULL DEFAULT TRUE,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()

@@ -591,8 +591,6 @@ async def create_source(
         username=payload.username,
         password_ref=payload.password_ref,
         secure=payload.secure,
-        region=payload.region,
-        vpc=payload.vpc,
         enabled=payload.enabled,
     ))
     await session.commit()

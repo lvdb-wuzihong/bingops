@@ -105,8 +105,6 @@ class MonitoringSource(BaseMixin, Base):
     username: Mapped[str | None] = mapped_column(String(64), nullable=True)  # 只读账号
     password_ref: Mapped[str] = mapped_column(String(128), nullable=False)
     secure: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)  # TLS
-    region: Mapped[str | None] = mapped_column(String(64), nullable=True)  # 环境/VPC 归属
-    vpc: Mapped[str | None] = mapped_column(String(128), nullable=True)  # VPC provider_id
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
 

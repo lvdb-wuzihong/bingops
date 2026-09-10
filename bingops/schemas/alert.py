@@ -240,8 +240,6 @@ class MonitoringSourceCreate(BaseModel):
                     "数据源无认证时填 NO_AUTH（仅限内网/白名单可达）",
     )
     secure: bool = False
-    region: str | None = Field(default=None, max_length=64)
-    vpc: str | None = Field(default=None, max_length=128)
     enabled: bool = True
 
 
@@ -252,8 +250,6 @@ class MonitoringSourceUpdate(BaseModel):
     username: str | None = None
     password_ref: str | None = Field(default=None, max_length=128)
     secure: bool | None = None
-    region: str | None = None
-    vpc: str | None = None
     enabled: bool | None = None
 
 
@@ -267,8 +263,6 @@ class MonitoringSourceResponse(BaseModel):
     username: str | None
     password_ref: str
     secure: bool
-    region: str | None
-    vpc: str | None
     enabled: bool
     created_at: datetime
     updated_at: datetime
@@ -286,8 +280,6 @@ def source_to_response(src: MonitoringSource) -> dict:
         username=src.username,
         password_ref=src.password_ref,
         secure=src.secure,
-        region=src.region,
-        vpc=src.vpc,
         enabled=src.enabled,
         created_at=src.created_at,
         updated_at=src.updated_at,

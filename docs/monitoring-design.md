@@ -260,19 +260,19 @@ def report_event(cfg: dict, rule: dict, status: str, total: int,
 
 | 能力 | 位置 | 说明 |
 |------|------|------|
-| 数据源管理 | bingops（类 Grafana/夜莺体验） | type（clickhouse / victoria / prometheus）、名称、非敏感连接参数、`password_ref`（决策 8 红线）、环境/VPC 归属 |
+| 数据源管理 | bingops（类 Grafana/夜莺体验） | type（clickhouse / victoria / prometheus）、名称、非敏感连接参数、`password_ref`（决策 8 红线） |
 | 告警规则配置 | bingops UI | eval_sql / threshold / 窗口 / stale_minutes / 处理组，绑定数据源 |
 | 评估执行 | 独立执行器（**新建项目 alert-executor**，双评估器：clickhouse SQL 契约 error_count+log_details〔参考 ck-log-alert：去重聚合/三段式卡片/Grafana 毫秒跳转〕+ victoria prometheus PromQL〔表达式自带比较，vector 非空即触发，夜莺退役后接管指标〕；独立仓库，决策 9） | 进程内节拍循环：拉规则 + 源引用 → 按源类型选评估器 → 报事件 + 发飞书 |
 | 事件闭环 | bingops | webhook / 状态机 / 工单 / 统计（本文 §4~§9，一期交付） |
 
 **调度与锁语义（刻意无分布式锁）**：
-- 调度层：cron 天然单点；多数据源（多 VPC）时规则按数据源静态归属到就近执行器，天然分片；
+- 调度层：执行器单实例节拍循环，天然单点（VPC 分片暂不启用——见部署边界简化）；将来多执行器时规则按数据源静态归属分片；
 - 执行层：单条规则重叠保护（评估耗时超过间隔时 flock 跳过本轮）；
 - 平台层：无需锁，事件幂等靠 `uq_active_firing` 唯一约束兜底。
 
 仅当「同一数据源多执行器实例 HA」成为真实需求时才引入 lease，当前不预设。
 
-**部署与网络边界**（事实基座：CH 与 VM 均为多套、分布不同 VPC；各 VPC vmagent 跨 VPC 走公网访问平台端点 + 云端安全组源 IP 白名单——executor 沿用同一通道模式）：
+**部署与网络边界**（2026-09-10 用户简化：**VPC 不作为管理/调度维度，monitoring_sources 的 region/vpc 字段已删除**——单执行器公网加白出口 IP 即可访问全部数据源；各 VPC vmagent 跨 VPC 走公网访问平台端点 + 安全组源 IP 白名单，executor 沿用同一通道模式）：
 - **单实例 executor**：一个 Deployment（bingops 同 VPC）按数据源注册表公网访问各 VPC 的 CH/VM，安全组源 IP 限定 executor 出口（VPC 内 K8s 经 NAT 网关出口 IP 固定，白名单可维护）——与 vmagent→平台完全同构；
 - **公网通道加固条件（上线前必做）**：CH 禁用 default 账号、executor 用专用只读账号（仅 SELECT 限定库表）+ TLS；VM 侧 TLS + 鉴权（vmauth 或反代）；数据源端口安全组仅对 executor 出口 IP 开放；残余风险 = 凭据强度，与 vmagent 通道一致，不新增安全等级；
 - **执行器永不直连平台 PG**：与控制面只走两个出站 HTTP（拉规则+源引用、报事件），凭据引用在执行器侧 env 解——runner「不写业务表」同款纪律，执行面经 API 契约通信、不共享数据库；executor→bingops API 同样走 X-Agent-Token + 平台侧白名单；
@@ -292,6 +292,20 @@ def resolve_credential(ref: str) -> str | None:
 ```
 
 三期触发条件（评估循环是否内聚进平台再议）：多 VPC 多执行器实例化 / 规则数显著增长 / 执行器已薄至「拉取 → 评估 → 回报」三步。届时成本 = 三大件（评估调度器 + 多副本协调、数据源查询客户端、飞书通知媒介进平台），收益 = 少维护一个执行器组件；故障域耦合（平台发版 = 告警盲窗）是永久代价，由真实数据权衡。
+
+### 万级演进预留（10k 规则前的工程化清单，2026-09-10 评审后定稿）
+
+**采纳项**：
+- **分发版本协商**：执行器带版本号拉 `agent/config`，规则无变化返回空体（避免万级每轮 10-20MB 全量传输）；
+- **执行器并发评估池**：asyncio Semaphore（16-32，按数据源分组限流）+ 每条评估硬超时（5-10s）——万级下串行必死；
+- **舱壁隔离**：静态分片天然支持（CH 慢查询只影响 CH 执行器），进程内 PromQL/SQL 双池叠加；
+- **stale 扫描批量更新**：万级活跃 firing 时分批 LIMIT（避免长事务）；扫描输入改纯 SQL 差集判断（少拉内存）；
+- **事件保留期清理（Retention）**：resolved 事件保留 90 天，后台任务定期清理（复用 stale sweep 模式）。
+
+**拒绝项（记录理由，防止将来被同类建议带偏）**：
+- **Webhook 异步化（MQ/Redis Stream 缓冲）**：①「行锁竞争」是误解——部分唯一索引下不同规则的 INSERT 是不同行、完全并行，数千 INSERT/min 对 PG 是轻负载；②致命伤：notify 同步语义（响应体抑制判断）依赖同步处理，异步化会把通知状态逼回执行器，击穿「状态全在平台」设计。风暴场景的正解是渠道级聚合（Top N + 剩余计数），不是 MQ；
+- **一致性哈希分片（worker_id/total_workers）**：HPA 扩缩容时 N 变化 → 规则漂移 → for_rounds 计数失效 → 防抖抖动；动态共识复杂度违背无锁设计。静态归属分片（分片单位=数据源）更简更稳；
+- **防抖状态入 Redis**：计数丢失的后果是漏报几轮（方向安全：告警重启宁漏勿误），非误报；为可容忍代价引入 Redis 依赖不划算。「推给 PromQL FOR 语法」不可实现——FOR 是 rule engine 概念，裸 query 无此语义，必须执行器自维护（即 for_rounds）。
 
 ## 13. 实施顺序
 
