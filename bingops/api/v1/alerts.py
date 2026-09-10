@@ -77,15 +77,19 @@ async def report_alert_event(
 
 @router.get("/agent/config")
 async def get_agent_config(
+    version: str | None = Query(None, description="执行器当前持有的分发体指纹；一致时返回空体"),
     x_agent_token: str | None = Header(default=None, alias="X-Agent-Token"),
     session: AsyncSession = Depends(get_db_session),
 ) -> dict:
-    """执行器拉取启用规则 + 数据源（凭据只带引用名，红线决策 8）。
+    """执行器拉取启用规则 + 数据源 + 通知渠道（凭据只带引用名，红线决策 8）。
 
+    版本协商：携带 version 与当前分发体指纹一致时返回空 data（无变化），
     规则变更生效延迟 ≤ 一个执行器评估周期；拉取方向恒为执行器→平台。
     """
     _verify_agent_token(x_agent_token)
-    config = await alert_service.build_agent_config(session)
+    config = await alert_service.build_agent_config(session, held_version=version)
+    if config is None:
+        return success_response(data={"version": version}, message="not modified")
     return success_response(data=config, message="ok")
 
 

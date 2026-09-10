@@ -8,6 +8,7 @@ error 为独立旁路行。全部写操作幂等（uq_alert_active_firing 兜底
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 from datetime import UTC, datetime
@@ -647,10 +648,23 @@ async def delete_source(session: AsyncSession, source_id: int) -> None:
 # ── Agent 分发（二期：§12 分发 API） ─────────────────────────────────────────
 
 
-async def build_agent_config(session: AsyncSession) -> dict:
+def _config_version(rules: list[AgentRuleConfig]) -> str:
+    """分发体内容指纹（sha256 前 12 位）：规则变更 → 指纹变化 → 执行器重新 apply。"""
+    raw = json.dumps(
+        [rule.model_dump(mode="json") for rule in rules],
+        sort_keys=True, ensure_ascii=False, default=str,
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
+
+
+async def build_agent_config(
+    session: AsyncSession, held_version: str | None = None,
+) -> dict | None:
     """组装执行器拉取的分发体：启用规则 + 启用数据源（凭据只带引用名）。
 
     未绑定数据源或数据源被禁用的规则不分发（无法评估）。
+    版本协商（§12 万级采纳项）：held_version 与当前内容指纹一致时返回 None，
+    API 层回空体，避免万级规则下每轮全量传输。
     """
     pairs = await AlertRuleRepo(session).list_agent_rules()
     rules: list[AgentRuleConfig] = []
@@ -694,8 +708,13 @@ async def build_agent_config(session: AsyncSession) -> dict:
                 if channel is not None and channel.enabled else None
             ),
         ))
+    config = AgentConfigResponse(
+        version=_config_version(rules), rules=rules,
+    ).model_dump(mode="json")
+    if held_version is not None and config["version"] == held_version:
+        return None
     logger.info("Agent config dispatched", extra={"rule_count": len(rules)})
-    return AgentConfigResponse(rules=rules).model_dump(mode="json")
+    return config
 
 
 # ── 通知渠道 CRUD（二期：§12 渠道登记，发送仍在执行器） ──────────────────────

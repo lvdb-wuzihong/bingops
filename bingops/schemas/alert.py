@@ -344,8 +344,11 @@ class AgentRuleConfig(BaseModel):
 
 
 class AgentConfigResponse(BaseModel):
-    """GET /api/v1/alerts/agent/config 响应体。"""
+    """GET /api/v1/alerts/agent/config 响应体（统一信封 data 节点）。"""
 
+    version: str = Field(
+        description="分发体内容指纹（sha256 前 12 位）；执行器持有相同版本时返回空体",
+    )
     rules: list[AgentRuleConfig]
 
 
