@@ -60,6 +60,9 @@ logger = logging.getLogger(f"bingops.{__name__}")
 REPEAT_NOTIFY_MINUTES = 30
 # 无规则映射的 firing 的默认 stale 恢复窗口（有映射时取规则 stale_minutes）
 DEFAULT_STALE_MINUTES = 15
+# error 通知节流窗口（分钟）：距同规则上一条 error 不足该值时 notify=false。
+# 多副本权威判定：DB 事务串行化保证并发回报时恰好一个执行器实例拿到 notify=true。
+ERROR_NOTIFY_MIN_MINUTES = 15
 # stale 扫描周期
 STALE_SWEEP_INTERVAL_SECONDS = 60
 # severity → 工单优先级映射（urgent 留给人为判断）
@@ -131,7 +134,29 @@ async def handle_webhook_event(
                 "error_message": (payload.error or "")[:200],
             },
         )
-        return _webhook_result(event.id, notify=False, suppress_reason="error event recorded")
+        # error 通知节流（§4.2 notify 协议延伸，多副本权威判定，状态只有 DB 一份）：
+        # 距同规则上一条 error 不足 ERROR_NOTIFY_MIN_MINUTES → notify=false，执行器跳过橙卡。
+        last_error_at = await repo.last_error_seen_at(
+            payload.source, payload.rule_code, exclude_id=event.id,
+        )
+        notify_due = (
+            last_error_at is None
+            or (now - last_error_at).total_seconds() >= ERROR_NOTIFY_MIN_MINUTES * 60
+        )
+        logger.warning(
+            "Alert evaluation error recorded",
+            extra={
+                "source": payload.source,
+                "rule_code": payload.rule_code,
+                "error_message": (payload.error or "")[:200],
+                "notify_due": notify_due,
+            },
+        )
+        return _webhook_result(
+            event.id,
+            notify=notify_due,
+            suppress_reason=None if notify_due else "error notify throttled",
+        )
 
     # resolved 直传（仅夜莺等自带恢复语义的来源）
     if payload.status == "resolved":

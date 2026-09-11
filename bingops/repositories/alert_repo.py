@@ -44,6 +44,23 @@ class AlertEventRepo:
         )
         return result.scalar_one_or_none()
 
+    async def last_error_seen_at(
+        self, source: str, rule_code: str, exclude_id: int,
+    ) -> datetime | None:
+        """同规则最近一条 error 事件的时间（排除当前行），用于 error 通知节流判定。"""
+        result = await self.session.execute(
+            select(AlertEvent.last_seen_at)
+            .where(
+                AlertEvent.source == source,
+                AlertEvent.rule_code == rule_code,
+                AlertEvent.status == "error",
+                AlertEvent.id != exclude_id,
+            )
+            .order_by(AlertEvent.last_seen_at.desc())
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
+
     async def get_active_firing(
         self, source: str, rule_code: str, monitoring_source_id: int | None = None,
     ) -> AlertEvent | None:
@@ -147,7 +164,8 @@ class AlertEventRepo:
                 "error_count": row.error_count or 0,
                 # 日志事件流水维度：告警记录条数 + 错误量趋势（看板原料）
                 "recorded_count": row.recorded_count or 0,
-                "recorded_error_total": row.recorded_error_total or 0,
+                # sum(bigint) 返回 numeric → Decimal，出库立即转 int 保证 JSON 可序列化
+                "recorded_error_total": int(row.recorded_error_total or 0),
             }
             for row in rows
         ]
