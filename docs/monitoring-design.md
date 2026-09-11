@@ -216,6 +216,7 @@ error 回报 → 独立落行（status='error'），不进状态机、不开单�
 - `GET /api/v1/alerts/events?status=&source=&rule_code=&since=&until=` 分页列表
 - `GET /api/v1/alerts/stats/summary?since=&until=&group_by=source|rule_code|group_id|day`
   - 各 status 事件数、当前活跃 firing 数、平均恢复时长 `avg(resolved_at - first_seen_at)`
+  - 顶层另含日志类汇总：`recorded_total` / `error_total` / `recorded_error_total`（日志告警不进 firing→resolved 闭环，看板卡片需单独口径，与生命周期卡片分开展示）
 - 高频 firing 规则排名即噪声规则治理清单。权限码按 RBAC 规范注册（建议 `alert:read` / `alert:manage`）。
 
 ## 10. ck-log-alert 适配清单（约 +30 行）

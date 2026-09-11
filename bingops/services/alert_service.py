@@ -648,6 +648,10 @@ async def stats_summary(
         "group_by": group_by,
         "groups": groups,
         "active_firing_total": active_total,
+        # 日志类告警不进 firing→resolved 闭环，卡片需单独口径展示
+        "recorded_total": sum(item["recorded_count"] for item in groups),
+        "error_total": sum(item["error_count"] for item in groups),
+        "recorded_error_total": sum(item["recorded_error_total"] for item in groups),
         "avg_resolve_seconds": round(avg_seconds, 1) if avg_seconds is not None else None,
     }
 
