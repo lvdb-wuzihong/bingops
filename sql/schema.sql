@@ -564,7 +564,7 @@ CREATE TABLE alert_events (
     source         VARCHAR(32)  NOT NULL,
     rule_code      VARCHAR(128) NOT NULL,
     rule_name      VARCHAR(255),
-    status         VARCHAR(16)  NOT NULL DEFAULT 'firing',  -- firing | resolved | error
+    status         VARCHAR(16)  NOT NULL DEFAULT 'firing',  -- firing|resolved|error|recorded(日志事件流水)
     window_start   TIMESTAMPTZ,
     window_end     TIMESTAMPTZ,
     first_seen_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
@@ -578,6 +578,7 @@ CREATE TABLE alert_events (
     details        JSONB,                                   -- 来源明细黑盒
     error          TEXT,
     monitoring_source_id BIGINT,   -- 事件的数据源归属（规则绑定源；直报为 NULL）
+    rule_kind      VARCHAR(8),     -- 告警类型：log(事件型) | metric(状态型)，写入时定型
     ticket_id      BIGINT,                                  -- 逻辑引用 tickets.id
     group_id       BIGINT,
     created_at     TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
@@ -590,6 +591,7 @@ CREATE UNIQUE INDEX uq_alert_active_firing
 CREATE INDEX idx_alert_events_status_time ON alert_events (status, first_seen_at);
 CREATE INDEX idx_alert_events_last_seen ON alert_events (last_seen_at) WHERE status = 'firing';
 CREATE INDEX idx_alert_events_labels ON alert_events USING gin (labels);
+CREATE INDEX idx_alert_events_kind_time ON alert_events (rule_kind, first_seen_at);
 
 CREATE TABLE alert_rules (
     id               BIGSERIAL PRIMARY KEY,

@@ -21,6 +21,7 @@ VALID_SEVERITIES = (1, 2, 3)
 VALID_GROUP_BYS = ("source", "rule_code", "group_id", "day")
 VALID_SOURCE_TYPES = ("clickhouse", "victoria", "prometheus")
 VALID_CHANNEL_TYPES = ("feishu_webhook",)
+VALID_RULE_KINDS = ("log", "metric")
 # 凭据约定：password_ref/secret_ref 填此值 = 数据源无认证（执行器连接时不带凭据）；
 # 仅限内网/白名单可达的数据源使用，加认证后应改为 env 变量名
 NO_AUTH_REF = "NO_AUTH"
@@ -169,6 +170,9 @@ class AlertEventResponse(BaseModel):
     resource_ids: list
     details: Any | None
     error: str | None
+    # 告警类型：log（事件型）| metric（状态型）；写入时定型（规则绑定数据源 type 推导）
+    rule_kind: str | None
+    monitoring_source_id: int | None
     ticket_id: int | None
     group_id: int | None
     created_at: datetime
@@ -195,6 +199,8 @@ def event_to_response(event: AlertEvent) -> dict:
         resource_ids=event.resource_ids or [],
         details=event.details,
         error=event.error,
+        rule_kind=event.rule_kind,
+        monitoring_source_id=event.monitoring_source_id,
         ticket_id=event.ticket_id,
         group_id=event.group_id,
         created_at=event.created_at,
@@ -329,6 +335,9 @@ class AgentRuleConfig(BaseModel):
     for_rounds: int
     detail_limit: int
     eval_interval_seconds: int
+    # 执行器本地限流兜底：持续 firing 期间同规则最小飞书发送间隔（分钟）；
+    # 更精确的抑制以 webhook 响应 data.notify 为准（执行器读响应后本字段仅作平台不可用时的兜底）
+    notify_interval_minutes: int
     eval_sql: str | None
     stale_minutes: int
     default_severity: int

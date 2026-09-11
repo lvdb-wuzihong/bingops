@@ -66,6 +66,8 @@ STALE_SWEEP_INTERVAL_SECONDS = 60
 SEVERITY_TO_PRIORITY = {1: "high", 2: "medium", 3: "low"}
 # CMDB 尽力匹配的 labels 键（hostname → 主机资源；pod* → k8s pod 资源）
 MATCH_LABEL_KEYS = ("hostname", "pod_name", "pod")
+# 直报来源 → 告警类型映射（无数据源归属的事件按来源判定）
+_SOURCE_KIND_MAP = {"ck-log-alert": "log", "n9e": "metric"}
 # 开单描述中 details 摘要的最大长度
 _TICKET_DETAILS_MAX_CHARS = 2000
 
@@ -88,6 +90,14 @@ async def handle_webhook_event(
     )
     # 事件的数据源归属：取规则绑定的数据源（幂等归组键的一部分，防跨数据源同名规则吞没）
     ds_id = rule.source_id if rule else None
+    # 告警类型：规则绑定数据源的 type 推导；直报来源按映射（log=事件型 / metric=状态型），写入时定型
+    rule_kind: str | None = None
+    if ds_id is not None:
+        src = await MonitoringSourceRepo(session).get_by_id(ds_id)
+        if src is not None:
+            rule_kind = "log" if src.type == "clickhouse" else "metric"
+    else:
+        rule_kind = _SOURCE_KIND_MAP.get(payload.source)
 
     # error 旁路：独立落行不进状态机；但需顺延活跃 firing 的推导窗口——
     # 评估失败说明「状态未知」，保守保持告警而非让 stale 超时制造假恢复
@@ -109,6 +119,7 @@ async def handle_webhook_event(
             details=payload.details,
             error=payload.error,
             monitoring_source_id=ds_id,
+            rule_kind=rule_kind,
             group_id=rule.group_id if rule else None,
         ))
         await session.commit()
@@ -140,8 +151,36 @@ async def handle_webhook_event(
         await _after_resolved(session, active)
         return _webhook_result(active.id, notify=False, suppress_reason="resolved")
 
-    # firing：合并或新建
+    # firing：按告警类型分流——
+    #   metric（指标）= 状态机：firing 合并续命 → resolved/stale；
+    #   log（日志）= 事件流水：每轮命中记一条 recorded（无状态、不合并、无恢复概念），
+    #   执行器仍报 firing（契约不变），平台按 rule_kind 转译。
+    severity = payload.severity or (rule.default_severity if rule else 2)
     active = await repo.get_active_firing(payload.source, payload.rule_code, ds_id)
+    if rule_kind == "log":
+        event = await repo.create(AlertEvent(
+            source=payload.source,
+            rule_code=payload.rule_code,
+            rule_name=payload.rule_name,
+            status="recorded",
+            window_start=payload.window_start,
+            window_end=payload.window_end,
+            first_seen_at=now,
+            last_seen_at=now,
+            total_count=payload.total_count or 0,
+            severity=severity,
+            labels=_merged_labels(rule, payload.labels),
+            resource_ids=await _match_resources(session, payload.labels),
+            details=payload.details,
+            monitoring_source_id=ds_id,
+            rule_kind=rule_kind,
+            group_id=rule.group_id if rule else None,
+        ))
+        await session.commit()
+        # log 事件型不开单（逐条命中开单会淹没工单系统）；飞书由执行器每轮直发
+        # （用户决策：持续告警合理），RateLimiter 以 notify_interval_minutes 兜底防平台故障刷屏
+        return _webhook_result(event.id, notify=True)
+
     if active is not None:
         # repeat 判断必须在更新 updated_at 之前（updated_at ≈ 上次通知基准）
         repeat_due = (
@@ -166,7 +205,6 @@ async def handle_webhook_event(
         )
 
     # 新建 firing
-    severity = payload.severity or (rule.default_severity if rule else 2)
     event = await repo.create(AlertEvent(
         source=payload.source,
         rule_code=payload.rule_code,
@@ -182,6 +220,7 @@ async def handle_webhook_event(
         resource_ids=await _match_resources(session, payload.labels),
         details=payload.details,
         monitoring_source_id=ds_id,
+        rule_kind=rule_kind,
         group_id=rule.group_id if rule else None,
     ))
     try:
@@ -569,11 +608,16 @@ async def stats_summary(
     group_by: str,
     since: datetime | None = None,
     until: datetime | None = None,
+    rule_kind: str | None = None,
 ) -> dict:
     """各分组状态计数 + 当前活跃 firing 总数 + 平均恢复时长。"""
     repo = AlertEventRepo(session)
-    groups = await repo.stats_grouped(group_by=group_by, since=since, until=until)
-    avg_seconds = await repo.avg_resolve_seconds(since=since, until=until)
+    groups = await repo.stats_grouped(
+        group_by=group_by, since=since, until=until, rule_kind=rule_kind,
+    )
+    avg_seconds = await repo.avg_resolve_seconds(
+        since=since, until=until, rule_kind=rule_kind,
+    )
     active_total = sum(item["firing_count"] for item in groups)
     return {
         "group_by": group_by,
@@ -679,6 +723,8 @@ async def build_agent_config(
             for_rounds=rule.for_rounds,
             detail_limit=rule.detail_limit,
             eval_interval_seconds=rule.eval_interval_seconds,
+            # 执行器本地限流兜底间隔（防平台不可用/响应未读时的飞书轰炸）
+            notify_interval_minutes=15,
             eval_sql=rule.eval_sql,
             stale_minutes=rule.stale_minutes,
             default_severity=rule.default_severity,

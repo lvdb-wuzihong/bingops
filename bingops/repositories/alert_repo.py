@@ -21,6 +21,7 @@ _GROUP_DIMS = {
     "source": "source",
     "rule_code": "rule_code",
     "group_id": "group_id",
+    "rule_kind": "rule_kind",
 }
 
 
@@ -78,6 +79,7 @@ class AlertEventRepo:
         status: str | None = None,
         source: str | None = None,
         rule_code: str | None = None,
+        rule_kind: str | None = None,
         since: datetime | None = None,
         until: datetime | None = None,
         page: int = 1,
@@ -90,6 +92,8 @@ class AlertEventRepo:
             query = query.where(AlertEvent.source == source)
         if rule_code:
             query = query.where(AlertEvent.rule_code == rule_code)
+        if rule_kind:
+            query = query.where(AlertEvent.rule_kind == rule_kind)
         if since is not None:
             query = query.where(AlertEvent.first_seen_at >= since)
         if until is not None:
@@ -109,6 +113,7 @@ class AlertEventRepo:
         group_by: str,
         since: datetime | None = None,
         until: datetime | None = None,
+        rule_kind: str | None = None,
     ) -> list[dict]:
         """按维度聚合各状态事件数（firing 计数即当前活跃数）。"""
         if group_by == "day":
@@ -121,7 +126,13 @@ class AlertEventRepo:
             func.count().filter(AlertEvent.status == "firing").label("firing_count"),
             func.count().filter(AlertEvent.status == "resolved").label("resolved_count"),
             func.count().filter(AlertEvent.status == "error").label("error_count"),
+            func.count().filter(AlertEvent.status == "recorded").label("recorded_count"),
+            func.coalesce(
+                func.sum(AlertEvent.total_count).filter(AlertEvent.status == "recorded"), 0,
+            ).label("recorded_error_total"),
         ).group_by(dim)
+        if rule_kind:
+            base = base.where(AlertEvent.rule_kind == rule_kind)
         if since is not None:
             base = base.where(AlertEvent.first_seen_at >= since)
         if until is not None:
@@ -134,6 +145,9 @@ class AlertEventRepo:
                 "firing_count": row.firing_count or 0,
                 "resolved_count": row.resolved_count or 0,
                 "error_count": row.error_count or 0,
+                # 日志事件流水维度：告警记录条数 + 错误量趋势（看板原料）
+                "recorded_count": row.recorded_count or 0,
+                "recorded_error_total": row.recorded_error_total or 0,
             }
             for row in rows
         ]
@@ -143,6 +157,7 @@ class AlertEventRepo:
         *,
         since: datetime | None = None,
         until: datetime | None = None,
+        rule_kind: str | None = None,
     ) -> float | None:
         """平均恢复时长（first_seen_at → resolved_at），仅 resolved 事件。"""
         query = select(
@@ -151,6 +166,8 @@ class AlertEventRepo:
             AlertEvent.status == "resolved",
             AlertEvent.resolved_at.is_not(None),
         )
+        if rule_kind:
+            query = query.where(AlertEvent.rule_kind == rule_kind)
         if since is not None:
             query = query.where(AlertEvent.first_seen_at >= since)
         if until is not None:

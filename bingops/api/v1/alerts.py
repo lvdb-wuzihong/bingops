@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, Header, Query, Response
+from fastapi import APIRouter, Depends, Header, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bingops.api.dependencies import get_db_session, require_permission
@@ -20,6 +20,7 @@ from bingops.core.response import paginated_response, success_response
 from bingops.models.user import User
 from bingops.schemas.alert import (
     VALID_GROUP_BYS,
+    VALID_RULE_KINDS,
     AlertRuleCreate,
     AlertRuleUpdate,
     AlertWebhookPayload,
@@ -101,6 +102,7 @@ async def list_alert_events(
     status: str | None = Query(None, description="firing|resolved|error"),
     source: str | None = None,
     rule_code: str | None = None,
+    rule_kind: str | None = Query(None, description="log(日志/事件型) | metric(指标/状态型)"),
     since: datetime | None = None,
     until: datetime | None = None,
     page: int = Query(1, ge=1),
@@ -115,6 +117,7 @@ async def list_alert_events(
         status=status,
         source=source,
         rule_code=rule_code,
+        rule_kind=rule_kind,
         since=since,
         until=until,
         page=page,
@@ -133,7 +136,8 @@ async def list_alert_events(
 
 @router.get("/stats/summary")
 async def alert_stats_summary(
-    group_by: str = Query("source", description="source|rule_code|group_id|day"),
+    group_by: str = Query("source", description="source|rule_code|group_id|day|rule_kind"),
+    rule_kind: str | None = Query(None, description="只统计 log 或 metric 类事件"),
     since: datetime | None = None,
     until: datetime | None = None,
     session: AsyncSession = Depends(get_db_session),
@@ -145,8 +149,10 @@ async def alert_stats_summary(
     """
     if group_by not in VALID_GROUP_BYS:
         raise ValidationError(f"group_by must be one of: {VALID_GROUP_BYS}")
+    if rule_kind is not None and rule_kind not in VALID_RULE_KINDS:
+        raise ValidationError(f"rule_kind must be one of: {VALID_RULE_KINDS}")
     summary = await alert_service.stats_summary(
-        session, group_by=group_by, since=since, until=until,
+        session, group_by=group_by, since=since, until=until, rule_kind=rule_kind,
     )
     return success_response(data=summary)
 

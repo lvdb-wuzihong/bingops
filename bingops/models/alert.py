@@ -51,6 +51,7 @@ class AlertEvent(BaseMixin, Base):
             postgresql_where=text("status = 'firing'"),
         ),
         Index("idx_alert_events_labels", "labels", postgresql_using="gin"),
+        Index("idx_alert_events_kind_time", "rule_kind", "first_seen_at"),
     )
 
     source: Mapped[str] = mapped_column(String(32), nullable=False)  # ck-log-alert | n9e
@@ -89,6 +90,8 @@ class AlertEvent(BaseMixin, Base):
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     # 事件的数据源归属（取自规则绑定的数据源；直报事件为 NULL，幂等归组时按 0 处理）
     monitoring_source_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # 告警类型：log（CH 事件型，恢复=自动关闭语义）| metric（状态型，恢复=状态回归语义）；写入时定型
+    rule_kind: Mapped[str | None] = mapped_column(String(8), nullable=True)
     ticket_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)  # 逻辑引用 tickets.id
     group_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
