@@ -44,6 +44,23 @@ class AlertEventRepo:
         )
         return result.scalar_one_or_none()
 
+    async def last_recorded_seen_at(
+        self, source: str, rule_code: str, exclude_id: int,
+    ) -> datetime | None:
+        """同规则最近一条 recorded 事件的时间（排除当前行），用于 log 类通知节流判定。"""
+        result = await self.session.execute(
+            select(AlertEvent.last_seen_at)
+            .where(
+                AlertEvent.source == source,
+                AlertEvent.rule_code == rule_code,
+                AlertEvent.status == "recorded",
+                AlertEvent.id != exclude_id,
+            )
+            .order_by(AlertEvent.last_seen_at.desc())
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
+
     async def last_error_seen_at(
         self, source: str, rule_code: str, exclude_id: int,
     ) -> datetime | None:

@@ -204,7 +204,21 @@ async def handle_webhook_event(
         await session.commit()
         # log 事件型不开单（逐条命中开单会淹没工单系统）；飞书由执行器每轮直发
         # （用户决策：持续告警合理），RateLimiter 以 notify_interval_minutes 兜底防平台故障刷屏
-        return _webhook_result(event.id, notify=True)
+        # log 事件每轮独立成流水（无状态机合并）；通知节流与 error 同款（多副本权威判定，
+        # DB 串行化保证并发回报时恰好一个执行器实例拿到 notify=true）：
+        # 距同规则上一条 recorded 不足 REPEAT_NOTIFY_MINUTES → notify=false，执行器跳过红卡。
+        last_recorded_at = await repo.last_recorded_seen_at(
+            payload.source, payload.rule_code, exclude_id=event.id,
+        )
+        notify_due = (
+            last_recorded_at is None
+            or (now - last_recorded_at).total_seconds() >= REPEAT_NOTIFY_MINUTES * 60
+        )
+        return _webhook_result(
+            event.id,
+            notify=notify_due,
+            suppress_reason=None if notify_due else "recorded notify throttled",
+        )
 
     if active is not None:
         # repeat 判断必须在更新 updated_at 之前（updated_at ≈ 上次通知基准）
