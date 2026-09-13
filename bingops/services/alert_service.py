@@ -56,13 +56,15 @@ from bingops.schemas.alert import (
 
 logger = logging.getLogger(f"bingops.{__name__}")
 
-# 活跃 firing 重复提醒间隔（夜莺 repeat notify 同款；协议预留，执行器可选读）
-REPEAT_NOTIFY_MINUTES = 30
+# 活跃 firing 重复提醒间隔（夜莺 repeat notify 同款）：1min = 同分钟内多副本去重，
+# 跨分钟照常提醒（用户决策 2026-09-13：解决的是短时重复，不是长静默）
+REPEAT_NOTIFY_MINUTES = 1
 # 无规则映射的 firing 的默认 stale 恢复窗口（有映射时取规则 stale_minutes）
 DEFAULT_STALE_MINUTES = 15
 # error 通知节流窗口（分钟）：距同规则上一条 error 不足该值时 notify=false。
 # 多副本权威判定：DB 事务串行化保证并发回报时恰好一个执行器实例拿到 notify=true。
-ERROR_NOTIFY_MIN_MINUTES = 15
+# 1min = 同分钟内去重，跨分钟照常提醒（与 firing repeat 口径一致）。
+ERROR_NOTIFY_MIN_MINUTES = 1
 # stale 扫描周期
 STALE_SWEEP_INTERVAL_SECONDS = 60
 # severity → 工单优先级映射（urgent 留给人为判断）
