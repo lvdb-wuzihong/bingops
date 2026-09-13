@@ -73,6 +73,7 @@ async def create_catalog_item(session: AsyncSession, payload: CatalogCreate) -> 
         difficulty="simple" if is_category else payload.difficulty,
         default_risk="low" if is_category else payload.default_risk,
         default_type="request" if is_category else payload.default_type,
+        default_group_id=payload.default_group_id,
         sort_order=payload.sort_order,
     )
     item = await repo.create(item)
