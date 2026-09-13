@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, select
-from sqlalchemy.orm import aliased
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from bingops.core.exceptions import (
     ConflictError,
@@ -156,6 +156,10 @@ async def create_ticket(session: AsyncSession, payload: TicketCreate, operator: 
 
     runbook/目标/参数均属执行层，由运维在下发时选择（dispatch_ticket_job）。
     """
+    # 目录必填（2026-09-11 用户决策：所有工单必须归目录，堵「通用+无目录」绕过审批/路由/统计的口子；
+    # 杂项单走种子预置的「通用申请 → 其他事项」兑底事项）
+    if payload.catalog_item_id is None:
+        raise ValidationError("服务目录事项必选")
     if payload.assignee_id is not None:
         await _get_user_or_fail(session, payload.assignee_id)
     if payload.related_resource_id is not None:
@@ -281,7 +285,7 @@ async def _resolve_auto_assignee(
 
     轮转算法：pool[当日该组工单数 % len(pool)]，两人组即逐单交替。
     """
-    today = datetime.now(timezone.utc).date()
+    today = datetime.now(UTC).date()
     oncall: OncallSchedule | None = await OncallScheduleRepo(session).get_by_group_and_date(
         group.id, today,
     )
@@ -293,7 +297,7 @@ async def _resolve_auto_assignee(
     if not pool:
         return None, False
 
-    day_start = datetime.combine(today, datetime.min.time(), tzinfo=timezone.utc)
+    day_start = datetime.combine(today, datetime.min.time(), tzinfo=UTC)
     count_result = await session.execute(
         select(func.count())
         .select_from(Ticket)
@@ -428,7 +432,7 @@ async def submit_approval(
     if approver.id == ticket.creator_id and not approver.is_superuser:
         raise PermissionDeniedError("Creator cannot approve their own ticket")
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     approved = action == "approve"
     ticket.approval_status = "approved" if approved else "rejected"
     ticket.status = "open" if approved else "cancelled"
@@ -554,7 +558,7 @@ async def change_ticket_status(
                 "Only the assigned handler (or admin) can process this ticket",
             )
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     previous = ticket.status
     ticket.status = target_status
     if target_status == "in_progress" and ticket.started_at is None:
@@ -641,7 +645,7 @@ def _minute_expr(start_col, end_col):
 
 def _day_start(day) -> datetime:
     """日期转 UTC 当天零点。"""
-    return datetime.combine(day, datetime.min.time(), tzinfo=timezone.utc)
+    return datetime.combine(day, datetime.min.time(), tzinfo=UTC)
 
 
 async def ticket_stats(
@@ -813,7 +817,7 @@ async def change_context(
         tags_by_resource.setdefault(tag.resource_id, []).append(tag)
 
     # 3. 最近 7 天变更记录（每个资源取最近 N 条）
-    window_start = datetime.now(timezone.utc) - timedelta(days=CHANGE_CONTEXT_WINDOW_DAYS)
+    window_start = datetime.now(UTC) - timedelta(days=CHANGE_CONTEXT_WINDOW_DAYS)
     log_result = await session.execute(
         select(CmdbChangeLog)
         .where(

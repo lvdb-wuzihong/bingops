@@ -136,29 +136,17 @@ async def handle_webhook_event(
                 "error_message": (payload.error or "")[:200],
             },
         )
-        # error 通知节流（§4.2 notify 协议延伸，多副本权威判定，状态只有 DB 一份）：
-        # 距同规则上一条 error 不足 ERROR_NOTIFY_MIN_MINUTES → notify=false，执行器跳过橙卡。
-        last_error_at = await repo.last_error_seen_at(
-            payload.source, payload.rule_code, exclude_id=event.id,
-        )
-        notify_due = (
-            last_error_at is None
-            or (now - last_error_at).total_seconds() >= ERROR_NOTIFY_MIN_MINUTES * 60
-        )
         logger.warning(
             "Alert evaluation error recorded",
             extra={
                 "source": payload.source,
                 "rule_code": payload.rule_code,
                 "error_message": (payload.error or "")[:200],
-                "notify_due": notify_due,
             },
         )
-        return _webhook_result(
-            event.id,
-            notify=notify_due,
-            suppress_reason=None if notify_due else "error notify throttled",
-        )
+        # error 每轮独立事件；飞书通知去重由执行器的 Redis 共享限流器负责
+        # （平台侧基于「上一条事件时间」的节流会被事件流自身污染而恒 false）
+        return _webhook_result(event.id, notify=True)
 
     # resolved 直传（仅夜莺等自带恢复语义的来源）
     if payload.status == "resolved":
@@ -209,18 +197,9 @@ async def handle_webhook_event(
         # log 事件每轮独立成流水（无状态机合并）；通知节流与 error 同款（多副本权威判定，
         # DB 串行化保证并发回报时恰好一个执行器实例拿到 notify=true）：
         # 距同规则上一条 recorded 不足 REPEAT_NOTIFY_MINUTES → notify=false，执行器跳过红卡。
-        last_recorded_at = await repo.last_recorded_seen_at(
-            payload.source, payload.rule_code, exclude_id=event.id,
-        )
-        notify_due = (
-            last_recorded_at is None
-            or (now - last_recorded_at).total_seconds() >= REPEAT_NOTIFY_MINUTES * 60
-        )
-        return _webhook_result(
-            event.id,
-            notify=notify_due,
-            suppress_reason=None if notify_due else "recorded notify throttled",
-        )
+        # log 类型 = 事件流水（每轮一条）；飞书通知的去重由执行器的 Redis 共享
+        # 限流器负责（平台侧基于「上一条事件时间」的节流会被流水自身污染而恒 false）
+        return _webhook_result(event.id, notify=True)
 
     if active is not None:
         # repeat 判断必须在更新 updated_at 之前（updated_at ≈ 上次通知基准）
@@ -363,12 +342,25 @@ async def _try_open_ticket(
         )
         return
 
+    # 目录必填后的告警开单归属：系统种子预置的「故障告警 → 系统告警」事项（按名称定位，
+    # 名称即契约——种子与代码同步维护）；目录缺失则不开单（降级模式，与有数无单一致）
+    from bingops.repositories.ticket_meta_repo import TicketCatalogRepo
+
+    catalog = await TicketCatalogRepo(session).get_by_name("系统告警")
+    if catalog is None or not catalog.is_active:
+        logger.warning(
+            "Preset catalog item 系统告警 missing/inactive, ticket skipped",
+            extra={"source": event.source, "rule_code": event.rule_code},
+        )
+        return
+
     payload = TicketCreate(
         title=f"[告警] {event.rule_name or event.rule_code}",
         description=_ticket_description(event),
         ticket_type="incident",
         priority=SEVERITY_TO_PRIORITY.get(event.severity, "medium"),
         group_id=rule.group_id,
+        catalog_item_id=catalog.id,
     )
     try:
         ticket = await ticket_service.create_ticket(session, payload, operator)

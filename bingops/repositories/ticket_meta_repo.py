@@ -25,6 +25,14 @@ class TicketCatalogRepo:
         )
         return result.scalar_one_or_none()
 
+    async def get_by_name(self, name: str) -> TicketCatalog | None:
+        result = await self._session.execute(
+            select(TicketCatalog)
+            .options(selectinload(TicketCatalog.parent))
+            .where(TicketCatalog.name == name)
+        )
+        return result.scalar_one_or_none()
+
     async def list_items(
         self, *, parent_id: int | None = None, include_inactive: bool = False,
     ) -> list[TicketCatalog]:

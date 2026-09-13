@@ -671,6 +671,23 @@ INSERT INTO roles (code, name, description, is_system) VALUES
 ('auditor',  '审计员',     '可查看全部数据和审计日志',   TRUE)
 ON CONFLICT (code) DO NOTHING;
 
+-- 预置服务目录：故障告警（告警自动开单专用归属，alert_service 按名称「系统告警」定位）
+-- + 通用兑底（目录必填后接住杂项单）；name UNIQUE，重复执行幂等
+INSERT INTO ticket_catalog (name, difficulty, default_risk, default_type, is_active, sort_order) VALUES
+('故障告警', 'simple', 'low', 'incident', TRUE, 900),
+('通用申请', 'simple', 'low', 'general',  TRUE, 910)
+ON CONFLICT (name) DO NOTHING;
+
+INSERT INTO ticket_catalog (name, parent_id, difficulty, default_risk, default_type, is_active, sort_order)
+SELECT '系统告警', c.id, 'simple', 'low', 'incident', TRUE, 0
+FROM ticket_catalog c WHERE c.name = '故障告警'
+ON CONFLICT (name) DO NOTHING;
+
+INSERT INTO ticket_catalog (name, parent_id, difficulty, default_risk, default_type, is_active, sort_order)
+SELECT '其他事项', c.id, 'simple', 'low', 'general', TRUE, 0
+FROM ticket_catalog c WHERE c.name = '通用申请'
+ON CONFLICT (name) DO NOTHING;
+
 -- 预置权限（host/deploy/playbook/credential/task 为保留码，对应模块 v2 落地后启用）
 INSERT INTO permissions (code, name) VALUES
 ('host:list',          '查看主机列表'),
