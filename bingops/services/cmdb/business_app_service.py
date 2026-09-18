@@ -58,10 +58,47 @@ async def create_app(session: AsyncSession, payload: BusinessAppCreate) -> CmdbB
         pipelines=payload.pipelines,
     )
     app = await repo.create(app)
+    backfilled = await _backfill_app_links_on_create(session, app)
     await session.commit()
 
-    logger.info("CMDB business app created", extra={"app_code": payload.app_code})
+    logger.info(
+        "CMDB business app created",
+        extra={"app_code": payload.app_code, "backfilled_resource_links": backfilled},
+    )
     return app
+
+
+async def _backfill_app_links_on_create(session: AsyncSession, app: CmdbBusinessApp) -> int:
+    """创建应用后回填存量归集：资源事件先于应用创建到达时，标签已写但无应用可挂。
+
+    扫描已带 app/k8s:app=<app_code> 标签且为服务级 CI 的未删资源，补建 tag 关联。
+    """
+    from bingops.models.cmdb.model import CmdbModel
+    from bingops.models.cmdb.resource import CmdbResource
+    from bingops.models.cmdb.tag import CmdbResourceTag
+    from bingops.repositories.cmdb.app_resource_repo import CmdbAppResourceRepo
+
+    rows = await session.execute(
+        select(CmdbResource.id)
+        .join(CmdbModel, CmdbModel.id == CmdbResource.model_id)
+        .join(CmdbResourceTag, CmdbResourceTag.resource_id == CmdbResource.id)
+        .where(
+            CmdbModel.code.in_(SERVICE_LEVEL_MODEL_CODES),
+            CmdbResource.deleted_at.is_(None),
+            CmdbResourceTag.tag_key.in_(APP_TAG_KEYS),
+            CmdbResourceTag.tag_value == app.app_code,
+        )
+    )
+    resource_ids = {rid for (rid,) in rows.all()}
+    if not resource_ids:
+        return 0
+    added = await CmdbAppResourceRepo(session).add_tag_links(app.id, resource_ids)
+    if added:
+        logger.info(
+            "App tag links backfilled on creation",
+            extra={"app_code": app.app_code, "linked_resources": added},
+        )
+    return added
 
 
 async def update_app(

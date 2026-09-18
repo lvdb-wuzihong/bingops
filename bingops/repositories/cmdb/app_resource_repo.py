@@ -49,6 +49,19 @@ class CmdbAppResourceRepo:
             ))
         await self._session.flush()
 
+    async def add_tag_links(self, app_id: int, resource_ids: set[int]) -> int:
+        """为应用批量补建 source='tag' 关联（幂等，跳过已存在）；返回新增条数。"""
+        added = 0
+        for resource_id in resource_ids:
+            if await self.get_link(app_id, resource_id) is None:
+                self._session.add(CmdbAppResource(
+                    app_id=app_id, resource_id=resource_id, source="tag",
+                ))
+                added += 1
+        if added:
+            await self._session.flush()
+        return added
+
     async def get_link(self, app_id: int, resource_id: int) -> CmdbAppResource | None:
         result = await self._session.execute(
             select(CmdbAppResource).where(
