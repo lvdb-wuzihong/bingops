@@ -194,78 +194,92 @@ def _form_action_url() -> str | None:
 
 
 def _build_guide_card() -> dict:
-    """未绑定用户的引导卡片。"""
+    """未绑定用户的引导卡片（JSON 1.0 结构，与工单通知卡片同构）。"""
     return {
-        "schema": "2.0",
         "header": {"title": {"tag": "plain_text", "content": "系统运维平台"}, "template": "blue"},
-        "body": {
-            "elements": [
-                {
-                    "tag": "div",
-                    "text": {
-                        "tag": "lark_md",
-                        "content": "你的飞书账号尚未绑定平台账号。\n**请先在平台完成一次飞书登录**，绑定后即可在此建单。",
-                    },
+        "elements": [
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": "你的飞书账号尚未绑定平台账号。\n**请先在平台完成一次飞书登录**，绑定后即可在此建单。",
                 },
-            ]
-        },
+            },
+        ],
     }
 
 
 def _build_create_form_card(items: list[TicketCatalog]) -> dict:
-    """建单表单卡片：目录事项 / 优先级下拉 + 标题 / 描述输入 + 提交按钮。"""
-    options = [{"label": _item_label(i), "value": str(i.id)} for i in items]
-    elements = [
+    """建单表单卡片（JSON 2.0）。
+
+    2.0 协议要点（官方文档校准）：select_static/input 无 label 属性，
+    options 元素用 text 对象而非 label；提交按钮用 form_action_type=submit。
+    """
+    options = [
         {
-            "tag": "form",
-            "name": "ticket_form",
+            "text": {"tag": "plain_text", "content": _item_label(i)},
+            "value": str(i.id),
+        }
+        for i in items
+    ]
+
+    def _label_row(text: str) -> dict:
+        return {"tag": "markdown", "content": f"**{text}**"}
+
+    return {
+        "schema": "2.0",
+        "header": {"title": {"tag": "plain_text", "content": "新建工单"}, "template": "blue"},
+        "body": {
             "elements": [
                 {
-                    "tag": "select_static",
-                    "name": "catalog_item_id",
-                    "label": {"tag": "plain_text", "content": "服务目录事项"},
-                    "placeholder": {"tag": "plain_text", "content": "请选择事项"},
-                    "options": options,
-                },
-                {
-                    "tag": "select_static",
-                    "name": "priority",
-                    "label": {"tag": "plain_text", "content": "优先级"},
-                    "placeholder": {"tag": "plain_text", "content": "默认为中"},
-                    "options": [
-                        {"label": PRIORITY_LABELS[p], "value": p} for p in VALID_PRIORITIES
+                    "tag": "form",
+                    "name": "ticket_form",
+                    "elements": [
+                        _label_row("服务目录事项"),
+                        {
+                            "tag": "select_static",
+                            "name": "catalog_item_id",
+                            "placeholder": {"tag": "plain_text", "content": "请选择事项"},
+                            "options": options,
+                            "required": True,
+                        },
+                        _label_row("优先级"),
+                        {
+                            "tag": "select_static",
+                            "name": "priority",
+                            "placeholder": {"tag": "plain_text", "content": "默认为中"},
+                            "options": [
+                                {
+                                    "text": {"tag": "plain_text", "content": PRIORITY_LABELS[p]},
+                                    "value": p,
+                                }
+                                for p in VALID_PRIORITIES
+                            ],
+                        },
+                        _label_row("标题"),
+                        {
+                            "tag": "input",
+                            "name": "title",
+                            "placeholder": {"tag": "plain_text", "content": "一句话描述问题"},
+                            "required": True,
+                        },
+                        _label_row("描述（选填）"),
+                        {
+                            "tag": "input",
+                            "name": "description",
+                            "placeholder": {"tag": "plain_text", "content": "补充信息"},
+                        },
+                        {
+                            "tag": "button",
+                            "name": "submit",
+                            "text": {"tag": "plain_text", "content": "提交工单"},
+                            "type": "primary",
+                            "form_action_type": "submit",
+                        },
                     ],
-                },
-                {
-                    "tag": "input",
-                    "name": "title",
-                    "label": {"tag": "plain_text", "content": "标题"},
-                    "placeholder": {"tag": "plain_text", "content": "一句话描述问题"},
-                    "max_length": 200,
-                },
-                {
-                    "tag": "input",
-                    "name": "description",
-                    "label": {"tag": "plain_text", "content": "描述（选填）"},
-                    "placeholder": {"tag": "plain_text", "content": "补充信息"},
-                    "max_length": 2000,
-                },
-                {
-                    "tag": "button",
-                    "name": "submit",
-                    "text": {"tag": "plain_text", "content": "提交工单"},
-                    "type": "primary",
-                    "action_type": "form_submit",
-                    "form_action_type": "submit",
                 },
             ],
         },
-    ]
-    return {
-        "schema": "2.0",
-        "config": {"update_multi": True},
-        "header": {"title": {"tag": "plain_text", "content": "新建工单"}, "template": "blue"},
-        "body": {"elements": elements},
     }
 
 
