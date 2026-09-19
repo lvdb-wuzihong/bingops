@@ -263,6 +263,10 @@ async def create_ticket(session: AsyncSession, payload: TicketCreate, operator: 
         )
     await session.commit()
 
+    # 指派提醒：创建时显式指派或值班自动派单均通知；自派给自己无信息量，跳过
+    if assignee_id is not None and assignee_id != operator.id:
+        await _notify_ticket_assigned(session, ticket, operator)
+
     logger.info(
         "Ticket created",
         extra={
@@ -523,6 +527,9 @@ async def assign_ticket(
     )
     await session.commit()
 
+    if previous != assignee_id:
+        await _notify_ticket_assigned(session, ticket, operator)
+
     logger.info(
         "Ticket assigned",
         extra={"ticket_id": ticket_id, "assignee_id": assignee_id, "user_id": operator.id},
@@ -650,6 +657,44 @@ def _build_resolved_card(ticket: Ticket, operator: User, comment: str | None) ->
     }
 
 
+def _build_assigned_card(ticket: Ticket, operator: User, creator: User) -> dict:
+    """构建「工单已指派给你」飞书交互卡片。"""
+    elements: list[dict] = [
+        {
+            "tag": "div",
+            "fields": [
+                {"is_short": True, "text": {"tag": "lark_md", "content": f"**工单编号**\n{ticket.ticket_no}"}},
+                {"is_short": True, "text": {"tag": "lark_md", "content": f"**优先级**\n{ticket.priority}"}},
+            ],
+        },
+        {"tag": "div", "text": {"tag": "lark_md", "content": f"**标题**\n{ticket.title}"}},
+        {"tag": "div", "text": {"tag": "lark_md", "content": f"**建单人**\n{creator.display_name or creator.username}"}},
+        {"tag": "div", "text": {"tag": "lark_md", "content": f"**指派操作**\n{operator.display_name or operator.username}"}},
+    ]
+
+    base_url = settings.ticket_notify_web_base_url.rstrip("/")
+    if base_url:
+        elements.append({"tag": "hr"})
+        elements.append({
+            "tag": "action",
+            "actions": [{
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": "查看工单"},
+                "type": "primary",
+                "url": f"{base_url}/{ticket.id}",
+            }],
+        })
+
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "title": {"tag": "plain_text", "content": "工单已指派给你"},
+            "template": "yellow",
+        },
+        "elements": elements,
+    }
+
+
 async def _notify_ticket_resolved(
     session: AsyncSession, ticket: Ticket, operator: User, comment: str | None,
 ) -> None:
@@ -657,26 +702,52 @@ async def _notify_ticket_resolved(
     if not settings.ticket_notify_enabled:
         return
 
-    # 建单人未绑定飞书身份（账密用户未走过 SSO）时无法私聊，跳过并留痕
-    result = await session.execute(select(User).where(User.id == ticket.creator_id))
-    creator = result.scalar_one_or_none()
-    if creator is None or not creator.feishu_open_id:
-        logger.info(
-            "Ticket resolved notify skipped: creator has no feishu identity",
-            extra={"ticket_id": ticket.id, "creator_id": ticket.creator_id},
-        )
+    card = _build_resolved_card(ticket, operator, comment)
+    await _notify_feishu_user(
+        session, ticket_id=ticket.id, recipient_id=ticket.creator_id,
+        card=card, scene="resolved",
+    )
+
+
+async def _notify_ticket_assigned(session: AsyncSession, ticket: Ticket, operator: User) -> None:
+    """工单指派后私聊提醒处理人（创建时指派/值班自动派单与指派/转派入口共用）。"""
+    if not settings.ticket_notify_enabled or ticket.assignee_id is None:
         return
 
-    card = _build_resolved_card(ticket, operator, comment)
-    open_id = creator.feishu_open_id
+    creator_result = await session.execute(select(User).where(User.id == ticket.creator_id))
+    creator = creator_result.scalar_one_or_none()
+    if creator is None:
+        return
+
+    card = _build_assigned_card(ticket, operator, creator)
+    await _notify_feishu_user(
+        session, ticket_id=ticket.id, recipient_id=ticket.assignee_id,
+        card=card, scene="assigned",
+    )
+
+
+async def _notify_feishu_user(
+    session: AsyncSession, *, ticket_id: int, recipient_id: int, card: dict, scene: str,
+) -> None:
+    """向工单相关用户私聊发送卡片（fire-and-forget；失败只记日志不阻断主流程）。"""
+    # 收件人未绑定飞书身份（纯账密用户未走过 SSO）时无法私聊，跳过并留痕
+    result = await session.execute(select(User).where(User.id == recipient_id))
+    recipient = result.scalar_one_or_none()
+    if recipient is None or not recipient.feishu_open_id:
+        logger.info(
+            "Ticket notify skipped: recipient has no feishu identity",
+            extra={"ticket_id": ticket_id, "recipient_id": recipient_id, "scene": scene},
+        )
+        return
+    open_id = recipient.feishu_open_id
 
     async def _send() -> None:
         try:
             await feishu_bot.send_interactive(open_id, card)
         except Exception:
-            logger.exception("Ticket resolved notify failed", extra={"ticket_id": ticket.id})
+            logger.exception("Ticket notify failed", extra={"ticket_id": ticket_id, "scene": scene})
 
-    task = asyncio.create_task(_send(), name=f"ticket-resolved-notify-{ticket.id}")
+    task = asyncio.create_task(_send(), name=f"ticket-notify-{scene}-{ticket_id}")
     _notify_tasks.add(task)
     task.add_done_callback(_notify_tasks.discard)
 
