@@ -21,10 +21,13 @@ import logging
 
 from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from bingops.api.dependencies import get_db_session
 from bingops.core.config import feishu_settings
+from bingops.services import feishu_event_service
 
 logger = logging.getLogger(f"bingops.{__name__}")
 
@@ -51,7 +54,10 @@ def _verify_token(token: str | None) -> bool:
 
 
 @router.post("/events")
-async def feishu_events(request: Request) -> JSONResponse:
+async def feishu_events(
+    request: Request,
+    session: AsyncSession = Depends(get_db_session),
+) -> JSONResponse | dict:
     """飞书事件 / 卡片交互回调统一入口。
 
     三类报文：url_verification 握手、加密事件（{"encrypt": ...}）、明文事件。
@@ -90,14 +96,30 @@ async def feishu_events(request: Request) -> JSONResponse:
 
     header = data.get("header") or {}
     event = data.get("event") or {}
+    event_type = header.get("event_type") or data.get("type")
+    event_id = header.get("event_id")
     logger.info(
         "Feishu callback received",
         extra={
-            "event_type": header.get("event_type") or data.get("type"),
-            "event_id": header.get("event_id"),
+            "event_type": event_type,
+            "event_id": event_id,
             "keys": sorted(data.keys()),
             "has_message": "message" in event,
         },
     )
-    # 骨架阶段：只 ack 不处理；业务逻辑（私聊建单 / 卡片交互）按 event_id 幂等接入
+
+    # 幂等：飞书对超时回调重推，按 event_id 去重
+    if feishu_event_service.is_duplicate(event_id):
+        logger.info("Feishu callback duplicated, skipping", extra={"event_id": event_id})
+        return {"code": 0}
+
+    if event_type == "card.action.trigger":
+        # 卡片回调语义：响应体即 toast / 更新后的卡片（同步处理，本地 DB 操作耗时可控）
+        return await feishu_event_service.handle_card_action(session, data)
+
+    if event_type == "im.message.receive_v1":
+        # 消息事件：处理内发卡片一律 fire-and-forget，此处仅 ack
+        await feishu_event_service.handle_message_event(session, data)
+        return {"code": 0}
+
     return {"code": 0}
