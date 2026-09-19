@@ -570,6 +570,16 @@ async def change_ticket_status(
 
     now = datetime.now(UTC)
     previous = ticket.status
+
+    # 自主认领：未指派工单被处理时（仅超管能到达此处），处理人自动认领，
+    # 保证已处理工单必有归属（统计 by_assignee / SLA 可归因）
+    claimed = (
+        ticket.assignee_id is None
+        and target_status in ("in_progress", "resolved")
+    )
+    if claimed:
+        ticket.assignee_id = operator.id
+
     ticket.status = target_status
     if target_status == "in_progress" and ticket.started_at is None:
         ticket.started_at = now
@@ -593,7 +603,23 @@ async def change_ticket_status(
             to_value=target_status,
         )
     )
+    if claimed:
+        await TicketCommentRepo(session).create(
+            TicketComment(
+                ticket_id=ticket.id,
+                user_id=operator.id,
+                action="assign",
+                content="[self-claim]",
+                to_value=str(operator.id),
+            )
+        )
     await session.commit()
+
+    if claimed:
+        # 认领改的是 FK 标量，内存关系对象仍是旧值（expire_on_commit=False），重查保证响应正确
+        reloaded = await TicketRepo(session).get_by_id(ticket.id)
+        if reloaded is not None:
+            ticket = reloaded
 
     if target_status == "resolved" and previous != "resolved":
         await _notify_ticket_resolved(session, ticket, operator, comment)
@@ -616,23 +642,34 @@ async def change_ticket_status(
 _notify_tasks: set[asyncio.Task] = set()
 
 
+def _lark_md(content: str) -> dict:
+    return {"tag": "lark_md", "content": content}
+
+
+def _lark_field(content: str) -> dict:
+    return {"is_short": True, "text": _lark_md(content)}
+
+
+def _lark_div(content: str) -> dict:
+    return {"tag": "div", "text": _lark_md(content)}
+
+
 def _build_resolved_card(ticket: Ticket, operator: User, comment: str | None) -> dict:
     """构建「工单已解决」飞书交互卡片。"""
+    operator_name = operator.display_name or operator.username
     elements: list[dict] = [
         {
             "tag": "div",
             "fields": [
-                {"is_short": True, "text": {"tag": "lark_md", "content": f"**工单编号**\n{ticket.ticket_no}"}},
-                {"is_short": True, "text": {"tag": "lark_md", "content": f"**优先级**\n{ticket.priority}"}},
+                _lark_field(f"**工单编号**\n{ticket.ticket_no}"),
+                _lark_field(f"**优先级**\n{ticket.priority}"),
             ],
         },
-        {"tag": "div", "text": {"tag": "lark_md", "content": f"**标题**\n{ticket.title}"}},
-        {"tag": "div", "text": {"tag": "lark_md", "content": f"**处理人**\n{operator.display_name or operator.username}"}},
+        _lark_div(f"**标题**\n{ticket.title}"),
+        _lark_div(f"**处理人**\n{operator_name}"),
     ]
     if comment:
-        elements.append(
-            {"tag": "div", "text": {"tag": "lark_md", "content": f"**处理说明**\n{comment}"}},
-        )
+        elements.append(_lark_div(f"**处理说明**\n{comment}"))
 
     base_url = settings.ticket_notify_web_base_url.rstrip("/")
     if base_url:
@@ -663,13 +700,13 @@ def _build_assigned_card(ticket: Ticket, operator: User, creator: User) -> dict:
         {
             "tag": "div",
             "fields": [
-                {"is_short": True, "text": {"tag": "lark_md", "content": f"**工单编号**\n{ticket.ticket_no}"}},
-                {"is_short": True, "text": {"tag": "lark_md", "content": f"**优先级**\n{ticket.priority}"}},
+                _lark_field(f"**工单编号**\n{ticket.ticket_no}"),
+                _lark_field(f"**优先级**\n{ticket.priority}"),
             ],
         },
-        {"tag": "div", "text": {"tag": "lark_md", "content": f"**标题**\n{ticket.title}"}},
-        {"tag": "div", "text": {"tag": "lark_md", "content": f"**建单人**\n{creator.display_name or creator.username}"}},
-        {"tag": "div", "text": {"tag": "lark_md", "content": f"**指派操作**\n{operator.display_name or operator.username}"}},
+        _lark_div(f"**标题**\n{ticket.title}"),
+        _lark_div(f"**建单人**\n{creator.display_name or creator.username}"),
+        _lark_div(f"**指派操作**\n{operator.display_name or operator.username}"),
     ]
 
     base_url = settings.ticket_notify_web_base_url.rstrip("/")
