@@ -53,7 +53,7 @@ def _verify_token(token: str | None) -> bool:
     return bool(expected) and token == expected
 
 
-@router.post("/events")
+@router.post("/events", response_model=None)
 async def feishu_events(
     request: Request,
     session: AsyncSession = Depends(get_db_session),
