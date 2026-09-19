@@ -80,6 +80,11 @@ class FeishuSettings(BaseSettings):
     app_secret: str = ""
     redirect_uri: str = ""
 
+    # 事件回调安全凭据（开发者后台「事件与回调 → 加密策略」获取）
+    # 不配置则拒绝全部飞书回调（fail-closed）
+    event_encrypt_key: str = ""
+    event_verification_token: str = ""
+
     # 飞书 OAuth2 端点（固定值）
     authorize_url: str = "https://open.feishu.cn/open-apis/authen/v1/authorize"
     app_token_url: str = "https://open.feishu.cn/open-apis/auth/v3/app_access_token/internal"

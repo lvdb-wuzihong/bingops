@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from bingops.api import dependencies
 from bingops.api.middleware.request_logging import RequestLoggingMiddleware
-from bingops.api.v1 import alerts, auth, jobs, roles, sd, tickets, users
+from bingops.api.v1 import alerts, auth, feishu_events, jobs, roles, sd, tickets, users
 from bingops.api.v1.cmdb import apps as cmdb_apps
 from bingops.api.v1.cmdb import changes as cmdb_changes
 from bingops.api.v1.cmdb import models as cmdb_models
@@ -173,6 +173,7 @@ app.include_router(jobs.router)
 app.include_router(alerts.router)
 app.include_router(alerts.source_router)
 app.include_router(alerts.channel_router)
+app.include_router(feishu_events.router)
 app.include_router(sd.router)
 
 # MCP 数据面（AI agent 工具，设计见 docs/ai-agent-mcp-design.md）

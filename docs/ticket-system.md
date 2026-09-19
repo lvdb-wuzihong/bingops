@@ -1,7 +1,7 @@
 # 工单系统（Tickets）设计文档
 
 > 状态：v3 已实现（v1 协作流转 + P3 审批挂接 + v15 服务目录/值班派单） | 维护者：BingOps Team
-> 相关代码：`bingops/models/ticket.py`、`bingops/services/ticket_service.py`、`bingops/api/v1/tickets.py`、`bingops/services/change_freeze_service.py`
+> 相关代码：`bingops/models/ticket.py`、`bingops/services/ticket_service.py`、`bingops/api/v1/tickets.py`、`bingops/services/change_freeze_service.py`、`bingops/core/feishu_bot.py`
 > 数据库脚本：`sql/migrations/v4_tickets.sql` + `sql/migrations/v14_ticket_approval.sql`（已同步 `sql/schema.sql`）
 
 ## 1. 定位
@@ -354,3 +354,34 @@ admin 全量；operator 管理但无删除；viewer/auditor 只读。目录删�
 | trend | 每日创建 vs 解决 | 双折线 |
 
 时间口径：响应=started_at-created_at；处理=resolved_at-created_at 中的解决段（resolved_at-started_at）；SQL 层 `extract(epoch ...)` 计算，avg 自动忽略 NULL。
+
+---
+
+## 15. 飞书机器人私聊通知（已实现）
+
+工单关键节点通过飞书应用机器人私聊卡片触达相关人员。发送层收敛在 `core/feishu_bot.py`（通用客户端），业务挂点在 `ticket_service` 状态流转函数 `session.commit()` 之后；与告警模块“执行器直发”链路互不依赖。
+
+### 15.1 通知场景
+
+| 触发点 | 收件人 | 卡片 | 说明 |
+|--------|--------|------|------|
+| 创建工单（显式指派或值班自动派单） | 处理人 | 「工单已指派给你」（黄头） | 自派给自己跳过（无信息量） |
+| 指派/转派（处理人变化才通知） | 新处理人 | 同上 | 处理人未变化不发 |
+| 状态推进 → resolved（首次） | **建单人** | 「工单已解决」+ 处理说明 | 重开后再解决会再次通知 |
+
+卡片字段：编号/优先级/标题/建单人/指派操作人/处理说明；`BINGOPS_TICKET_NOTIFY_WEB_BASE_URL` 非空时附「查看工单」跳转按钮（`{base}/{ticket_id}`）。
+
+### 15.2 发送层与可靠性
+
+- 复用飞书 SSO 同一自建应用（app_id/app_secret）→ `tenant_access_token`（进程内缓存，飞书侧 2h 有效期提前 60s 刷新）→ IM API `send_interactive(open_id, card)`（msg_type=interactive，content 为卡片 JSON 二次序列化）
+- **fire-and-forget**：`asyncio.create_task` 外发，失败只记日志不阻断工单主流程；任务集合带 done callback 自回收
+- **可达性**：收件人 `users.feishu_open_id` 为空（纯账密未走 SSO）→ 跳过并留日志；重复通知由状态机门禁保证（resolved 仅首次流转触发）
+
+### 15.3 配置与前置条件
+
+| 环境变量 | 默认 | 说明 |
+|----------|------|------|
+| `BINGOPS_TICKET_NOTIFY_ENABLED` | `false` | 总闸（fail-safe，对齐告警联动先例）；上线须显式置 true |
+| `BINGOPS_TICKET_NOTIFY_WEB_BASE_URL` | 空 | 前端工单详情页基址；非空才带「查看工单」按钮 |
+
+两者启动时读取一次，修改后需重启服务。飞书侧前置：应用开通「机器人」能力 + `im:message:send_as_bot` 权限并发布版本；接收人在应用可用范围内。新增通知场景只需在对应挂点构卡后调用 `_notify_feishu_user`，无需改模型或 API。
