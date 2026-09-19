@@ -813,12 +813,12 @@ WHERE r.code = 'operator'
   AND p.code NOT LIKE 'role:%'
 ON CONFLICT DO NOTHING;
 
--- viewer 角色分配所有 list + get 权限
+-- viewer 角色分配所有 list + get 权限（含创建工单：提交工单是自助行为，不属于资源修改）
 INSERT INTO role_permissions (role_id, permission_id)
 SELECT r.id, p.id
 FROM roles r, permissions p
 WHERE r.code = 'viewer'
-  AND (p.code LIKE '%:list' OR p.code LIKE '%:get')
+  AND (p.code LIKE '%:list' OR p.code LIKE '%:get' OR p.code = 'ticket:create')
 ON CONFLICT DO NOTHING;
 
 -- auditor 角色分配所有 list + get + audit 权限

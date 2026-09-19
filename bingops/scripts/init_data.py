@@ -164,7 +164,7 @@ async def init_data() -> None:
             for code, filter_fn in [
                 ("admin", lambda _: True),
                 ("operator", lambda c: not c.startswith("user:") and not c.startswith("role:")),
-                ("viewer", lambda c: c.endswith(":list") or c.endswith(":get")),
+                ("viewer", lambda c: c.endswith(":list") or c.endswith(":get") or c == "ticket:create"),
                 ("auditor", lambda c: c.endswith(":list") or c.endswith(":get") or c.startswith("audit:")),
             ]:
                 role_result = await session.execute(select(Role).where(Role.code == code))
