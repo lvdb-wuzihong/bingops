@@ -55,6 +55,12 @@ class Settings(BaseSettings):
     # 开启后仍受规则级 notify_enabled 细粒度控制）
     alert_ticket_enabled: bool = False
 
+    # 工单飞书通知（应用机器人私聊，复用 FeishuSettings 的应用凭据）
+    # 总闸（默认关闭）；需飞书应用开通「机器人」能力 + im:message:send_as_bot 权限
+    ticket_notify_enabled: bool = False
+    # 前端工单详情页基址（如 https://bingops.example.com/tickets）；非空时通知卡片带「查看工单」跳转按钮
+    ticket_notify_web_base_url: str = ""
+
     # MCP（AI agent 数据面，设计见 docs/ai-agent-mcp-design.md）
     mcp_enabled: bool = False        # 挂载 /mcp 端点（streamable-http，无状态模式）
     mcp_write_enabled: bool = False  # 写工具总开关（默认关闭，见 mcp/tools/writes.py）
