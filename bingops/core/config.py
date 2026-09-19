@@ -61,6 +61,11 @@ class Settings(BaseSettings):
     # 前端工单详情页基址（如 https://bingops.example.com/tickets）；非空时通知卡片带「查看工单」跳转按钮
     ticket_notify_web_base_url: str = ""
 
+    # Agent 编排层桥接（飞书事件唯一入口在平台，命中分流的消息转发编排层；
+    # 拓扑见编排层 docs/project-charter.md §1.1）
+    agent_callback_url: str = ""    # 编排层接收端点；空 = 不转发（兼容现状）
+    agent_callback_token: str = ""  # 机器对机器鉴权（X-Agent-Token 头）；空 = 不携带
+
     # MCP（AI agent 数据面，设计见 docs/ai-agent-mcp-design.md）
     mcp_enabled: bool = False        # 挂载 /mcp 端点（streamable-http，无状态模式）
     mcp_write_enabled: bool = False  # 写工具总开关（默认关闭，见 mcp/tools/writes.py）
@@ -69,6 +74,8 @@ class Settings(BaseSettings):
     mcp_dns_rebinding_protection: bool = True
     mcp_allowed_hosts: str = "localhost:*,127.0.0.1:*,[::1]:*"  # 逗号分隔，支持 :* 端口通配
     mcp_allowed_origins: str = ""  # 逗号分隔（仅浏览器类客户端携带 Origin 时校验；agent 可留空）
+    # send_feishu_message 写工具的群目标白名单（逗号分隔 chat_id；空 = 允许任意群）
+    mcp_feishu_allowed_chats: str = ""
 
 
 class FeishuSettings(BaseSettings):

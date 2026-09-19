@@ -1,12 +1,13 @@
-"""飞书应用机器人消息客户端。
+"""飞书应用机器人消息客户端（平台唯一出站通道）。
 
 复用飞书 SSO 同一自建应用（FeishuSettings.app_id / app_secret），以应用身份
-（tenant_access_token）调用 IM API 发送单聊消息。
+（tenant_access_token）调用 IM API 发送消息；agent/编排层的出站一律经此层，
+不持有 app_secret（事件拓扑见编排层 docs/project-charter.md §1.1）。
 
 飞书侧前置条件：
 1. 应用开通「机器人」能力；
 2. 开通 im:message:send_as_bot（以应用的身份发消息）权限并发布版本；
-3. 接收人在应用可用范围内。
+3. 接收人在应用可用范围内；群聊（chat_id）场景机器人需已在群内。
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ import time
 import httpx
 
 from bingops.core.config import feishu_settings
-from bingops.core.exceptions import ExternalServiceError
+from bingops.core.exceptions import ExternalServiceError, ValidationError
 
 logger = logging.getLogger(f"bingops.{__name__}")
 
@@ -60,20 +61,20 @@ async def _get_tenant_access_token() -> str:
     return token
 
 
-async def send_interactive(open_id: str, card: dict) -> None:
-    """向指定用户（open_id 定位）发送交互卡片私聊消息。"""
+async def _post_message(receive_id_type: str, receive_id: str, msg_type: str, content: str) -> None:
+    """以应用身份调 IM API 发消息（receive_id_type: open_id | chat_id）。"""
     token = await _get_tenant_access_token()
 
     async with httpx.AsyncClient() as client:
         resp = await client.post(
             MESSAGE_SEND_URL,
-            params={"receive_id_type": "open_id"},
+            params={"receive_id_type": receive_id_type},
             headers={"Authorization": f"Bearer {token}"},
             json={
-                "receive_id": open_id,
-                "msg_type": "interactive",
-                # 飞书契约：content 为卡片 JSON 的二次序列化字符串
-                "content": json.dumps(card, ensure_ascii=False),
+                "receive_id": receive_id,
+                "msg_type": msg_type,
+                # 飞书契约：content 为消息体 JSON 的二次序列化字符串
+                "content": content,
             },
             timeout=_HTTP_TIMEOUT,
         )
@@ -82,8 +83,27 @@ async def send_interactive(open_id: str, card: dict) -> None:
     if data.get("code") != 0:
         logger.error(
             "Failed to send feishu message",
-            extra={"open_id": open_id, "response": data},
+            extra={"receive_id_type": receive_id_type, "receive_id": receive_id, "response": data},
         )
         raise ExternalServiceError("feishu", "Failed to send im message")
 
-    logger.info("Feishu message sent", extra={"open_id": open_id})
+    logger.info("Feishu message sent", extra={"receive_id_type": receive_id_type})
+
+
+async def send_interactive(open_id: str, card: dict) -> None:
+    """向指定用户（open_id 定位）发送交互卡片私聊消息。"""
+    await _post_message("open_id", open_id, "interactive", json.dumps(card, ensure_ascii=False))
+
+
+async def send_interactive_to_chat(chat_id: str, card: dict) -> None:
+    """向指定群（chat_id 定位）发送交互卡片；前置：机器人已在群内。"""
+    await _post_message("chat_id", chat_id, "interactive", json.dumps(card, ensure_ascii=False))
+
+
+async def send_text(target_type: str, target_id: str, text: str) -> None:
+    """发送文本消息（target_type: open_id | chat_id）；供 MCP 写工具等通用场景。"""
+    if target_type not in ("open_id", "chat_id"):
+        raise ValidationError(f"unsupported target_type: {target_type}")
+    await _post_message(
+        target_type, target_id, "text", json.dumps({"text": text}, ensure_ascii=False),
+    )

@@ -1,12 +1,14 @@
-"""飞书入站事件业务处理：私聊建单（一期）。
+"""飞书入站事件业务处理：私聊建单（一期）+ agent 分流。
 
 入口收敛为两类报文（均已经 feishu_events.py 验签 / 解密）：
-- im.message.receive_v1：单聊文本 → 识别「建单」指令 → 回建单表单卡片
+- im.message.receive_v1：单聊文本 → /ai 前缀转发编排层（agent 对话）；
+  「建单」指令 → 回建单表单卡片；其他消息静默忽略
 - card.action.trigger：表单提交 → create_ticket → toast + 确认卡片
 
 纪律：
-- 秒级 ack：处理保持轻量（本地 DB 查询 + 出站发卡片一律 fire-and-forget）
+- 秒级 ack：处理保持轻量（本地 DB 查询 + 出站发卡片/转发一律 fire-and-forget）
 - 幂等：按 event_id 去重（进程内 LRU；飞书对超时回调会重推）
+- 事件拓扑：编排层不直连飞书，agent 消息由本服务转发（见编排层 charter §1.1）
 """
 
 from __future__ import annotations
@@ -21,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from bingops.api.dependencies import has_permissions
-from bingops.core import feishu_bot
+from bingops.core import agent_bridge, feishu_bot
 from bingops.core.config import settings
 from bingops.core.exceptions import PermissionDeniedError, ValidationError
 from bingops.models.ticket import TicketCatalog
@@ -33,6 +35,8 @@ logger = logging.getLogger(f"bingops.{__name__}")
 
 # 触发建单的关键词（机器人菜单「创建工单」的预设文本即「建单」）
 CREATE_TICKET_KEYWORDS = ("建单", "创建工单", "建工单")
+# Agent 分流前缀：命中后转发编排层（与建单关键词正交，由前缀区分两个消费方）
+AGENT_COMMAND_PREFIX = "/ai"
 VALID_PRIORITIES = ("low", "medium", "high", "urgent")
 PRIORITY_LABELS = {"low": "低", "medium": "中", "high": "高", "urgent": "紧急"}
 
@@ -117,6 +121,11 @@ async def handle_message_event(session: AsyncSession, data: dict) -> None:
         text = str(json.loads(message.get("content") or "{}").get("text", "")).strip()
     except json.JSONDecodeError:
         return
+
+    if text.startswith(AGENT_COMMAND_PREFIX):
+        _forward_agent(open_id, message, text[len(AGENT_COMMAND_PREFIX):].strip())
+        return
+
     if not any(text == kw or text.startswith(kw) for kw in CREATE_TICKET_KEYWORDS):
         return
 
@@ -133,6 +142,25 @@ async def handle_message_event(session: AsyncSession, data: dict) -> None:
         "Feishu create form sent",
         extra={"open_id": open_id, "catalog_options": len(items)},
     )
+
+
+def _forward_agent(open_id: str, message: dict, question: str) -> None:
+    """fire-and-forget 转发 agent 分流消息（已剥 /ai 前缀）；回调地址未配置时仅记日志。"""
+
+    async def _post() -> None:
+        try:
+            await agent_bridge.forward_agent_message({
+                "event_type": "im.message.receive_v1",
+                "sender_open_id": open_id,
+                "chat_id": message.get("chat_id", ""),
+                "text": question,
+            })
+        except Exception:
+            logger.exception("Agent forward failed", extra={"open_id": open_id})
+
+    task = asyncio.create_task(_post(), name="agent-forward")
+    _send_tasks.add(task)
+    task.add_done_callback(_send_tasks.discard)
 
 
 # ── 卡片回调分支：card.action.trigger ────────────────────────────────────
