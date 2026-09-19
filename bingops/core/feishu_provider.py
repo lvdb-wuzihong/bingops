@@ -116,7 +116,7 @@ class FeishuAuthProvider:
         }
 
     async def _find_or_create_user(self, session: AsyncSession, feishu_user: dict[str, Any]) -> User:
-        """按 feishu_open_id 查找用户，不存在则自动创建。"""
+        """按 feishu_open_id 查找用户；未命中则按 email 绑定已有账密用户；均未命中则自动创建。"""
         open_id = feishu_user["open_id"]
 
         result = await session.execute(
@@ -132,8 +132,27 @@ class FeishuAuthProvider:
             logger.info("Feishu user logged in", extra={"user_id": user.id})
             return user
 
-        # 自动开户
+        # 邮箱绑定：飞书返回的 email 来自租户通讯录，属预信任数据；
+        # 与已有账密用户匹配时直接绑定飞书身份，避免撞 email 唯一约束
         email = feishu_user["email"]
+        if email:
+            result = await session.execute(
+                select(User).where(User.email == email)
+            )
+            user = result.scalar_one_or_none()
+            if user is not None:
+                user.feishu_open_id = open_id
+                user.feishu_union_id = feishu_user.get("union_id")
+                user.display_name = feishu_user["name"] or user.display_name
+                user.avatar_url = feishu_user["avatar_url"] or user.avatar_url
+                await session.flush()
+                logger.info(
+                    "Feishu identity bound to existing user",
+                    extra={"user_id": user.id, "email": email},
+                )
+                return user
+
+        # 自动开户
         username = email.split("@")[0] if email else f"feishu_{open_id[:8]}"
 
         user = User(
@@ -156,6 +175,11 @@ class FeishuAuthProvider:
         if viewer_role:
             session.add(UserRole(user_id=user.id, role_id=viewer_role.id))
             await session.flush()
+        else:
+            logger.warning(
+                "Default viewer role not found, new user has no role",
+                extra={"user_id": user.id},
+            )
 
         logger.info("Feishu user auto-created", extra={"user_id": user.id, "username": username})
         return user
