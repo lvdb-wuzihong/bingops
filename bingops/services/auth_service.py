@@ -91,23 +91,24 @@ async def get_me(session: AsyncSession, user_id: int) -> User:
     return user
 
 
-async def change_password(session: AsyncSession, user: User, old_password: str, new_password: str) -> None:
-    """修改当前用户密码。"""
-    if not user.password_hash:
-        raise ValidationError("This account uses external authentication and cannot change password")
+async def change_password(session: AsyncSession, user: User, old_password: str | None, new_password: str) -> None:
+    """修改当前用户密码；无密码用户（飞书 SSO 开户）首次设置密码时免验旧密码。"""
+    if user.password_hash:
+        # 已有密码：必须验旧密码，防止登录态被盗后直接改密
+        if not old_password:
+            raise ValidationError("Old password is required")
+        if not verify_password(old_password, user.password_hash):
+            raise AuthenticationError("Old password is incorrect")
+        if old_password == new_password:
+            raise ValidationError("New password must be different from old password")
 
-    if not verify_password(old_password, user.password_hash):
-        raise AuthenticationError("Old password is incorrect")
-
-    if old_password == new_password:
-        raise ValidationError("New password must be different from old password")
-
+    is_first_set = user.password_hash is None
     user.password_hash = hash_password(new_password)
     user_repo = UserRepo(session)
     await user_repo.update(user)
     await session.commit()
 
-    logger.info("User password changed", extra={"user_id": user.id})
+    logger.info("User password changed", extra={"user_id": user.id, "first_time_set": is_first_set})
 
 
 def _build_token_response(user: User) -> TokenResponse:

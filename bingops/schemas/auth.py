@@ -36,7 +36,12 @@ class FeishuLoginResponse(BaseModel):
 class ChangePasswordRequest(BaseModel):
     """修改密码请求。"""
 
-    old_password: str = Field(min_length=6, max_length=128, description="当前密码")
+    old_password: str | None = Field(
+        default=None,
+        min_length=6,
+        max_length=128,
+        description="当前密码；无密码用户（飞书 SSO 开户）首次设置密码时可不传",
+    )
     new_password: str = Field(min_length=6, max_length=128, description="新密码")
 
 
@@ -51,5 +56,6 @@ class UserInfoResponse(BaseModel):
     auth_source: str
     is_active: bool
     is_superuser: bool
+    has_password: bool = Field(description="是否已设置本地密码；False 时修改密码免验旧密码（首次设置）")
     roles: list[str] = Field(description="角色 code 列表")
     permissions: list[str] = Field(description="权限 code 列表")

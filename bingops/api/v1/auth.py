@@ -68,6 +68,7 @@ async def get_me(
         auth_source=user.auth_source,
         is_active=user.is_active,
         is_superuser=user.is_superuser,
+        has_password=user.password_hash is not None,
         roles=role_codes,
         permissions=perm_codes,
     )
