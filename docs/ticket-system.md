@@ -384,4 +384,46 @@ admin 全量；operator 管理但无删除；viewer/auditor 只读。目录删�
 | `BINGOPS_TICKET_NOTIFY_ENABLED` | `false` | 总闸（fail-safe，对齐告警联动先例）；上线须显式置 true |
 | `BINGOPS_TICKET_NOTIFY_WEB_BASE_URL` | 空 | 前端工单详情页基址；非空才带「查看工单」按钮 |
 
-两者启动时读取一次，修改后需重启服务。飞书侧前置：应用开通「机器人」能力 + `im:message:send_as_bot` 权限并发布版本；接收人在应用可用范围内。新增通知场景只需在对应挂点构卡后调用 `_notify_feishu_user`，无需改模型或 API。
+两者启动时读取一次，修改后需重启服务。**管控边界**：总闸仅管控事件类通知（解决/指派提醒）；飞书建单交互的即时反馈（表单提交后的 toast 与「工单已创建」确认卡片，见 §16.2）不经过此开关，始终发送——否则用户点提交会无任何响应。飞书侧前置：应用开通「机器人」能力 + `im:message:send_as_bot` 权限并发布版本；接收人在应用可用范围内。新增通知场景只需在对应挂点构卡后调用 `_notify_feishu_user`，无需改模型或 API。总闸关闭时状态流转钩子静默跳过（debug 日志 `Ticket notify gate disabled` 留痕），排障时若 BINGOPS_LOG_LEVEL=INFO 看不到，可临时调 DEBUG 或直接查容器环境变量 `env | grep TICKET_NOTIFY`。
+
+---
+
+## 16. 飞书机器人建单（入站链路，已实现）
+
+飞书侧反向建单：用户在机器人对话里点菜单/发指令，经卡片表单选择目录事项后直接建单。与网页端 `POST /tickets` 完全同构（同一 `create_ticket`，目录必填、default_type/default_risk 快照、审批门禁全部生效）。
+
+### 16.1 回调端点与安全模型
+
+统一回调入口 `POST /api/v1/integrations/feishu/events`（`feishu_events.py`，`response_model=None`），同时承载三类报文：
+
+| 报文 | 处理 |
+|------|------|
+| `url_verification` 握手 | 保存请求地址时飞书即时 POST challenge，1s 内原样回显 |
+| `im.message.receive_v1`（事件推送） | 单聊文本识别建单指令 → 回表单卡片；发卡片一律 fire-and-forget，端点秒级 ack |
+| `card.action.trigger`（卡片交互回调） | 表单提交同步处理（本地 DB 耗时可控），**响应体即 toast** |
+
+安全模型（fail-closed，对齐告警 webhook 先例）：Encrypt Key / Verification Token 未配置 → 全部 401；报文带 `encrypt` 字段按 AES-256-CBC 解密（key=SHA256(Encrypt Key)，依赖 `cryptography`，零新增依赖）；token 不匹配 401。
+
+**幂等**：`event_id` 进程内 LRU 去重（容量 2000）——飞书对超时回调会重推，重复回调直接跳过，防止重复建单。注意去重为进程级，多副本极端场景（重推路由到另一副本）存在理论窗口，量级可忽略。
+
+### 16.2 建单交互流（`feishu_event_service.py`）
+
+1. 用户点机器人菜单「创建工单」（预设文本「建单」）或直接发文本 → 关键词匹配（`建单/创建工单/建工单`，前缀或全等）
+2. `open_id → users.feishu_open_id` 查平台账号；未绑定 → 回引导卡片（提示先完成一次飞书登录，登录即自动绑定）
+3. 回「新建工单」表单卡片（**卡片 JSON 2.0**，`schema: "2.0"` + form 容器）：
+   - **服务目录事项**：全量活跃二级事项实时读库（`ticket_catalog`，显示「一级分类/二级事项」），`required: true` ——非固定兜底，选哪个按哪个建
+   - **优先级**：low/medium/high/urgent 下拉
+   - **标题**（必填，服务端截断 256）/ **描述**（选填）
+   - 提交按钮 `form_action_type: "submit"`
+4. 提交 → `card.action.trigger` 携带 `action.form_value` → `has_permissions(user, "ticket:create")` 校验 → `create_ticket(operator=该飞书用户)` → toast「工单 TK-xxx 已创建」+ 绿色确认卡片（复用 `BINGOPS_TICKET_NOTIFY_WEB_BASE_URL` 跳转按钮）
+
+**工单类型不出现在卡片上是刻意的**：未显式传 ticket_type 时由所选事项 `default_type` 快照派生（§12.2），default_risk/处理组路由同样随目录带出；目录必填约束保证类型永不为空，与网页端建单同构。卡片 JSON 2.0 协议要点（实测踩坑）：`select_static`/`input` 无 `label` 属性（字段名用独立 markdown 行），`options` 元素用 `text` 对象而非 `label`，提交按钮用 `form_action_type` 而非历史属性 `action_type`。
+
+### 16.3 配置与飞书侧前置
+
+| 环境变量 | 默认 | 说明 |
+|----------|------|------|
+| `BINGOPS_FEISHU_EVENT_ENCRYPT_KEY` | 空 | 回调报文解密（事件与回调 → 加密策略）；未配置拒绝全部回调 |
+| `BINGOPS_FEISHU_EVENT_VERIFICATION_TOKEN` | 空 | 回调验签；未配置拒绝全部回调 |
+
+飞书侧订阅矩阵（最小集）：事件 `im.message.receive_v1` + 权限 `im:message.p2p:readonly`；回调配置订阅 `card.action.trigger`（请求地址与事件同 URL）；机器人菜单（发送文字消息「建单」）为可选入口装饰。群 @ 建单预留 `im:message.group_at_msg:readonly`（二期，`chat_type != p2p` 当前静默忽略）。明确不订阅：消息已读、消息资源文件、机器人进退群、飞书审批应用事件（平台工单走自身数据表）。

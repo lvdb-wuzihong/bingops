@@ -737,6 +737,10 @@ async def _notify_ticket_resolved(
 ) -> None:
     """工单标记解决后私聊提醒建单人（fire-and-forget，失败只记日志不阻断主流程）。"""
     if not settings.ticket_notify_enabled:
+        logger.debug(
+            "Ticket notify gate disabled",
+            extra={"ticket_id": ticket.id, "scene": "resolved"},
+        )
         return
 
     card = _build_resolved_card(ticket, operator, comment)
@@ -748,7 +752,13 @@ async def _notify_ticket_resolved(
 
 async def _notify_ticket_assigned(session: AsyncSession, ticket: Ticket, operator: User) -> None:
     """工单指派后私聊提醒处理人（创建时指派/值班自动派单与指派/转派入口共用）。"""
-    if not settings.ticket_notify_enabled or ticket.assignee_id is None:
+    if not settings.ticket_notify_enabled:
+        logger.debug(
+            "Ticket notify gate disabled",
+            extra={"ticket_id": ticket.id, "scene": "assigned"},
+        )
+        return
+    if ticket.assignee_id is None:
         return
 
     creator_result = await session.execute(select(User).where(User.id == ticket.creator_id))
