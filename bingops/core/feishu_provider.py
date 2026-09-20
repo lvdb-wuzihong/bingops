@@ -14,7 +14,6 @@ from typing import Any
 import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
 
 from bingops.core.config import feishu_settings
 from bingops.core.exceptions import AuthenticationError, ExternalServiceError
@@ -184,8 +183,9 @@ class FeishuAuthProvider:
 
         logger.info("Feishu user auto-created", extra={"user_id": user.id, "username": username})
 
-        # 新 add 对象的 roles 未加载（selectin 预加载只对查询加载生效），
-        # 直接返回会让 _build_token_response 访问 user.roles 时触发隐式 lazy IO
-        # → async 会话下 MissingGreenlet；重查一次让对象带齐关系
-        reloaded = await session.get(User, user.id, options=[selectinload(User.roles)])
-        return reloaded or user
+        # 新 add 对象的 roles 未加载（selectin 预加载只对查询加载生效）。
+        # 注意不能用 session.get 重查：它会命中 identity map 直接返回原对象（不发查询、忽略 options），
+        # 必须显式 refresh 加载 roles 集合，否则 _build_token_response 访问
+        # user.roles 时触发隐式 lazy IO → async 会话下 MissingGreenlet
+        await session.refresh(user, attribute_names=["roles"])
+        return user
