@@ -118,6 +118,9 @@ PERMISSIONS: list[tuple[str, str]] = [
     ("notify_channel:create", "创建通知渠道"),
     ("notify_channel:update", "更新通知渠道"),
     ("notify_channel:delete", "删除通知渠道"),
+    # AI agent 编排层取数所需（与 CMDB 种子 SQL 中的码同名，按 code 幂等去重）
+    ("cmdb_resource:list", "查看 CMDB 资源与关系"),
+    ("cmdb_app:list", "查看业务应用与应用资源"),
 ]
 
 ROLES: list[tuple[str, str, str, bool]] = [
@@ -125,7 +128,11 @@ ROLES: list[tuple[str, str, str, bool]] = [
     ("operator", "运维操作员", "可执行部署、管理主机等操作", True),
     ("viewer", "只读查看", "只能查看资源，不能修改", True),
     ("auditor", "审计员", "可查看全部数据和审计日志", True),
+    ("ai_agent", "AI Agent", "AI 编排层系统账号（只读取数 + 受控写）", False),
 ]
+
+# ai_agent 角色权限码：巡检 pipeline 取数（sources 直连 REST）所需最小集
+AI_AGENT_PERMISSION_CODES = ("cmdb_resource:list", "cmdb_app:list", "ticket:list", "job:list")
 
 
 async def init_data() -> None:
@@ -175,6 +182,52 @@ async def init_data() -> None:
 
             await session.flush()
             logger.info("Role permissions assigned")
+
+        # 5b. ai_agent 系统账号（角色权限 + 用户，独立幂等：不依赖全局 rp_count 跳过，
+        #     已有部署重跑本脚本时新角色也能拿到权限）
+        agent_role_result = await session.execute(select(Role).where(Role.code == "ai_agent"))
+        agent_role = agent_role_result.scalar_one_or_none()
+        if agent_role is not None:
+            for perm_code in AI_AGENT_PERMISSION_CODES:
+                perm_result = await session.execute(
+                    select(Permission).where(Permission.code == perm_code)
+                )
+                perm = perm_result.scalar_one_or_none()
+                if perm is None:
+                    logger.warning("ai_agent permission missing, skip: %s", perm_code)
+                    continue
+                rp_result = await session.execute(
+                    select(RolePermission).where(
+                        RolePermission.role_id == agent_role.id,
+                        RolePermission.permission_id == perm.id,
+                    )
+                )
+                if rp_result.scalar_one_or_none() is None:
+                    session.add(RolePermission(role_id=agent_role.id, permission_id=perm.id))
+            await session.flush()
+            logger.info("ai_agent role permissions ensured")
+
+            agent_password = os.environ.get("BINGOPS_AGENT_PASSWORD", "")
+            agent_user_result = await session.execute(select(User).where(User.username == "ai_agent"))
+            if agent_user_result.scalar_one_or_none() is None:
+                if not agent_password:
+                    logger.warning(
+                        "BINGOPS_AGENT_PASSWORD not set: ai_agent user creation skipped"
+                    )
+                else:
+                    agent_user = User(
+                        username="ai_agent",
+                        email="ai_agent@bingops.local",
+                        password_hash=hash_password(agent_password),
+                        display_name="AI Agent",
+                    )
+                    session.add(agent_user)
+                    await session.flush()
+                    session.add(UserRole(user_id=agent_user.id, role_id=agent_role.id))
+                    await session.flush()
+                    logger.info("ai_agent user created (username: ai_agent)")
+            else:
+                logger.info("ai_agent user already exists, skipping")
 
         # 6. 创建默认 admin 用户
         admin_role_result = await session.execute(select(Role).where(Role.code == "admin"))
