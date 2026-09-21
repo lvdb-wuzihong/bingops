@@ -12,7 +12,7 @@
 | 1 | 平台定位 | bingops 只做监控**控制面 + 告警事件闭环层**（无状态）；不存指标采样、不做评估循环、不做查询代理 |
 | 2 | 评估引擎归属 | **夜莺退役（2026-09-09 决策）**，夜莺与 ck-log-alert 均只作实现参考；评估统一由独立执行器（alert-executor）承担——双评估器：clickhouse（SQL 契约）+ victoria/prometheus（PromQL 表达式自带比较，vector 非空即触发）。评估循环不进 bingops 主进程 |
 | 3 | 事件收敛 | 所有来源的告警 → bingops `POST /api/v1/alerts/webhook` 唯一入口；统一事件表，统计才有全局意义 |
-| 4 | resolved 双轨语义 | 夜莺自带恢复事件直传；ck-log-alert **永不报恢复**（低于阈值静默跳过，保持现状），平台按规则级 `stale_minutes` 超时推导 resolved |
+| 4 | resolved 双轨语义（已收敏） | ~~夜莺自带恢复事件直传~~（夜莺 2026-09-21 已下线，该路径成为历史）；指标与日志统一由执行器评估：命中静默跳过 → stale 推导 resolved；`source="n9e"` 枚举保留供历史事件归属 |
 | 5 | 契约豁免 | webhook 为机器对机器接口：裸响应不套 `{"code","message","data"}` 统一信封外的强约束（见 §4.2 折中），不绑用户权限码，`X-Agent-Token` 静态鉴权 + 同 VPC 网络隔离 |
 | 6 | 主旁路纪律 | 执行器回报失败只打日志，**绝不影响飞书通知主路**；平台不可用 = 统计降级，通知不降级 |
 | 7 | details 黑盒 | 事件明细为 JSONB 自由结构，平台不解析内部字段；ck-log-alert 内部实现可整体变动不破契约 |
@@ -219,7 +219,7 @@ error 回报 → 独立落行（status='error'），不进状态机、不开单�
   - 顶层另含日志类汇总：`recorded_total` / `error_total` / `recorded_error_total`（日志告警不进 firing→resolved 闭环，看板卡片需单独口径，与生命周期卡片分开展示）
 - 高频 firing 规则排名即噪声规则治理清单。权限码按 RBAC 规范注册（建议 `alert:read` / `alert:manage`）。
 
-## 10. ck-log-alert 适配清单（约 +30 行）
+## 10. ck-log-alert 适配清单（已作废——ck-log-alert 2026-09 下线，日志告警由 bingops-alert-executor 全面接管，本章仅作迁移历史保留）
 
 | 脚本现有 | payload 字段 | 说明 |
 |---|---|---|
@@ -251,9 +251,9 @@ def report_event(cfg: dict, rule: dict, status: str, total: int,
 
 顺带修复隐患：`interval_minutes` 默认值两处不一致（`build_query` 默认 1 / `run()` 默认 5），统一为一个默认值。
 
-## 11. 夜莺侧接入（迁移过渡期）
+## 11. 夜莺侧接入（已退役，历史记录）
 
-> **演进更新（2026-09-09）：夜莺进入退役计划**。本节仅适用于过渡期：指标规则逐条迁至平台（PromQL 原样贴入 eval_sql，绑 victoria 数据源），执行器接管后夜莺侧同步禁用对应规则，双跑对账；清零后夜莺下线，指标告警由执行器 PromQL 评估器承担（vector 非空即触发）。
+> **2026-09-21：夜莺已下线**。指标规则已全部迁至平台（victoria 数据源 + 执行器 PromQL 评估器），本节仅作为迁移历史保留。`source="n9e"` 枚举与历史事件的 rule_kind='metric' 归属继续有效，仅供存量数据溯源；不再有新的 n9e 来源事件。
 
 通知媒介追加 webhook 指向同一端点（`source: "n9e"`），恢复事件直传 `status: "resolved"`；映射表里为涉及规则配 `group_id`。零代码，纯配置。
 
