@@ -12,6 +12,21 @@ _RESOURCE_FIELDS = (
 )
 
 
+def _matched_keys(fields: dict, value: str) -> list[str]:
+    """递归收集 fields 中值等于 value 的顶层键（嵌套数组/对象内命中归属顶层键）。"""
+
+    def contains(node) -> bool:
+        if isinstance(node, str):
+            return node == value
+        if isinstance(node, dict):
+            return any(contains(v) for v in node.values())
+        if isinstance(node, list):
+            return any(contains(v) for v in node)
+        return False
+
+    return sorted(k for k, v in (fields or {}).items() if contains(v))
+
+
 @mcp.tool()
 @mcp_tool_logging("search_resources")
 async def search_resources(
@@ -21,13 +36,19 @@ async def search_resources(
     region: str | None = None,
     cloud_account: str | None = None,
     keyword: str | None = None,
+    field_value: str | None = None,
     limit: int | None = None,
 ) -> dict:
-    """按条件检索 CMDB 资源（名称模糊匹配），返回 id/name/model_code/provider/region 等。
+    """按条件检索 CMDB 资源，返回 id/name/model_code/provider/region 等。
 
-    适用场景：按云厂商/地域/状态圈定资源范围、按名称关键词定位实例。
-    限制：不支持按 fields 动态字段（如 IP）查询（待平台暴露 JSONB 查询参数）；
-    仅返回第 1 页（默认 20 条、上限 100）。
+    适用场景：拿到 IP/连接地址/实例 ID 反查资源（告警排障、日志定位的
+    第一步）；也可按云厂商/地域/状态圈定范围或按名称关键词模糊定位。
+    field_value 对资源的全部动态字段做精确等值匹配（IP、endpoint、
+    instance_id 等，含嵌套数组），例：field_value="10.0.0.5"、
+    field_value="rm-xxx.mysql.rds.aliyuncs.com"。
+    限制：field_value 是全字段精确等值（非模糊，不支持按端口等数字字段）；
+    仅返回第 1 页（默认 20 条、上限 100）；命中后可用 get_resource_detail
+    看完整属性、find_app_by_resource 反查归属应用。
     """
     size = clamp_limit(limit)
     async with session_scope() as session:
@@ -45,6 +66,7 @@ async def search_resources(
             session,
             model_id=model_id, provider=provider, status=status,
             cloud_account=cloud_account, region=region, keyword=keyword,
+            field_value=field_value,
             page=1, page_size=size,
         )
         code_map = {
@@ -54,7 +76,14 @@ async def search_resources(
 
     return {
         "items": [
-            {**{k: getattr(r, k) for k in _RESOURCE_FIELDS}, "model_code": code_map.get(r.model_id)}
+            {
+                **{k: getattr(r, k) for k in _RESOURCE_FIELDS},
+                "model_code": code_map.get(r.model_id),
+                # 仅 field_value 检索时附带：告知 agent 命中了哪个动态字段
+                **({
+                    "matched_fields": _matched_keys(r.fields or {}, field_value),
+                } if field_value else {}),
+            }
             for r in rows
         ],
         "total": total,

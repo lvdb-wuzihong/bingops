@@ -52,6 +52,7 @@ async def list_resources(
     cloud_account: str | None = None,
     region: str | None = None,
     keyword: str | None = None,
+    field_value: str | None = None,
     page: int = 1,
     page_size: int = 20,
 ) -> tuple[list[CmdbResource], int]:
@@ -64,6 +65,7 @@ async def list_resources(
         cloud_account=cloud_account,
         region=region,
         keyword=keyword,
+        field_value=field_value,
         page=page,
         page_size=page_size,
     )

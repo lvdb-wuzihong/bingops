@@ -4,11 +4,27 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import String, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bingops.models.cmdb.model import CmdbModel
 from bingops.models.cmdb.resource import CmdbResource
+
+
+def _json_value_like(value: str) -> str:
+    """动态字段值 → JSON 序列化文本的 LIKE 模式。
+
+    带双引号边界保证精确等值语义（子串不误报，如 10.0.0.5 不命中
+    10.0.0.50——值结尾必须是引号）；LIKE 通配符按 PG 默认反斜杠转义，
+    输入中的双引号剥离（JSON 文本中引号只作结构边界）。
+    """
+    safe = (
+        value.replace("\\", "\\\\")
+        .replace("%", "\\%")
+        .replace("_", "\\_")
+        .replace('"', "")
+    )
+    return f'%"{safe}"%'
 
 
 class CmdbResourceRepo:
@@ -159,6 +175,7 @@ class CmdbResourceRepo:
         cloud_account: str | None = None,
         region: str | None = None,
         keyword: str | None = None,
+        field_value: str | None = None,
         page: int = 1,
         page_size: int = 20,
     ) -> tuple[list[CmdbResource], int]:
@@ -189,6 +206,15 @@ class CmdbResourceRepo:
             )
             query = query.where(keyword_filter)
             count_query = count_query.where(keyword_filter)
+        if field_value:
+            # 动态字段值精确检索（agent 排障主路径：IP/连接地址/实例 ID → 资源）。
+            # JSON 序列化文本中字符串值带双引号边界，"10.0.0.5" 不会误报 "10.0.0.50"；
+            # 嵌套数组/对象内的值同样命中。fields::text 无法用 GIN 索引，全表扫描——
+            # 万级资源量级可接受，十万级再考虑表达式 trigram 索引。
+            pattern = _json_value_like(field_value)
+            fv_filter = CmdbResource.fields.cast(String).like(pattern)
+            query = query.where(fv_filter)
+            count_query = count_query.where(fv_filter)
 
         total_result = await self._session.execute(
             select(func.count()).select_from(count_query.subquery())

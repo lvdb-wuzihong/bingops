@@ -22,6 +22,10 @@ async def list_resources(
     cloud_account: str | None = None,
     region: str | None = None,
     keyword: str | None = None,
+    field_value: str | None = Query(
+        default=None,
+        description="按动态字段值精确检索（如 IP/连接地址/实例 ID），全字段匹配",
+    ),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     session: AsyncSession = Depends(get_db_session),
@@ -36,6 +40,7 @@ async def list_resources(
         cloud_account=cloud_account,
         region=region,
         keyword=keyword,
+        field_value=field_value,
         page=page,
         page_size=page_size,
     )
