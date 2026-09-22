@@ -176,10 +176,11 @@ class CmdbResourceRepo:
         region: str | None = None,
         keyword: str | None = None,
         field_value: str | None = None,
+        exact: bool = False,
         page: int = 1,
         page_size: int = 20,
     ) -> tuple[list[CmdbResource], int]:
-        """分页查询资源实例列表。"""
+        """分页查询资源实例列表（exact=True 时 keyword 为名称等值而非模糊）。"""
         query = select(CmdbResource).where(CmdbResource.deleted_at.is_(None))
         count_query = select(CmdbResource.id).where(CmdbResource.deleted_at.is_(None))
 
@@ -199,13 +200,17 @@ class CmdbResourceRepo:
             query = query.where(CmdbResource.region == region)
             count_query = count_query.where(CmdbResource.region == region)
         if keyword:
-            like_pattern = f"%{keyword}%"
-            keyword_filter = or_(
-                CmdbResource.name.ilike(like_pattern),
-                CmdbResource.provider_id.ilike(like_pattern),
-            )
-            query = query.where(keyword_filter)
-            count_query = count_query.where(keyword_filter)
+            if exact:
+                # 精确匹配：名称等值（全局搜索的精确开关）
+                kw_filter = CmdbResource.name == keyword
+            else:
+                like_pattern = f"%{keyword}%"
+                kw_filter = or_(
+                    CmdbResource.name.ilike(like_pattern),
+                    CmdbResource.provider_id.ilike(like_pattern),
+                )
+            query = query.where(kw_filter)
+            count_query = count_query.where(kw_filter)
         if field_value:
             # 动态字段值精确检索（agent 排障主路径：IP/连接地址/实例 ID → 资源）。
             # JSON 序列化文本中字符串值带双引号边界，"10.0.0.5" 不会误报 "10.0.0.50"；

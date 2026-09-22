@@ -49,8 +49,9 @@ class CmdbBusinessAppRepo:
             count_query = count_query.where(CmdbBusinessApp.owner == owner)
         if keyword:
             like_pattern = f"%{keyword}%"
-            query = query.where(CmdbBusinessApp.name.ilike(like_pattern))
-            count_query = count_query.where(CmdbBusinessApp.name.ilike(like_pattern))
+            kw_filter = CmdbBusinessApp.name.ilike(like_pattern) | CmdbBusinessApp.app_code.ilike(like_pattern)
+            query = query.where(kw_filter)
+            count_query = count_query.where(kw_filter)
 
         total_result = await self._session.execute(
             select(func.count()).select_from(count_query.subquery())

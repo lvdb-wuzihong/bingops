@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from bingops.core.exceptions import ConflictError, NotFoundError, ValidationError
 from bingops.models.cmdb.resource import CmdbResource
+from bingops.repositories.cmdb.favorite_repo import CmdbFavoriteRepo
 from bingops.repositories.cmdb.model_repo import CmdbModelRepo
 from bingops.repositories.cmdb.resource_repo import CmdbResourceRepo
 from bingops.schemas.cmdb.resource import ResourceCreate, ResourceUpdate
@@ -55,6 +56,7 @@ async def list_resources(
     region: str | None = None,
     keyword: str | None = None,
     field_value: str | None = None,
+    exact: bool = False,
     page: int = 1,
     page_size: int = 20,
 ) -> tuple[list[CmdbResource], int]:
@@ -68,6 +70,7 @@ async def list_resources(
         region=region,
         keyword=keyword,
         field_value=field_value,
+        exact=exact,
         page=page,
         page_size=page_size,
     )
@@ -180,3 +183,57 @@ async def get_resource_stats(session: AsyncSession) -> dict:
         "by_status": by_status,
         "by_provider": by_provider,
     }
+
+
+# ── 资源收藏（我的关注） ─────────────────────────────────────────────────────
+
+
+async def add_favorite(session: AsyncSession, user_id: int, resource_id: int) -> bool:
+    """收藏资源（幂等），返回是否新产生收藏。"""
+    await get_resource(session, resource_id)  # 资源必须存在
+    repo = CmdbFavoriteRepo(session)
+    created = await repo.add(user_id, resource_id) is not None
+    await session.commit()
+    return created
+
+
+async def remove_favorite(session: AsyncSession, user_id: int, resource_id: int) -> bool:
+    """取消收藏，返回是否真的删除。"""
+    removed = await CmdbFavoriteRepo(session).remove(user_id, resource_id)
+    await session.commit()
+    return removed
+
+
+async def list_favorites(session: AsyncSession, user_id: int) -> list[dict]:
+    """我的收藏列表（按收藏时间倒序，join 资源与模型 code）。"""
+    from bingops.models.cmdb.model import CmdbModel
+
+    favs = await CmdbFavoriteRepo(session).list_by_user(user_id)
+    if not favs:
+        return []
+
+    rid_map = {f.resource_id: f for f in favs}
+    resources = await CmdbResourceRepo(session).list_by_ids(list(rid_map))
+    models = {
+        m.id: m.code
+        for m in await CmdbModelRepo(session).get_models_by_ids(
+            [r.model_id for r in resources]
+        )
+    } if resources else {}
+
+    items: list[dict] = []
+    for r in resources:
+        fav = rid_map[r.id]
+        items.append({
+            "id": r.id,
+            "name": r.name,
+            "model_id": r.model_id,
+            "model_code": models.get(r.model_id),
+            "provider": r.provider,
+            "region": r.region,
+            "status": r.status,
+            "favorited_at": fav.created_at.isoformat() if fav.created_at else None,
+        })
+    # 按收藏时间倒序对齐（list_by_ids 不保序）
+    items.sort(key=lambda x: x["favorited_at"] or "", reverse=True)
+    return items

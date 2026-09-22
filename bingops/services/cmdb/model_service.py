@@ -37,6 +37,41 @@ async def list_categories(session: AsyncSession):
     return await repo.list_categories()
 
 
+async def get_models_overview(session: AsyncSession) -> list[dict]:
+    """资产总览：分类 → 模型 → 存活资源数 一次聚合返回。
+
+    资产总览页单请求渲染整页，避免前端分类/模型/统计三连拼装。
+    """
+    from bingops.repositories.cmdb.resource_repo import CmdbResourceRepo
+
+    repo = CmdbModelRepo(session)
+    categories = await repo.list_categories()
+    models = await repo.list_models()
+    counts = await CmdbResourceRepo(session).count_by_model()
+
+    by_category: dict[int, list[dict]] = {}
+    for m in sorted(models, key=lambda x: (x.sort_order, x.id)):
+        by_category.setdefault(m.category_id, []).append({
+            "id": m.id,
+            "code": m.code,
+            "name": m.name,
+            "icon": m.icon,
+            "description": m.description,
+            "is_enabled": m.is_enabled,
+            "resource_count": counts.get(m.id, 0),
+        })
+    return [
+        {
+            "id": c.id,
+            "code": c.code,
+            "name": c.name,
+            "icon": c.icon,
+            "models": by_category.get(c.id, []),
+        }
+        for c in sorted(categories, key=lambda x: (x.sort_order, x.id))
+    ]
+
+
 async def create_category(session: AsyncSession, payload: ModelCategoryCreate):
     repo = CmdbModelRepo(session)
     existing = await repo.get_category_by_code(payload.code)

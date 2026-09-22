@@ -14,6 +14,42 @@ from bingops.services.cmdb import resource_service
 router = APIRouter(prefix="/api/v1/cmdb/resources", tags=["cmdb-resources"])
 
 
+# ── 我的关注（收藏） ──────────────────────────────────────────────────────
+# 注意：/favorites 为静态路径，必须注册在 /{resource_id} 之前
+
+
+@router.get("/favorites")
+async def list_favorites(
+    session: AsyncSession = Depends(get_db_session),
+    user: User = require_permission("cmdb_resource:list"),
+):
+    """我的关注资产列表（按收藏时间倒序）。"""
+    items = await resource_service.list_favorites(session, user.id)
+    return success_response(data=items)
+
+
+@router.put("/{resource_id}/favorite", status_code=200)
+async def add_favorite(
+    resource_id: int,
+    session: AsyncSession = Depends(get_db_session),
+    user: User = require_permission("cmdb_resource:list"),
+):
+    """收藏资源（幂等）。"""
+    created = await resource_service.add_favorite(session, user.id, resource_id)
+    return success_response(message="Favorited" if created else "Already favorited")
+
+
+@router.delete("/{resource_id}/favorite")
+async def remove_favorite(
+    resource_id: int,
+    session: AsyncSession = Depends(get_db_session),
+    user: User = require_permission("cmdb_resource:list"),
+):
+    """取消收藏。"""
+    removed = await resource_service.remove_favorite(session, user.id, resource_id)
+    return success_response(message="Unfavorited" if removed else "Not favorited")
+
+
 @router.get("")
 async def list_resources(
     model_id: int | None = None,
@@ -114,7 +150,7 @@ async def search_resource_options(
     keyword: str | None = None,
     model_id: int | None = None,
     status: str | None = None,
-    limit: int = Query(20, ge=1, le=50),
+    limit: int = Query(20, ge=1, le=200),  # asset search page pulls full matches
     session: AsyncSession = Depends(get_db_session),
     _user: User = require_permission("cmdb_resource:list"),
 ):

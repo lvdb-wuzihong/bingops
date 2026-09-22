@@ -25,6 +25,7 @@ from bingops.api.v1.cmdb import changes as cmdb_changes
 from bingops.api.v1.cmdb import models as cmdb_models
 from bingops.api.v1.cmdb import relationships as cmdb_relationships
 from bingops.api.v1.cmdb import resources as cmdb_resources
+from bingops.api.v1.cmdb import search as cmdb_search
 from bingops.api.v1.cmdb import sync_tasks as cmdb_sync_tasks
 from bingops.api.v1.cmdb import tags as cmdb_tags
 from bingops.api.v1.ticket_meta import catalog_router, group_router, oncall_router
@@ -165,6 +166,7 @@ app.include_router(cmdb_tags.router)
 app.include_router(cmdb_apps.router)
 app.include_router(cmdb_changes.router)
 app.include_router(cmdb_sync_tasks.router)
+app.include_router(cmdb_search.router)
 app.include_router(tickets.router)
 app.include_router(catalog_router)
 app.include_router(group_router)

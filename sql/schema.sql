@@ -215,6 +215,17 @@ CREATE TABLE cmdb_app_resources (
 
 CREATE INDEX idx_cmdb_app_resource_resource ON cmdb_app_resources (resource_id);
 
+-- 资源收藏（我的关注：用户级个人视图标记）
+CREATE TABLE cmdb_resource_favorites (
+    id          BIGSERIAL PRIMARY KEY,
+    user_id     BIGINT       NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    resource_id BIGINT       NOT NULL REFERENCES cmdb_resources(id) ON DELETE CASCADE,
+    created_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    UNIQUE (user_id, resource_id)
+);
+
+CREATE INDEX idx_cmdb_fav_user ON cmdb_resource_favorites (user_id);
+
 -- 从属关系表（层级归属，树形结构）
 CREATE TABLE cmdb_belongs_to (
     id              BIGSERIAL PRIMARY KEY,

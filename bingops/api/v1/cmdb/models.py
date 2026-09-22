@@ -30,6 +30,16 @@ from bingops.services.cmdb import model_service
 router = APIRouter(prefix="/api/v1/cmdb/models", tags=["cmdb-models"])
 
 
+@router.get("/overview")
+async def get_models_overview(
+    session: AsyncSession = Depends(get_db_session),
+    _user: User = require_permission("cmdb_model:list"),
+):
+    """资产总览：分类 → 模型 → 存活资源数 一次聚合返回（总览页单请求渲染）。"""
+    data = await model_service.get_models_overview(session)
+    return success_response(data=data)
+
+
 # ── 模型分类 ──────────────────────────────────────────────────────────────────
 
 
