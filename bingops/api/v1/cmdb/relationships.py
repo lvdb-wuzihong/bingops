@@ -195,16 +195,17 @@ async def get_topology(
     depth: int = Query(default=2, ge=1, le=3, description="展开跳数，硬顶 3"),
     include_children: bool = Query(
         default=False,
-        description="是否向下展开子树；默认只沿从属链向上（pod→workload→...）+ 各级关联",
+        description="是否向下展开子树；默认只沿从属链向上（pod→workload→...）",
     ),
     session: AsyncSession = Depends(get_db_session),
     _user: User = require_permission("cmdb_resource:list"),
 ):
     """查询以资源为中心展开的拓扑子图（nodes + edges 一次返回）。
 
-    默认层级追溯模式：belongs_to 只向上、relates_to 双向，适合
-    pod 带出关联后逐级向上展示 workload/namespace/cluster；
-    include_children=true 退回全向 BFS（含下级子树）。
+    聚焦规则：belongs_to 逐跳向上展开从属链（include_children=true 时
+    改为向下展开子树）；relates_to 仅中心节点双向收一跳邻居（安全组/
+    挂载盘/EIP 等），邻居自身的关联不链式扩散——链式语义（如
+    NAT→EIP→ECS 暴露链）通过点开邻居节点逐层查看。
     节点为瘦身负载（无 fields JSONB）；边带 relation_type/description/kind，
     belongs_to 方向为 source=child → target=parent。节点数达上限后
     truncated=true，前端可提示缩小 depth。

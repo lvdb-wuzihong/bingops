@@ -148,10 +148,12 @@ async def get_topology(
 ) -> dict:
     """以资源为中心展开拓扑子图（nodes + edges 一次返回）。
 
-    默认展开方向（层级追溯模式，适配 pod→workload→namespace→cluster 场景）：
-    - belongs_to 只向上（frontier 作为 child 时收 parent），不向下挖兄弟/下级
-    - relates_to 双向（每级节点各自的关联都带出）
-    include_children=True 时退回全向 BFS（含下级子树，注意账号根扇出）。
+    聚焦规则（关联只看中心一跳，从属无限向上）：
+    - belongs_to 逐跳向上（frontier 作为 child 时收 parent），从属链完整展开；
+      include_children=True 时改为向下展开子树（账号根等高扇出节点慎用）
+    - relates_to **仅中心节点**双向收一跳邻居（安全组/挂载盘/EIP 等），
+      邻居自身的关联不再链式扩散——避免 ECS 图里带出 NAT/NAS 等远亲，
+      链式语义（如 NAT→EIP→ECS 暴露链）通过点开邻居节点逐层查看
 
     - 节点只返渲染必需字段（不带 fields JSONB）
     - 单跳邻居超限（TOPOLOGY_MAX_FANOUT）或总量超限（TOPOLOGY_MAX_NODES）
@@ -174,7 +176,10 @@ async def get_topology(
         if not frontier:
             break
         bt_batch = await rel_repo.list_belongs_to_involving(frontier)
-        rt_batch = await rel_repo.list_relates_to_involving(frontier)
+        # 聚焦规则：relates_to 仅中心节点收一跳（hop 0），邻居的关联不链式扩散
+        rt_batch = (
+            await rel_repo.list_relates_to_involving(frontier) if hop == 0 else []
+        )
         next_frontier: list[int] = []
 
         def _visit(nid: int) -> None:
