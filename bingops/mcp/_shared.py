@@ -157,7 +157,7 @@ def mcp_tool_logging(tool_name: str) -> Callable:
                 k: ("***" if any(s in k.lower() for s in DEFAULT_SENSITIVE_KEYS) else brief(v, 60))
                 for k, v in kwargs.items()
             }, 200)
-            logger.info("MCP tool called", extra={"tool": tool_name, "args": args_summary})
+            logger.info("MCP tool called", extra={"tool": tool_name, "tool_args": args_summary})
             start = time.monotonic()
             try:
                 result = await fn(*args, **kwargs)
