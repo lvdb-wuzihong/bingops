@@ -112,6 +112,35 @@ class CmdbRelationshipRepo:
 
     # ── 批量操作（消费端关系重建用） ──────────────────────────────────────
 
+    async def list_relates_to_by_kind_and_attr(
+        self, kind: str, attr_key: str, attr_value: str,
+    ) -> list[CmdbRelatesTo]:
+        """按 kind + attributes 键值查边（SNAT 边按 NAT 网关归属读取）。"""
+        result = await self._session.execute(
+            select(CmdbRelatesTo).where(
+                CmdbRelatesTo.kind == kind,
+                CmdbRelatesTo.attributes[attr_key].astext == attr_value,
+            )
+        )
+        return list(result.scalars().all())
+
+    async def delete_relates_to_by_kind_and_attr(
+        self, kind: str, attr_key: str, attr_value: str,
+    ) -> int:
+        """删除指定 kind 且 attributes 键值匹配的边（SNAT 边按 NAT 归属清理）。"""
+        result = await self._session.execute(
+            select(CmdbRelatesTo).where(
+                CmdbRelatesTo.kind == kind,
+                CmdbRelatesTo.attributes[attr_key].astext == attr_value,
+            )
+        )
+        relations = list(result.scalars().all())
+        for relation in relations:
+            await self._session.delete(relation)
+        if relations:
+            await self._session.flush()
+        return len(relations)
+
     async def delete_belongs_to_by_child(self, child_id: int) -> int:
         """删除某资源作为子节点的全部从属关系，返回删除条数。"""
         result = await self._session.execute(

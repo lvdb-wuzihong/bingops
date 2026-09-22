@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import String, func, or_, select
+from sqlalchemy import String, func, or_, select, cast
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bingops.models.cmdb.model import CmdbModel
@@ -397,6 +397,9 @@ class CmdbResourceRepo:
                 or_(
                     CmdbResource.name.ilike(like_pattern),
                     CmdbResource.provider_id.ilike(like_pattern),
+                    # 全局搜索语义：labels（app/env/负责人）与 fields（IP/主机名等扩展属性）一并匹配
+                    cast(CmdbResource.labels, String).ilike(like_pattern),
+                    cast(CmdbResource.fields, String).ilike(like_pattern),
                 )
             )
         query = query.order_by(CmdbResource.id.desc()).limit(limit)

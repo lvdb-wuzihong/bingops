@@ -38,6 +38,8 @@ async def search_resource_options(
             "provider": r.provider,
             "region": r.region,
             "status": r.status,
+            "provider_id": r.provider_id,
+            "labels": r.labels or {},
         }
         for r, code in rows
     ]

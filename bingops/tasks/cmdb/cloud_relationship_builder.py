@@ -11,6 +11,7 @@ Delete 时调用 remove_resource_edges（复用 K8s 侧函数）清边。
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 from datetime import datetime, timezone
 
@@ -41,10 +42,12 @@ DESC_RESOLVED_IN = "域归属"
 DESC_DNAT_EXPOSE = "DNAT 暴露"
 DESC_RESOLVE_TARGET = "解析目标"
 DESC_ORIGIN_SOURCE = "分发源"
+DESC_SNAT_OUT = "SNAT 出网"
 
 # relates_to kind 槽位：同对资源多种语义边共存（v9 迁移）
 KIND_BIND = "bind"
 KIND_DNAT = "dnat"
+KIND_SNAT = "snat"
 DESC_MOUNT_ECS = "挂载于"
 DESC_MOUNT_POINT = "挂载点"
 
@@ -100,6 +103,8 @@ async def rebuild_cloud_relationships(
         await adopt_service_lb_edges(session, (resource.fields or {}).get("dns_name") or "")
     elif model.code == "aliyun_nat_gateway":
         await _rebuild_nat_edges(session, rel_repo, res_repo, model_repo, resource, message)
+        # SNAT 出网边（独立函数：_rebuild_nat_edges 边无变化时会早退）
+        await _rebuild_snat_edges(session, rel_repo, res_repo, model_repo, resource, message)
     elif model.code == "aliyun_disk":
         await _rebuild_disk_edges(session, rel_repo, res_repo, model_repo, resource, message)
         # 反向孤儿认领：PV 先于云盘入库时补 CSI 桥接边
@@ -596,6 +601,128 @@ async def _rebuild_dnat_edges(
             synced_at=now,
             source="discovery",
         ))
+
+
+def match_snat_targets(
+    snat_entries: list[dict],
+    candidates: list[tuple[int, str | None]],
+) -> set[tuple[int, str]]:
+    """SNAT 网段推导：IP 落在某条目 source_cidr 网段内 → (资源 ID, snat_ip) 对。
+
+    统一覆盖 ECS 与 Pod（Terway ENI/共享 ENI 的 Pod IP 为 VPC 真实 IP，
+    网段推导可精确到 Pod 级；flannel 的 Pod IP 为集群 CIDR 不会命中，
+    出网=节点出口，经 node→ECS 间接可见）。无效网段/非法 IP 容错跳过；
+    IPv4/IPv6 版本不匹配自然不命中。
+    """
+    nets: list[tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, list[str]]] = []
+    for entry in snat_entries or []:
+        cidr = entry.get("source_cidr")
+        snat_ips = entry.get("snat_ips") or []
+        if not cidr or not snat_ips:
+            continue
+        try:
+            net = ipaddress.ip_network(cidr)
+        except ValueError:
+            continue
+        nets.append((net, snat_ips))
+
+    pairs: set[tuple[int, str]] = set()
+    for rid, ip in candidates:
+        if not ip:
+            continue
+        try:
+            addr = ipaddress.ip_address(ip)
+        except ValueError:
+            continue
+        for net, snat_ips in nets:
+            if addr.version == net.version and addr in net:
+                pairs.update((rid, s) for s in snat_ips)
+    return pairs
+
+
+async def _rebuild_snat_edges(
+    session: AsyncSession,
+    rel_repo: CmdbRelationshipRepo,
+    res_repo: CmdbResourceRepo,
+    model_repo: CmdbModelRepo,
+    resource: CmdbResource,
+    message: CloudResourceMessage,
+) -> None:
+    """NAT SNAT 条目派生出网边：ECS/Pod → EIP relates_to（kind=snat）。
+
+    统一按「IP ∈ SNAT 网段」推导（网段含 PodVSwitch 时 Terway Pod 级
+    命中）；target EIP 限定本 NAT 绑定的 eip_ids（SnatIp 必为本 NAT
+    出口），与 DNAT 同构。管理归属记在 attributes.nat_gateway_id，
+    先删本 NAT 旧边再重建（幂等；新购 ECS/Pod 下一轮自动补边）。
+    已知局限：同账号多 VPC 网段重叠时 Pod 可能被误命中（Pod 无 VPC
+    归属字段，无法精确区分）。
+    """
+    fields = resource.fields or {}
+    provider = message.provider
+    account = message.cloud_account
+    entries = fields.get("snat_entries") or []
+
+    eip_model = await model_repo.get_model_by_code("aliyun_eip")
+    ecs_model = await model_repo.get_model_by_code("aliyun_ecs")
+    pod_model = await model_repo.get_model_by_code("k8s_pod")
+    if eip_model is None or ecs_model is None or pod_model is None:
+        return
+
+    # 候选：ECS（同账号）+ Pod（provider=aliyun；cloud_account 为集群 ID
+    # 与 NAT 账号不同域，不过滤，网段匹配本身就是归属证明）
+    candidates: list[tuple[int, str | None]] = []
+    for r in await res_repo.list_alive_by_model(ecs_model.id):
+        if r.provider == "aliyun" and r.cloud_account == account:
+            candidates.append((r.id, (r.fields or {}).get("private_ip")))
+    for r in await res_repo.list_alive_by_model(pod_model.id):
+        if r.provider == "aliyun":
+            candidates.append((r.id, (r.fields or {}).get("pod_ip")))
+
+    pairs = match_snat_targets(entries, candidates)
+
+    # snat_ip → 本 NAT 绑定的 EIP（管理范围限定 owned，与 DNAT 同构）
+    owned_by_ip: dict[str, CmdbResource] = {}
+    for eip_provider_id in fields.get("eip_ids") or []:
+        eip = await res_repo.get_by_provider_id(eip_model.id, provider, eip_provider_id, account)
+        if eip is not None:
+            eip_ip = (eip.fields or {}).get("ip_address")
+            if eip_ip:
+                owned_by_ip[eip_ip] = eip
+
+    expected: dict[int, set[int]] = {}
+    for sid, snat_ip in pairs:
+        eip = owned_by_ip.get(snat_ip)
+        if eip is not None:
+            expected.setdefault(sid, set()).add(eip.id)
+
+    existing = await rel_repo.list_relates_to_by_kind_and_attr(
+        KIND_SNAT, "nat_gateway_id", resource.provider_id,
+    )
+    current: dict[int, set[int]] = {}
+    for r in existing:
+        current.setdefault(r.source_id, set()).add(r.target_id)
+    if expected == current:
+        return
+
+    await rel_repo.delete_relates_to_by_kind_and_attr(
+        KIND_SNAT, "nat_gateway_id", resource.provider_id,
+    )
+    now = datetime.now(timezone.utc)
+    for source_id, eip_ids in sorted(expected.items()):
+        for target_id in eip_ids:
+            await rel_repo.create_relates_to(CmdbRelatesTo(
+                source_id=source_id,
+                target_id=target_id,
+                description=DESC_SNAT_OUT,
+                kind=KIND_SNAT,
+                attributes={"nat_gateway_id": resource.provider_id},
+                synced_at=now,
+                source="discovery",
+            ))
+    logger.info("SNAT egress edges rebuilt", extra={
+        "nat_gateway": resource.provider_id,
+        "pairs": len(pairs), "sources": len(expected),
+    })
 
 
 # ── GCP 云盘挂载边 ───────────────────────────────────────────────
