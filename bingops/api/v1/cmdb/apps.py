@@ -150,16 +150,18 @@ async def delete_app(
 @router.get("/{app_id}/topology")
 async def get_app_topology(
     app_id: int,
+    env: str | None = Query(default=None, description="按环境标签过滤资源节点（env/k8s:env）"),
     session: AsyncSession = Depends(get_db_session),
     _user: User = require_permission("cmdb_app:list"),
 ):
     """应用拓扑子图（nodes + edges 一次返回，G6 直接消费）。
 
-    节点：本应用 + 依赖/被依赖的应用 + 外部依赖 + 该应用的入口/中间件/
+    节点：本应用 + 依赖/被依赖的应用 + 外部依赖 + 该应用的入口/服务/中间件/
     存储资源（layer 过滤，host 层不进应用拓扑）；共享资源带 shared=true，
-    并把共享它的其他应用拉入图（shared_resource 边）。
+    并把共享它的其他应用拉入图（shared_resource 边）。env 参数按环境标签
+    过滤资源节点（依赖声明是应用级的，不受 env 影响）。
     """
-    data = await business_app_service.get_app_topology(session, app_id)
+    data = await business_app_service.get_app_topology(session, app_id, env)
     return success_response(data=data)
 
 

@@ -251,7 +251,7 @@ def list_dependents(app: object, all_apps: list) -> list[dict]:
 TOPOLOGY_RESOURCE_LAYERS = ("access", "service", "middleware", "storage")
 
 
-async def get_app_topology(session: AsyncSession, app_id: int) -> dict:
+async def get_app_topology(session: AsyncSession, app_id: int, env: str | None = None) -> dict:
     """以应用为中心的拓扑子图（G6 数据源：nodes + edges 一次返回）。
 
     节点：本应用 + 依赖/被依赖的应用 + 外部依赖 + 该应用的入口/中间件/
@@ -259,6 +259,8 @@ async def get_app_topology(session: AsyncSession, app_id: int) -> dict:
     边：depends_on（声明出向）、depended_by（被依赖）、external_dependency
     （三方）、hosts_resource（归属资源）、shared_resource（其他应用 →
     共享资源，存储级耦合信号）。
+    env 参数：按环境标签（env/k8s:env）过滤资源节点——依赖声明是应用级
+    的不受 env 影响；共享推断只在过滤后的资源集上计算。
     """
     from bingops.repositories.cmdb.app_resource_repo import CmdbAppResourceRepo
     from bingops.repositories.cmdb.model_repo import CmdbModelRepo
@@ -320,8 +322,8 @@ async def get_app_topology(session: AsyncSession, app_id: int) -> dict:
             "relation": "depended_by",
         })
 
-    # 归属资源（layer ∈ access/middleware/storage 才进应用拓扑）
-    resources = await list_app_resources(session, app_id)
+    # 归属资源（layer ∈ access/service/middleware/storage 才进应用拓扑；env 可选过滤）
+    resources = await list_app_resources(session, app_id, env)
     all_models = await CmdbModelRepo(session).list_models()
     layer_by_code = {m.code: m.layer for m in all_models}
     kept = [
