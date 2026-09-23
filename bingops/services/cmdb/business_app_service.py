@@ -77,7 +77,9 @@ async def create_app(session: AsyncSession, payload: BusinessAppCreate) -> CmdbB
 async def _backfill_app_links_on_create(session: AsyncSession, app: CmdbBusinessApp) -> int:
     """创建应用后回填存量归集：资源事件先于应用创建到达时，标签已写但无应用可挂。
 
-    扫描已带 app/k8s:app=<app_code> 标签且为服务级 CI 的未删资源，补建 tag 关联。
+    扫描已带 app/k8s:app 标签且为服务级 CI 的未删资源，补建 tag 关联。
+    标签值支持英文逗号分隔多应用（与 refresh 同源解析）：LIKE 粗筛后
+    split 精确判断（app_code 为小写连字符格式，无 LIKE 通配符）。
     """
     from bingops.models.cmdb.model import CmdbModel
     from bingops.models.cmdb.resource import CmdbResource
@@ -85,17 +87,21 @@ async def _backfill_app_links_on_create(session: AsyncSession, app: CmdbBusiness
     from bingops.repositories.cmdb.app_resource_repo import CmdbAppResourceRepo
 
     rows = await session.execute(
-        select(CmdbResource.id)
+        select(CmdbResourceTag.resource_id, CmdbResourceTag.tag_value)
+        .join(CmdbResource, CmdbResource.id == CmdbResourceTag.resource_id)
         .join(CmdbModel, CmdbModel.id == CmdbResource.model_id)
-        .join(CmdbResourceTag, CmdbResourceTag.resource_id == CmdbResource.id)
         .where(
             CmdbModel.code.in_(SERVICE_LEVEL_MODEL_CODES),
             CmdbResource.deleted_at.is_(None),
             CmdbResourceTag.tag_key.in_(APP_TAG_KEYS),
-            CmdbResourceTag.tag_value == app.app_code,
+            CmdbResourceTag.tag_value.like(f"%{app.app_code}%"),
         )
     )
-    resource_ids = {rid for (rid,) in rows.all()}
+    resource_ids = {
+        rid
+        for rid, value in rows.all()
+        if app.app_code in {p.strip() for p in (value or "").split(",")}
+    }
     if not resource_ids:
         return 0
     added = await CmdbAppResourceRepo(session).add_tag_links(app.id, resource_ids)

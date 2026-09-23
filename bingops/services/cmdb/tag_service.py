@@ -131,6 +131,15 @@ async def add_resource_tag(session: AsyncSession, payload: ResourceTagCreate) ->
         source=payload.source,
     )
     tag = await repo.add_resource_tag(tag)
+
+    # app 标签变动立即重算应用归集（与消费端同源；非服务级 CI 在 refresh 内秒退）
+    from bingops.models.cmdb.resource import CmdbResource
+    from bingops.services.cmdb import business_app_service
+
+    resource = await session.get(CmdbResource, payload.resource_id)
+    if resource is not None:
+        await business_app_service.refresh_app_links_from_tags(session, resource)
+
     await session.commit()
 
     logger.info(
@@ -148,6 +157,15 @@ async def remove_resource_tag(
     count = await repo.remove_resource_tag(resource_id, tag_key, source)
     if count == 0:
         raise NotFoundError("CmdbResourceTag", f"{resource_id}/{tag_key}")
+
+    # app 标签移除同样重算归集（解除不再成立的关联）
+    from bingops.models.cmdb.resource import CmdbResource
+    from bingops.services.cmdb import business_app_service
+
+    resource = await session.get(CmdbResource, resource_id)
+    if resource is not None:
+        await business_app_service.refresh_app_links_from_tags(session, resource)
+
     await session.commit()
     logger.info(
         "CMDB resource tag removed",
