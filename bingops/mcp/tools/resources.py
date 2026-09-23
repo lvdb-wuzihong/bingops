@@ -5,7 +5,7 @@ from __future__ import annotations
 from bingops.mcp._shared import clamp_limit, mcp_tool_logging, redact, session_scope
 from bingops.mcp.server import mcp
 from bingops.repositories.cmdb.model_repo import CmdbModelRepo
-from bingops.services.cmdb import resource_service
+from bingops.services.cmdb import model_service, resource_service, search_service
 
 _RESOURCE_FIELDS = (
     "id", "name", "provider", "provider_id", "cloud_account", "region", "zone", "status",
@@ -117,3 +117,38 @@ async def get_resource_detail(resource_id: int) -> dict:
         "fields": redact(resource.fields or {}),
         "synced_at": synced_at,
     }
+
+
+@mcp.tool()
+@mcp_tool_logging("search_assets")
+async def search_assets(
+    q: str,
+    exact: bool = False,
+    limit: int | None = None,
+) -> dict:
+    """跨域全局搜索：一次拿到业务应用与 CMDB 资源的命中（工作台搜索同源）。
+
+    适用场景：不确定目标在应用还是资源时优先用本工具（告警/日志给的
+    IP、主机名、域名先全局搜一遍）；确定只搜资源时用 search_resources
+    能带 matched_fields，确定只搜应用时用 list_business_apps。
+    匹配规则：应用 name/app_code；资源 name/provider_id 模糊，且动态
+    字段值（IP/连接地址/实例 ID）恒为精确等值。exact=true 时全部转等值。
+    限制：每分组默认 20 条、上限 50；更多命中用对应域列表工具缩小范围。
+    """
+    size = clamp_limit(limit, default=20, maximum=50)
+    async with session_scope() as session:
+        return await search_service.search_all(session, q, exact=exact, limit=size)
+
+
+@mcp.tool()
+@mcp_tool_logging("get_models_overview")
+async def get_models_overview() -> dict:
+    """获取 CMDB 全部模型分类与资源计数（平台结构总览）。
+
+    适用场景：回答平台有哪些资源类型/各多少量、巡检报告开头描述资产
+    规模、判断某类资源是否已纳入 CMDB 管理。
+    限制：只含分类/模型/存活资源计数，不含资源明细；查具体资源用
+    search_assets 或 search_resources。
+    """
+    async with session_scope() as session:
+        return {"categories": await model_service.get_models_overview(session)}
