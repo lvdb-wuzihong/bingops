@@ -25,10 +25,17 @@ class CmdbChangeLogRepo:
         *,
         resource_id: int | None = None,
         change_type: str | None = None,
+        scope: str | None = None,
+        user_id: int | None = None,
+        high_risk_layers: list[str] | None = None,
         page: int = 1,
         page_size: int = 20,
     ) -> tuple[list[CmdbChangeLog], int]:
-        """分页查询变更记录。"""
+        """分页查询变更记录。
+
+        scope：mine=变更对象在我的收藏内（user_id 必传）；
+        high_risk=变更对象模型 layer 属于高危层（high_risk_layers 必传）。
+        """
         query = select(CmdbChangeLog)
         count_query = select(CmdbChangeLog.id)
 
@@ -38,6 +45,20 @@ class CmdbChangeLogRepo:
         if change_type:
             query = query.where(CmdbChangeLog.change_type == change_type)
             count_query = count_query.where(CmdbChangeLog.change_type == change_type)
+        if scope == "mine" and user_id is not None:
+            from bingops.models.cmdb.favorite import CmdbResourceFavorite
+
+            mine = select(CmdbResourceFavorite.resource_id).where(
+                CmdbResourceFavorite.user_id == user_id
+            )
+            query = query.where(CmdbChangeLog.resource_id.in_(mine))
+            count_query = count_query.where(CmdbChangeLog.resource_id.in_(mine))
+        if scope == "high_risk" and high_risk_layers:
+            from bingops.models.cmdb.model import CmdbModel
+
+            risky_models = select(CmdbModel.id).where(CmdbModel.layer.in_(high_risk_layers))
+            query = query.where(CmdbChangeLog.model_id.in_(risky_models))
+            count_query = count_query.where(CmdbChangeLog.model_id.in_(risky_models))
 
         total_result = await self._session.execute(
             select(func.count()).select_from(count_query.subquery())

@@ -100,6 +100,7 @@ CREATE TABLE cmdb_models (
     description TEXT,
     is_builtin  BOOLEAN      NOT NULL DEFAULT FALSE,  -- 是否内置模型（不可删除）
     is_enabled  BOOLEAN      NOT NULL DEFAULT TRUE,   -- 是否启用
+    layer       VARCHAR(32),                          -- 架构分层：access/service/middleware/storage/host/network/infra
     sort_order  INT          NOT NULL DEFAULT 0,
     created_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     updated_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW()
@@ -184,6 +185,17 @@ CREATE INDEX idx_cmdb_resource_account   ON cmdb_resources (cloud_account);
 CREATE INDEX idx_cmdb_resource_synced    ON cmdb_resources (synced_at);
 CREATE INDEX idx_cmdb_resource_fields    ON cmdb_resources USING GIN (fields);
 
+-- 业务域（业务域 → 应用 → 资源 三层归属的业务分组层；前置：cmdb_business_apps.business_id 外键引用）
+CREATE TABLE cmdb_business_domains (
+    id          BIGSERIAL PRIMARY KEY,
+    name        VARCHAR(128) NOT NULL,
+    code        VARCHAR(64)  NOT NULL UNIQUE,
+    owner       VARCHAR(128),
+    description TEXT,
+    created_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    updated_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
 -- 业务应用表
 CREATE TABLE cmdb_business_apps (
     id          BIGSERIAL PRIMARY KEY,
@@ -196,6 +208,8 @@ CREATE TABLE cmdb_business_apps (
     labels      JSONB        NOT NULL DEFAULT '{}',
     repo_url    VARCHAR(512),                          -- 代码仓库地址（研发资产坐标）
     pipelines   JSONB        NOT NULL DEFAULT '{}',    -- {环境: 流水线地址}，key 对齐 env 标签值域
+    business_id BIGINT       REFERENCES cmdb_business_domains(id), -- 归属业务域（可空，渐进补挂）
+    dependencies JSONB       NOT NULL DEFAULT '[]',    -- 依赖声明：[internal app_code / external url]
     created_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     updated_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );

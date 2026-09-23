@@ -21,6 +21,7 @@ from bingops.api import dependencies
 from bingops.api.middleware.request_logging import RequestLoggingMiddleware
 from bingops.api.v1 import alerts, auth, feishu_events, jobs, roles, sd, tickets, users
 from bingops.api.v1.cmdb import apps as cmdb_apps
+from bingops.api.v1.cmdb import business_domains as cmdb_business_domains
 from bingops.api.v1.cmdb import changes as cmdb_changes
 from bingops.api.v1.cmdb import models as cmdb_models
 from bingops.api.v1.cmdb import relationships as cmdb_relationships
@@ -164,6 +165,7 @@ app.include_router(cmdb_resources.router)
 app.include_router(cmdb_relationships.router)
 app.include_router(cmdb_tags.router)
 app.include_router(cmdb_apps.router)
+app.include_router(cmdb_business_domains.router)
 app.include_router(cmdb_changes.router)
 app.include_router(cmdb_sync_tasks.router)
 app.include_router(cmdb_search.router)

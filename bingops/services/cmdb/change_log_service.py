@@ -36,14 +36,20 @@ async def list_changes(
     *,
     resource_id: int | None = None,
     change_type: str | None = None,
+    scope: str | None = None,
+    user_id: int | None = None,
     page: int = 1,
     page_size: int = 20,
 ) -> tuple[list[CmdbChangeLog], int]:
-    """分页查询变更记录。"""
+    """分页查询变更记录（scope=mine/high_risk，见 repo）。"""
     repo = CmdbChangeLogRepo(session)
+    high_risk_layers = ["access", "middleware", "storage"] if scope == "high_risk" else None
     return await repo.list_logs(
         resource_id=resource_id,
         change_type=change_type,
+        scope=scope,
+        user_id=user_id,
+        high_risk_layers=high_risk_layers,
         page=page,
         page_size=page_size,
     )

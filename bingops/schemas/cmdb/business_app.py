@@ -1,4 +1,4 @@
-"""CMDB 业务应用 Pydantic 模型。"""
+"""CMDB 业务应用 / 业务域 Pydantic 模型。"""
 
 from __future__ import annotations
 
@@ -13,6 +13,25 @@ def _validate_pipelines(value: dict | None) -> dict:
         return {}
     if not all(isinstance(k, str) and isinstance(v, str) for k, v in value.items()):
         raise ValueError("pipelines must be a mapping of env -> url strings")
+    return value
+
+
+def _validate_dependencies(value: list | None) -> list:
+    """依赖声明契约校验：internal 必须带 app_code；external 必须带 name/url 之一。"""
+    if value is None:
+        return []
+    for item in value:
+        if not isinstance(item, dict):
+            raise ValueError("dependencies items must be objects")
+        dep_type = item.get("type")
+        if dep_type == "internal":
+            if not item.get("app_code"):
+                raise ValueError("internal dependency requires app_code")
+        elif dep_type == "external":
+            if not (item.get("url") or item.get("name")):
+                raise ValueError("external dependency requires url or name")
+        else:
+            raise ValueError(f"unsupported dependency type: {dep_type!r}")
     return value
 
 
@@ -31,8 +50,14 @@ class BusinessAppCreate(BaseModel):
         default_factory=dict,
         description="各环境流水线地址，{环境: 地址}，key 对齐 env 标签值域",
     )
+    business_id: int | None = Field(default=None, description="归属业务域 ID")
+    dependencies: list = Field(
+        default_factory=list,
+        description="依赖声明：[{type: internal, app_code} / {type: external, name, url}]",
+    )
 
     _check_pipelines = field_validator("pipelines")(_validate_pipelines)
+    _check_dependencies = field_validator("dependencies")(_validate_dependencies)
 
 
 class BusinessAppUpdate(BaseModel):
@@ -46,8 +71,11 @@ class BusinessAppUpdate(BaseModel):
     labels: dict | None = None
     repo_url: str | None = Field(default=None, max_length=512)
     pipelines: dict | None = None
+    business_id: int | None = None
+    dependencies: list | None = None
 
     _check_pipelines = field_validator("pipelines")(_validate_pipelines)
+    _check_dependencies = field_validator("dependencies")(_validate_dependencies)
 
 
 class BusinessAppResponse(BaseModel):
@@ -63,5 +91,37 @@ class BusinessAppResponse(BaseModel):
     labels: dict = Field(default_factory=dict)
     repo_url: str | None = None
     pipelines: dict = Field(default_factory=dict)
+    business_id: int | None = None
+    dependencies: list = Field(default_factory=list)
+    created_at: datetime
+    updated_at: datetime
+
+
+class BusinessDomainCreate(BaseModel):
+    """创建业务域请求。"""
+
+    name: str = Field(min_length=1, max_length=128, description="业务域名称")
+    code: str = Field(min_length=1, max_length=64, description="业务域编码，全局唯一")
+    owner: str | None = Field(default=None, max_length=128, description="业务负责人")
+    description: str | None = None
+
+
+class BusinessDomainUpdate(BaseModel):
+    """更新业务域请求。"""
+
+    name: str | None = Field(default=None, max_length=128)
+    owner: str | None = Field(default=None, max_length=128)
+    description: str | None = None
+
+
+class BusinessDomainResponse(BaseModel):
+    """业务域响应（含归属应用数）。"""
+
+    id: int
+    code: str
+    name: str
+    owner: str | None = None
+    description: str | None = None
+    app_count: int = Field(default=0, description="归属应用数量")
     created_at: datetime
     updated_at: datetime

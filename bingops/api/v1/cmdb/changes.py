@@ -21,14 +21,20 @@ router = APIRouter(prefix="/api/v1/cmdb/changes", tags=["cmdb-changes"])
 async def list_changes(
     resource_id: int | None = None,
     change_type: str | None = None,
+    scope: str = Query(
+        default="all",
+        description="范围：all=全部；mine=我关注的资源；high_risk=入口/中间件/存储层变更",
+    ),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     session: AsyncSession = Depends(get_db_session),
-    _user: User = require_permission("cmdb_change:list"),
+    user: User = require_permission("cmdb_change:list"),
 ):
-    """分页查询变更记录。"""
+    """分页查询变更记录（scope 支持 我相关/高风险 过滤）。"""
     logs, total = await change_log_service.list_changes(
-        session, resource_id=resource_id, change_type=change_type, page=page, page_size=page_size,
+        session, resource_id=resource_id, change_type=change_type,
+        scope=scope if scope in ("all", "mine", "high_risk") else None,
+        user_id=user.id, page=page, page_size=page_size,
     )
 
     # v2 审计表以 model_id 关联模型定义，解析出 code/name 填充响应

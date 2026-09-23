@@ -107,6 +107,10 @@ class ModelCreate(BaseModel):
     code: str = Field(min_length=1, max_length=64, description="模型编码（唯一）")
     icon: str | None = Field(default=None, max_length=64)
     description: str | None = None
+    layer: str | None = Field(
+        default=None, max_length=32,
+        description="架构分层：access/service/middleware/storage/host/network/infra",
+    )
     sort_order: int = 0
 
 
@@ -116,6 +120,7 @@ class ModelUpdate(BaseModel):
     name: str | None = Field(default=None, max_length=128)
     icon: str | None = Field(default=None, max_length=64)
     description: str | None = None
+    layer: str | None = Field(default=None, max_length=32)
     is_enabled: bool | None = None
     sort_order: int | None = None
 
@@ -131,6 +136,7 @@ class ModelResponse(BaseModel):
     description: str | None = None
     is_builtin: bool
     is_enabled: bool
+    layer: str | None = None
     sort_order: int
     fields: list[ModelFieldResponse] = Field(default_factory=list)
     instance_count: int = Field(default=0, description="实例数量")

@@ -58,6 +58,7 @@ async def get_models_overview(session: AsyncSession) -> list[dict]:
             "icon": m.icon,
             "description": m.description,
             "is_enabled": m.is_enabled,
+            "layer": m.layer,
             "resource_count": counts.get(m.id, 0),
         })
     return [

@@ -1,11 +1,52 @@
-"""CMDB 业务应用数据访问层。"""
+"""CMDB 业务应用 / 业务域数据访问层。"""
 
 from __future__ import annotations
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bingops.models.cmdb.business_app import CmdbBusinessApp
+from bingops.models.cmdb.business_app import CmdbBusinessApp, CmdbBusinessDomain
+
+
+class CmdbBusinessDomainRepo:
+    """CMDB 业务域 Repository（薄 CRUD）。"""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def list_domains(self) -> list[CmdbBusinessDomain]:
+        result = await self._session.execute(
+            select(CmdbBusinessDomain).order_by(
+                CmdbBusinessDomain.created_at.asc()
+            )
+        )
+        return list(result.scalars().all())
+
+    async def get_by_id(self, domain_id: int) -> CmdbBusinessDomain | None:
+        result = await self._session.execute(
+            select(CmdbBusinessDomain).where(CmdbBusinessDomain.id == domain_id)
+        )
+        return result.scalar_one_or_none()
+
+    async def get_by_code(self, code: str) -> CmdbBusinessDomain | None:
+        result = await self._session.execute(
+            select(CmdbBusinessDomain).where(CmdbBusinessDomain.code == code)
+        )
+        return result.scalar_one_or_none()
+
+    async def create(self, domain: CmdbBusinessDomain) -> CmdbBusinessDomain:
+        self._session.add(domain)
+        await self._session.flush()
+        return domain
+
+    async def count_apps(self, domain_id: int) -> int:
+        """归属该业务域的应用数量（列表页展示用）。"""
+        result = await self._session.execute(
+            select(func.count()).select_from(CmdbBusinessApp).where(
+                CmdbBusinessApp.business_id == domain_id
+            )
+        )
+        return result.scalar() or 0
 
 
 class CmdbBusinessAppRepo:

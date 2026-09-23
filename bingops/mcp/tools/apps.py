@@ -37,14 +37,17 @@ async def list_business_apps(
 @mcp.tool()
 @mcp_tool_logging("get_app_overview")
 async def get_app_overview(app_id: int) -> dict:
-    """获取单个业务应用全貌：基础信息 + repo_url/pipelines + 挂载资源清单（含 env/region）。
+    """获取单个业务应用全貌：基础信息 + repo_url/pipelines/依赖声明 + 挂载资源清单（含 env/region）。
 
-    适用场景：告警根因分析确定应用边界与资源范围、巡检日报展开单应用检查项。
+    适用场景：告警根因分析确定应用边界与资源范围、巡检日报展开单应用检查项、
+    变更影响面分析查看 dependencies（出向依赖）与 dependents（谁依赖本应用）。
     限制：应用不存在时返回 not_found；资源清单不含 Pod/Node 等基础设施层 CI（应用只绑服务级 CI）。
     """
     async with session_scope() as session:
         app = await app_service.get_app(session, app_id)
         resources = await app_service.list_app_resources(session, app_id)
+        all_apps, _ = await app_service.list_apps(session, page=1, page_size=200)
+    dependents = app_service.list_dependents(app, all_apps)
     return {
         "id": app.id,
         "name": app.name,
@@ -54,6 +57,9 @@ async def get_app_overview(app_id: int) -> dict:
         "department": app.department,
         "repo_url": app.repo_url,
         "pipelines": app.pipelines,
+        "business_id": app.business_id,
+        "dependencies": app.dependencies or [],
+        "dependents": dependents,
         "resources": resources,
     }
 

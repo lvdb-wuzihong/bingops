@@ -46,6 +46,10 @@ async def create_app(session: AsyncSession, payload: BusinessAppCreate) -> CmdbB
     if existing is not None:
         raise ConflictError("CmdbBusinessApp", f"app_code '{payload.app_code}' already exists")
 
+    # 业务域归属校验 + 依赖声明中 internal app_code 存在性校验
+    await _validate_business_id(session, payload.business_id)
+    await _validate_dependencies_app_codes(session, payload.dependencies)
+
     app = CmdbBusinessApp(
         app_code=payload.app_code,
         name=payload.name,
@@ -56,6 +60,8 @@ async def create_app(session: AsyncSession, payload: BusinessAppCreate) -> CmdbB
         labels=payload.labels,
         repo_url=payload.repo_url,
         pipelines=payload.pipelines,
+        business_id=payload.business_id,
+        dependencies=payload.dependencies,
     )
     app = await repo.create(app)
     backfilled = await _backfill_app_links_on_create(session, app)
@@ -111,6 +117,10 @@ async def update_app(
         raise NotFoundError("CmdbBusinessApp", str(app_id))
 
     update_data = payload.model_dump(exclude_unset=True)
+    if "business_id" in update_data and update_data["business_id"] is not None:
+        await _validate_business_id(session, update_data["business_id"])
+    if "dependencies" in update_data and update_data["dependencies"] is not None:
+        await _validate_dependencies_app_codes(session, update_data["dependencies"])
     for field, value in update_data.items():
         setattr(app, field, value)
 
@@ -119,6 +129,32 @@ async def update_app(
 
     logger.info("CMDB business app updated", extra={"app_id": app_id})
     return app
+
+
+async def _validate_business_id(session: AsyncSession, business_id: int | None) -> None:
+    """业务域归属校验：指定的业务域必须存在。"""
+    if business_id is None:
+        return
+    from bingops.repositories.cmdb.business_app_repo import CmdbBusinessDomainRepo
+
+    if await CmdbBusinessDomainRepo(session).get_by_id(business_id) is None:
+        raise NotFoundError("CmdbBusinessDomain", str(business_id))
+
+
+async def _validate_dependencies_app_codes(
+    session: AsyncSession, dependencies: list | None,
+) -> None:
+    """依赖声明中 internal 的 app_code 必须真实存在（防拼错静默失效）。"""
+    from bingops.repositories.cmdb.business_app_repo import CmdbBusinessAppRepo
+
+    repo = CmdbBusinessAppRepo(session)
+    for dep in dependencies or []:
+        if dep.get("type") == "internal":
+            app_code = dep.get("app_code") or ""
+            if await repo.get_by_app_code(app_code) is None:
+                raise ValidationError(
+                    f"dependency app_code '{app_code}' does not exist"
+                )
 
 
 async def delete_app(session: AsyncSession, app_id: int) -> None:
@@ -131,6 +167,82 @@ async def delete_app(session: AsyncSession, app_id: int) -> None:
     await repo.delete(app)
     await session.commit()
     logger.info("CMDB business app deleted", extra={"app_id": app_id})
+
+
+# ── 业务域 ───────────────────────────────────────────────────────────────────
+
+
+async def list_domains(session: AsyncSession) -> list[dict]:
+    """业务域列表（含归属应用数）。"""
+    from bingops.repositories.cmdb.business_app_repo import CmdbBusinessDomainRepo
+
+    domains = await CmdbBusinessDomainRepo(session).list_domains()
+    items = []
+    for d in domains:
+        items.append({
+            "id": d.id,
+            "code": d.code,
+            "name": d.name,
+            "owner": d.owner,
+            "description": d.description,
+            "app_count": await CmdbBusinessDomainRepo(session).count_apps(d.id),
+        })
+    return items
+
+
+async def create_domain(session: AsyncSession, payload) -> object:
+    """创建业务域（code 全局唯一）。"""
+    from bingops.models.cmdb.business_app import CmdbBusinessDomain
+    from bingops.repositories.cmdb.business_app_repo import CmdbBusinessDomainRepo
+    from bingops.schemas.cmdb.business_app import BusinessDomainCreate
+
+    assert isinstance(payload, BusinessDomainCreate)
+    repo = CmdbBusinessDomainRepo(session)
+    if await repo.get_by_code(payload.code) is not None:
+        raise ConflictError("CmdbBusinessDomain", f"code '{payload.code}' already exists")
+    domain = await repo.create(CmdbBusinessDomain(
+        name=payload.name,
+        code=payload.code,
+        owner=payload.owner,
+        description=payload.description,
+    ))
+    await session.commit()
+    logger.info("CMDB business domain created", extra={"code": payload.code})
+    return domain
+
+
+async def update_domain(session: AsyncSession, domain_id: int, payload) -> object:
+    """更新业务域。"""
+    from bingops.repositories.cmdb.business_app_repo import CmdbBusinessDomainRepo
+
+    repo = CmdbBusinessDomainRepo(session)
+    domain = await repo.get_by_id(domain_id)
+    if domain is None:
+        raise NotFoundError("CmdbBusinessDomain", str(domain_id))
+    update_data = payload.model_dump(exclude_unset=True)
+    for field, value in update_data.items():
+        setattr(domain, field, value)
+    await session.commit()
+    logger.info("CMDB business domain updated", extra={"domain_id": domain_id})
+    return domain
+
+
+def list_dependents(app: object, all_apps: list) -> list[dict]:
+    """被依赖清单：其他应用 dependencies 中 internal 引用了本应用 app_code。"""
+    dependents = []
+    for other in all_apps:
+        if other.id == app.id:
+            continue
+        for dep in other.dependencies or []:
+            if dep.get("type") == "internal" and dep.get("app_code") == app.app_code:
+                dependents.append({
+                    "id": other.id,
+                    "app_code": other.app_code,
+                    "name": other.name,
+                    "owner": other.owner,
+                })
+                break
+    return dependents
 
 
 # ── 应用-资源关联物化（附录 B #13）───────────────────────────────

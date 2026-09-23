@@ -41,6 +41,8 @@ async def list_apps(
             labels=a.labels,
             repo_url=a.repo_url,
             pipelines=a.pipelines,
+            business_id=a.business_id,
+            dependencies=a.dependencies,
             created_at=a.created_at,
             updated_at=a.updated_at,
         ).model_dump(mode="json")
@@ -68,6 +70,8 @@ async def create_app(
         labels=app.labels,
         repo_url=app.repo_url,
         pipelines=app.pipelines,
+        business_id=app.business_id,
+        dependencies=app.dependencies,
         created_at=app.created_at,
         updated_at=app.updated_at,
     )
@@ -93,6 +97,8 @@ async def get_app(
         labels=app.labels,
         repo_url=app.repo_url,
         pipelines=app.pipelines,
+        business_id=app.business_id,
+        dependencies=app.dependencies,
         created_at=app.created_at,
         updated_at=app.updated_at,
     )
@@ -119,6 +125,8 @@ async def update_app(
         labels=app.labels,
         repo_url=app.repo_url,
         pipelines=app.pipelines,
+        business_id=app.business_id,
+        dependencies=app.dependencies,
         created_at=app.created_at,
         updated_at=app.updated_at,
     )

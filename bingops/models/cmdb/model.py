@@ -50,6 +50,8 @@ class CmdbModel(BaseMixin, Base):
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_builtin: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     is_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    # 架构分层：access/service/middleware/storage/host/network/infra（分类是厂商分组，与层级正交）
+    layer: Mapped[str | None] = mapped_column(String(32), nullable=True)
     sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
     # 关联
