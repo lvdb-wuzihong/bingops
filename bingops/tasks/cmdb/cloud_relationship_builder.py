@@ -605,14 +605,18 @@ async def _rebuild_dnat_edges(
 
 def match_snat_targets(
     snat_entries: list[dict],
-    candidates: list[tuple[int, str | None]],
+    candidates: list[tuple[int, str | None, str | None]],
+    nat_vpc_id: str | None,
 ) -> set[tuple[int, str]]:
-    """SNAT 网段推导：IP 落在某条目 source_cidr 网段内 → (资源 ID, snat_ip) 对。
+    """SNAT 网段推导：IP 落在某条目 source_cidr 网段内且与 NAT 同 VPC → (资源 ID, snat_ip) 对。
 
     统一覆盖 ECS 与 Pod（Terway ENI/共享 ENI 的 Pod IP 为 VPC 真实 IP，
     网段推导可精确到 Pod 级；flannel 的 Pod IP 为集群 CIDR 不会命中，
-    出网=节点出口，经 node→ECS 间接可见）。无效网段/非法 IP 容错跳过；
-    IPv4/IPv6 版本不匹配自然不命中。
+    出网=节点出口，经 node→ECS 间接可见）。candidates 三元组为
+    (resource_id, ip, vpc_provider_id)：**VPC 归属校验**防止跨地域/跨 VPC
+    私有网段重叠误报（如广州与硅谷 VPC 同时使用 172.20.x.x）——Pod 的
+    VPC 经集群部署于边推导，ECS 经 vswitch fields.vpc_id 推导；无法确定
+    VPC 归属的资源不建边（宁缺勿错）。无效网段/非法 IP 容错跳过。
     """
     nets: list[tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, list[str]]] = []
     for entry in snat_entries or []:
@@ -627,8 +631,8 @@ def match_snat_targets(
         nets.append((net, snat_ips))
 
     pairs: set[tuple[int, str]] = set()
-    for rid, ip in candidates:
-        if not ip:
+    for rid, ip, vpc_id in candidates:
+        if not ip or not vpc_id or vpc_id != nat_vpc_id:
             continue
         try:
             addr = ipaddress.ip_address(ip)
@@ -650,35 +654,57 @@ async def _rebuild_snat_edges(
 ) -> None:
     """NAT SNAT 条目派生出网边：ECS/Pod → EIP relates_to（kind=snat）。
 
-    统一按「IP ∈ SNAT 网段」推导（网段含 PodVSwitch 时 Terway Pod 级
-    命中）；target EIP 限定本 NAT 绑定的 eip_ids（SnatIp 必为本 NAT
-    出口），与 DNAT 同构。管理归属记在 attributes.nat_gateway_id，
+    统一按「IP ∈ SNAT 网段且与 NAT 同 VPC」推导（网段含 PodVSwitch 时
+    Terway Pod 级命中）；target EIP 限定本 NAT 绑定的 eip_ids（SnatIp 必
+    为本 NAT 出口），与 DNAT 同构。管理归属记在 attributes.nat_gateway_id，
     先删本 NAT 旧边再重建（幂等；新购 ECS/Pod 下一轮自动补边）。
-    已知局限：同账号多 VPC 网段重叠时 Pod 可能被误命中（Pod 无 VPC
-    归属字段，无法精确区分）。
+    VPC 归属校验：ECS 经 vswitch.fields.vpc_id 推导；Pod 经集群「部署于」
+    边推导——防止跨地域/跨 VPC 私有网段重叠误报（广州与硅谷 VPC 同时
+    使用 172.20.x.x 的实际案例）；无法确定 VPC 归属的资源不建边。
     """
     fields = resource.fields or {}
     provider = message.provider
     account = message.cloud_account
     entries = fields.get("snat_entries") or []
+    nat_vpc_id = fields.get("vpc_id") or None
 
     eip_model = await model_repo.get_model_by_code("aliyun_eip")
     ecs_model = await model_repo.get_model_by_code("aliyun_ecs")
     pod_model = await model_repo.get_model_by_code("k8s_pod")
-    if eip_model is None or ecs_model is None or pod_model is None:
+    vsw_model = await model_repo.get_model_by_code("aliyun_vswitch")
+    cluster_model = await model_repo.get_model_by_code("k8s_cluster")
+    if any(m is None for m in (eip_model, ecs_model, pod_model, vsw_model, cluster_model)):
         return
 
-    # 候选：ECS（同账号）+ Pod（provider=aliyun；cloud_account 为集群 ID
-    # 与 NAT 账号不同域，不过滤，网段匹配本身就是归属证明）
-    candidates: list[tuple[int, str | None]] = []
+    # VPC 归属映射：vswitch provider_id → VPC provider_id（ECS 用）
+    vsw_vpc: dict[str, str] = {}
+    for v in await res_repo.list_alive_by_model(vsw_model.id):
+        if v.provider == "aliyun" and v.cloud_account == account:
+            vp = (v.fields or {}).get("vpc_id")
+            if v.provider_id and vp:
+                vsw_vpc[v.provider_id] = vp
+
+    # 候选：ECS（同账号，VPC 经 vswitch 推导）+ Pod（provider=aliyun；
+    # cloud_account 为集群 ID，VPC 经集群「部署于」边推导）
+    cluster_vpc: dict[str, str] = {}
+    for c in await res_repo.list_alive_by_model(cluster_model.id):
+        if c.provider != "aliyun":
+            continue
+        for p in await rel_repo.get_parents(c.id):
+            parent = await res_repo.get_by_id(p.parent_id)
+            if parent is not None and parent.provider_id:
+                cluster_vpc[c.provider_id] = parent.provider_id
+
+    candidates: list[tuple[int, str | None, str | None]] = []
     for r in await res_repo.list_alive_by_model(ecs_model.id):
         if r.provider == "aliyun" and r.cloud_account == account:
-            candidates.append((r.id, (r.fields or {}).get("private_ip")))
+            vsw_id = (r.fields or {}).get("vswitch_id")
+            candidates.append((r.id, (r.fields or {}).get("private_ip"), vsw_vpc.get(vsw_id)))
     for r in await res_repo.list_alive_by_model(pod_model.id):
         if r.provider == "aliyun":
-            candidates.append((r.id, (r.fields or {}).get("pod_ip")))
+            candidates.append((r.id, (r.fields or {}).get("pod_ip"), cluster_vpc.get(r.cloud_account)))
 
-    pairs = match_snat_targets(entries, candidates)
+    pairs = match_snat_targets(entries, candidates, nat_vpc_id)
 
     # snat_ip → 本 NAT 绑定的 EIP（管理范围限定 owned，与 DNAT 同构）
     owned_by_ip: dict[str, CmdbResource] = {}
