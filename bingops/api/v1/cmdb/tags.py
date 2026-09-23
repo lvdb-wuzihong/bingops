@@ -190,11 +190,14 @@ async def add_resource_tag(
 async def remove_resource_tag(
     resource_id: int,
     tag_key: str,
-    source: str | None = None,
+    source: str = Query(
+        default="manual",
+        description="标签来源；缺省仅删手动标签，云同步标签请去云控制台改",
+    ),
     session: AsyncSession = Depends(get_db_session),
     _user: User = require_permission("cmdb_tag:delete"),
 ):
-    """移除资源的标签。"""
+    """移除资源的标签（缺省仅删 manual 来源，防误删云同步标签）。"""
     await tag_service.remove_resource_tag(session, resource_id, tag_key, source)
     return success_response(message="Resource tag removed")
 
