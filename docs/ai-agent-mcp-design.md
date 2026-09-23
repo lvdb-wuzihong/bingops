@@ -116,7 +116,7 @@
 | 工具 | 底层 API | 说明 | 场景 |
 |---|---|---|---|
 | `list_business_apps` | GET /api/v1/cmdb/apps | 按 team/关键词过滤 | 3、6 |
-| `get_app_overview` | /apps/{id} + /apps/{id}/resources 复合 | 详情+repo_url+pipelines+资源清单 | 1、2、3、6 |
+| `get_app_overview` | /apps/{id} + /apps/{id}/resources 复合 | 详情+repo_url+pipelines+**dependencies/dependents（依赖与被依赖）**+资源清单 | 1、2、3、6 |
 | `find_app_by_resource` | GET /apps/by-resource/{id} | 实例→应用反查（根因分析入口） | 1、2 |
 | `search_resources` | GET /cmdb/resources | provider/model/status/region 过滤 + keyword 名称模糊 + **field_value 动态字段值精确检索（IP/连接地址/实例 ID，命中返回 matched_fields）** | 全部 |
 | `search_assets` | GET /cmdb/search | **跨域聚合**：应用+资源一次命中（工作台搜索同源，exact 开关） | 全部 |

@@ -15,16 +15,19 @@
 
 ---
 
-## 1. 录入进度对账（2026-08-25 库内实测）
+## 1. 录入进度对账（2026-09-23 实测）
 
 | 项 | 进度 | 说明 |
 |-----|------|------|
 | 分类 | 5 个 ✅ | 阿里云 / K8S / 谷歌云 / DNS / AWS（2026-09-09 已建）；中间件分组用到再建 |
-| 模型 | 43 个 ✅ | 库内全部已录（34 原有 + AWS 批次 9：account/vpc/eip/ec2/sg/s3/cloudfront/elb/alb）；apisix_route 缓做（§3.1）；selfhosted_* 在用哪个建哪个（§3.2） |
-| 字段 | 236 个 ✅ | §2 修正项清零；AWS 批次 38 字段已录（与附录 A2 零漂移实测）；枚举 options 全部内联 |
-| 关系约束 | **71/71 已录** | 全部正确（2026-09-07 实测：AWS 批次 13 条 #59-#71 全部落地 + dns→aws_eip / k8s_node→aws_ec2 两条扩展提前录）；apisix 的 3 条随缓做不占坑；模型种子 SQL 已入库仓（`sql/seed_cmdb_models.sql`，71 关系全量，幂等） |
-| 选项库 | 0 ✅ 已清空 | API 标 deprecated 休眠 |
-| 实例/边 | 生产产出中 | 存活资源 **1048**（aliyun 701 / gcp 347），belongs_to 边 989；**K8s↔云全链路桥接边代码闭环**（附录 B #34）：承载于/CSI/LB/DNAT/解析目标/路由上游全落地，其中 csi/lb/dnat kind 边待生产数据验证 |
+| 模型 | 43 个 ✅ | 库内全部已录（34 原有 + AWS 批次 9）；apisix_route 缓做（§3.1）；selfhosted_* 在用哪个建哪个（§3.2） |
+| 字段 | 241 个 ✅ | §2 修正项清零；AWS 批次 38 字段；RDS 四连接字段 + Redis bandwidth（v22/v23） |
+| 关系约束 | **71/71 已录** | 全部正确；apisix 的 3 条随缓做不占坑；模型种子 SQL 已入库仓（`sql/seed_cmdb_models.sql`，含 layer 列，幂等） |
+| 模型分层 | ✅ v24 | `cmdb_models.layer` 七层枚举（access/service/middleware/storage/host/network/infra），43 模型全覆盖 0 未分层；总览/拓扑/搜索自动带出（附录 B #38） |
+| 应用主数据 | ✅ v24 | 业务域表（业务域→应用→资源 三层归属）+ dependencies 依赖声明（internal/external，写入校验 internal app_code 存在性）+ 被依赖反查（附录 B #38） |
+| 变更流 | ✅ v24 | `GET /cmdb/changes?scope=all\|mine\|high_risk`：mine=我关注的资源（收藏 join）；high_risk=入口/中间件/存储层变更（layer 判定）（附录 B #38） |
+| 工作台端点 | ✅ | 资产总览 `GET /cmdb/models/overview`（分类→模型→计数单请求聚合）、全局搜索 `GET /cmdb/search`（应用+资源跨域，field_value 恒参与）、收藏三端点（v25 表）；MCP 同步 `search_assets`/`get_models_overview`（清单 14 工具） |
+| 实例/边 | 生产产出中 | 存活资源 1048+（含 AWS/GCP 批次）；**出网边已补**（附录 B #37：SNAT 出网→EIP，42 条实测）；入向（EIP bind/DNAT/解析目标）+ 出向（SNAT）+ 从属链全网画像闭环 |
 | 同步任务 | 多任务支持 | v8 迁移放开 (task_type, target_id) 唯一约束；消费端门控 = 启用任务并集（附录 B #24） |
 
 ---
@@ -475,7 +478,7 @@ ConfigMap/Secret 待“配置影响面分析”立项再议。
 | 9 | ~~Informer 新增 Watch Kind~~ **已确认无需开发** | informer 已支持 13 种资源（含 persistentvolumes/persistentvolumeclaims），配置启用即可；endpoints 虽支持但纪律是不建模——配置里不启用；不支持 Ingress（与不建 Ingress 的决策一致） |
 | 10 | APISIX 采集通道二选一 | CRD 模式：Informer 加 Watch ApisixRoute/ApisixUpstream，走现有 Topic；Admin API 模式：轻量拉取器 5–10min，只读 Key，凭据不进 git |
 | 11 | ~~云采集器新增存储 API~~ **✅ 已完成** | DescribeDisks（含游离盘）/ DescribeFileSystems + 挂载点已落地（aliyun_disk / aliyun_nas 适配器）；降频按任务拆分实现（附录 B #24） |
-| 12 | ~~builder 新增桥接/派生规则~~ **✅ 已完成** | 已落地：node→云主机承载于（#27）、NAT DNAT 派生边（kind=dnat）、**NAT SNAT 出网边（kind=snat，附录 B #36）**、EIP 直绑 kind=bind、PV→云盘 CSI 桥接（#43/#44/#56，kind=csi，附录 B #32）、ingress 路由上游（#30）、**service→CLB/NLB LB 桥接**（#38/#39，kind=lb，附录 B #33）。仅余 dns→apisix #48 随 apisix 缓做 |
+| 12 | ~~builder 新增桥接/派生规则~~ **✅ 已完成** | 已落地：node→云主机承载于（#27）、NAT DNAT 派生边（kind=dnat）、**NAT SNAT 出网边（kind=snat，附录 B #37）**、EIP 直绑 kind=bind、PV→云盘 CSI 桥接（#43/#44/#56，kind=csi，附录 B #32）、ingress 路由上游（#30）、**service→CLB/NLB LB 桥接**（#38/#39，kind=lb，附录 B #33）。仅余 dns→apisix #48 随 apisix 缓做 |
 | 13 | ~~应用关联物化（后端表，非模型）~~ **✅ 已完成** | v10 迁移 cmdb_app_resources（UNIQUE(app_id,resource_id)，双 FK CASCADE）；source='tag' 由两个消费端标签同步后 refresh_app_links_from_tags 重算（仅服务级 CI：workload/service/rds/redis/amqp/clb/nlb/cloudsql/redis-gcp；app 键含 k8s:app）；source='manual' API 绑定/解绑/双向查询（/apps/{id}/resources、/apps/by-resource/{rid}） |
 | 14 | **K8s 消息契约以 cmdb-informer 为准重写** | 实测对比（`cmdb-informer/internal/message/types.go` 的 `MQMessage` vs `kafka_messages.py` 的 `K8sResourceMessage`）两边结构性不一致：字段名（cluster_id vs cluster、resource_type vs kind）、消息结构（Go 嵌套 `resource.{uid,name,labels,annotations,spec,status,raw}` vs Python 平铺）、Python 缺 `message_id`（幂等去重）/`sync_type`/`snapshot` 事件/`old_resource`。重构时照 Go 侧 `MQMessage` 重写 Python schema，Go 生产者不动；**已确认** `resource_type` 取值为小写复数（pods/services/deployments/statefulsets/daemonsets/nodes/namespaces/persistentvolumes/persistentvolumeclaims 等），消费端映射表按此格式编写 |
 | 15 | ~~快照对账删除（依赖 #14）~~ **✅ 已完成** | 消费端快照会话机制：full_sync/periodic_sync 消息累加可见集（seen 记录在 upsert 跳过路径之前），空闲 120s 视为轮终（懒终结 + 60s 扫尾任务双保险），covered 模型差集软删 + 清边 + 记 delete 审计；仅对账快照覆盖的模型（k8s_cluster 等自动创建资源不误伤）；顺带 message_id 有界去重防 Kafka 重放 |
@@ -501,3 +504,4 @@ ConfigMap/Secret 待“配置影响面分析”立项再议。
 | 35 | **AWS 采集器全量实现**（2026-09-09） | boto3（wheel 核对 service-2.json/paginators）：ec2 describe_vpcs/addresses（无分页器单调用全量）/instances（NextToken）/security_groups（NextToken）；s3 list_buckets（ContinuationToken）+ 逐桶 acl 推断（AllUsers grants→canned）/versioning/public_access_block（NoSuchPublicAccessBlockConfiguration benign→False）；cloudfront list_distributions（Marker/IsTruncated，全局资源）；elb classic describe_load_balancers（Marker）；alb elbv2 过滤 Type=application + listeners/rules/target_groups/target_health 链。accounts.yaml aws 条目用 access_key_id/secret_access_key（+可选 session_token），SUPPORTED_PROVIDERS 加 aws；regions 空=ec2 describe_regions 自动发现（过滤 not-opted-in）。provider_id：全局唯一 ID 裸用，elb/alb 用 {region}/{name}（撞键纪律）；SG rules 与 aliyun 同构 + compute_rules_hash；无状态资源（eip/sg/elb/s3）status=None。消费端：_rebuild_aws_relate_slot 通用槽位重建（ec2→sg、eip→ec2 kind=bind、elb/alb→ec2 负载均衡后端）、_rebuild_cloudfront_origin_edges 分发源（#71）、dns_record 解析目标 candidates 扩展 aws、EKS 节点承载于（_resolve_host_for_node 加 aws） |
 | 36 | **RDS 连接地址内外网分列 + 代理地址落地**（2026-09-08） | §2.5 #3 决策闭环：旧单字段 connection_string（公网覆盖内网语义）废弃，改 private_connection_string/public_connection_string 分列（附录 A 规格落地，**UI 待补录三字段：private/public_connection_string + proxy_endpoint，并删旧 connection_string**）；采集器一次 NetInfo 按 IPType=Private/Public/Proxy 拆分（代理地址也在 NetInfo，免调 DescribeDBProxy）；port 回归内网端口语义；生产库实测 6 实例全部内网地址（无 .pub. 形态），公网/代理字段待实例开启后自动补全 |
 | 37 | **NAT SNAT 出网边完成**（2026-09-22） | 出口链补全：资源→EIP relates_to（kind=snat，描述「SNAT 出网」，attributes.nat_gateway_id 归属）。匹配统一按「**IP ∈ SNAT 网段**」推导（match_snat_targets 纯函数，ipaddress 包含判断）：遍历 ECS(private_ip)+Pod(pod_ip)，**Terway ENI/共享 ENI 的 Pod IP 为 VPC 真实 IP 可精确到 Pod 级**，flannel Pod IP 为集群 CIDR 不命中（诚实，出网=节点出口间接可见）；自定义 CIDR 条目（source_vswitch_id 空）天然覆盖；target EIP 限定本 NAT 的 eip_ids（SnatIp 必为本 NAT 出口，与 DNAT 同构）；attributes 归属先删后建幂等（新购资源下一轮自动补边）；测试库实测 42 条边（Pod+节点机混合命中）。已知局限：同账号多 VPC 网段重叠时 Pod 可能误命中（Pod 无 VPC 归属字段）。UI 待录：aliyun_ecs → aliyun_eip relates_to「SNAT 出网」关系定义（消费端建边不依赖定义表，仅治理对账用）；GCP Cloud NAT 不做（网段模型不同） |
+| 38 | **v24 三件套 + 工作台端点 + 变更 scope 完成**（2026-09-23，测试库已执行 v24，线上待执行） | ① `cmdb_models.layer` 七层枚举（access 10/service 3/middleware 5/storage 7/host 4/network 9/infra 5，43 模型全覆盖 0 未分层；分类是厂商分组与层级正交）；② 业务域表 cmdb_business_domains + 应用 business_id 可空 FK（业务域→应用→资源 三层归属，存量渐进补挂，schema.sql 业务域表前置于 business_apps 避免顺序倒置）；③ 应用 dependencies JSONB 依赖声明（internal 必带 app_code / external 必带 name 或 url，type 白名单，服务层校验 internal app_code 存在性防拼错静默失效）；④ 被依赖反查 list_dependents；⑤ 变更流 `GET /cmdb/changes?scope=all\|mine\|high_risk`（mine=收藏 join；high_risk=layer ∈ access/middleware/storage，实测 3596/387）；⑥ 工作台三端点：`GET /cmdb/models/overview`（分类→模型→计数聚合）、`GET /cmdb/search`（应用+资源跨域，keyword ∪ field_value 两路合并）、收藏三端点（v25 表 cmdb_resource_favorites）；⑦ MCP 同步 search_assets/get_models_overview（清单 14 工具），get_app_overview 带 dependencies/dependents；⑧ seed 重新 dump（models INSERT 含 layer 列，360 语句严格演练通过） |
