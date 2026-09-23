@@ -65,6 +65,20 @@ async def get_app_overview(app_id: int) -> dict:
 
 
 @mcp.tool()
+@mcp_tool_logging("get_app_topology")
+async def get_app_topology(app_id: int) -> dict:
+    """获取应用拓扑子图：应用间依赖 + 入口/中间件/存储资源 + 共享资源（nodes + edges）。
+
+    适用场景：变更影响面分析（改这个应用会波及谁）、故障定位时看上下游、
+    架构评审展示应用间关系。
+    限制：仅展开一跳依赖与归属的入口/中间件/存储资源（host 层不进图防爆炸）；
+    应用不存在时返回 not_found。
+    """
+    async with session_scope() as session:
+        return await app_service.get_app_topology(session, app_id)
+
+
+@mcp.tool()
 @mcp_tool_logging("find_app_by_resource")
 async def find_app_by_resource(resource_id: int) -> dict:
     """由 CMDB 资源 ID 反查归属的业务应用（逆向定位）。

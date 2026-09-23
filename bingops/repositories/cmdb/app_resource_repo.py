@@ -26,6 +26,23 @@ class CmdbAppResourceRepo:
         )
         return list(result.scalars().all())
 
+    async def list_shared_with_apps(
+        self, resource_ids: list[int], exclude_app_id: int,
+    ) -> list[tuple[int, int]]:
+        """共享资源推断：给定资源中被**其他**应用归集的 (resource_id, other_app_id) 对。
+
+        两个应用归集同一资源 = 存储级耦合信号（应用拓扑 shared 边用）。
+        """
+        if not resource_ids:
+            return []
+        result = await self._session.execute(
+            select(CmdbAppResource.resource_id, CmdbAppResource.app_id).where(
+                CmdbAppResource.resource_id.in_(resource_ids),
+                CmdbAppResource.app_id != exclude_app_id,
+            )
+        )
+        return [(row[0], row[1]) for row in result.all()]
+
     async def list_tag_links(self, resource_id: int) -> list[CmdbAppResource]:
         """source='tag' 的自动归集关联（替换式管理用）。"""
         result = await self._session.execute(

@@ -245,6 +245,126 @@ def list_dependents(app: object, all_apps: list) -> list[dict]:
     return dependents
 
 
+# ── 应用拓扑（G6 数据源）─────────────────────────────────────────────────
+
+# 应用拓扑中展示的资源层：入口/服务/中间件/存储（host 基础设施层走资源拓扑，防爆）
+TOPOLOGY_RESOURCE_LAYERS = ("access", "service", "middleware", "storage")
+
+
+async def get_app_topology(session: AsyncSession, app_id: int) -> dict:
+    """以应用为中心的拓扑子图（G6 数据源：nodes + edges 一次返回）。
+
+    节点：本应用 + 依赖/被依赖的应用 + 外部依赖 + 该应用的入口/中间件/
+    存储资源（按模型 layer 过滤，host 层不进应用拓扑防爆炸）。
+    边：depends_on（声明出向）、depended_by（被依赖）、external_dependency
+    （三方）、hosts_resource（归属资源）、shared_resource（其他应用 →
+    共享资源，存储级耦合信号）。
+    """
+    from bingops.repositories.cmdb.app_resource_repo import CmdbAppResourceRepo
+    from bingops.repositories.cmdb.model_repo import CmdbModelRepo
+
+    app = await get_app(session, app_id)
+    all_apps, _ = await list_apps(session, page=1, page_size=500)
+    apps_by_code = {a.app_code: a for a in all_apps}
+    apps_by_id = {a.id: a for a in all_apps}
+
+    nodes: list[dict] = []
+    edges: list[dict] = []
+    seen: set[str] = set()
+
+    def add_node(node: dict) -> None:
+        if node["id"] not in seen:
+            seen.add(node["id"])
+            nodes.append(node)
+
+    def app_node(a, is_center: bool = False) -> dict:
+        return {
+            "id": f"app:{a.id}", "type": "app", "name": a.name,
+            "app_code": a.app_code, "owner": a.owner,
+            "business_id": a.business_id, "is_center": is_center,
+        }
+
+    add_node(app_node(app, is_center=True))
+
+    # 出向依赖：internal → 应用节点；external → 外部节点
+    for dep in app.dependencies or []:
+        if dep.get("type") == "internal":
+            target = apps_by_code.get(dep.get("app_code") or "")
+            if target is None:
+                continue  # 历史数据引用已删应用
+            add_node(app_node(target))
+            edges.append({
+                "source": f"app:{app.id}", "target": f"app:{target.id}",
+                "relation": "depends_on", "note": dep.get("note") or "",
+            })
+        elif dep.get("type") == "external":
+            ext_key = dep.get("url") or dep.get("name") or ""
+            ext_id = f"external:{ext_key}"
+            add_node({
+                "id": ext_id, "type": "external",
+                "name": dep.get("name") or ext_key, "url": dep.get("url") or "",
+            })
+            edges.append({
+                "source": f"app:{app.id}", "target": ext_id,
+                "relation": "external_dependency",
+            })
+
+    # 被依赖：其他应用 → 本应用
+    for d in list_dependents(app, all_apps):
+        target = apps_by_id.get(d["id"])
+        if target is None:
+            continue
+        add_node(app_node(target))
+        edges.append({
+            "source": f"app:{target.id}", "target": f"app:{app.id}",
+            "relation": "depended_by",
+        })
+
+    # 归属资源（layer ∈ access/middleware/storage 才进应用拓扑）
+    resources = await list_app_resources(session, app_id)
+    all_models = await CmdbModelRepo(session).list_models()
+    layer_by_code = {m.code: m.layer for m in all_models}
+    kept = [
+        r for r in resources
+        if layer_by_code.get(r["model_code"]) in TOPOLOGY_RESOURCE_LAYERS
+    ]
+    resource_ids = [r["resource_id"] for r in kept]
+
+    # 共享推断：这些资源中被其他应用归集的 → 共享标记 + 其他应用节点
+    shared_links = await CmdbAppResourceRepo(session).list_shared_with_apps(
+        resource_ids, app_id,
+    )
+    shared_resource_ids = {rid for rid, _ in shared_links}
+    shared_app_ids = {aid for _, aid in shared_links}
+
+    for r in kept:
+        rid = f"resource:{r['resource_id']}"
+        add_node({
+            "id": rid, "type": "resource", "name": r["name"],
+            "model_code": r["model_code"], "layer": layer_by_code.get(r["model_code"]),
+            "provider": r["provider"], "env": r.get("env"),
+            "shared": r["resource_id"] in shared_resource_ids,
+        })
+        edges.append({
+            "source": f"app:{app.id}", "target": rid,
+            "relation": "hosts_resource",
+        })
+
+    # 共享边：其他应用 → 共享资源节点（新应用节点入图）
+    for rid, other_app_id in shared_links:
+        other = apps_by_id.get(other_app_id)
+        if other is None:
+            continue
+        add_node(app_node(other))
+        edges.append({
+            "source": f"app:{other.id}",
+            "target": f"resource:{rid}",
+            "relation": "shared_resource",
+        })
+
+    return {"center_id": f"app:{app.id}", "nodes": nodes, "edges": edges}
+
+
 # ── 应用-资源关联物化（附录 B #13）───────────────────────────────
 
 # 应用只绑服务级 CI（workload/中间件/RDS/入口），不绑 Pod/Node/ECS 等基础设施层

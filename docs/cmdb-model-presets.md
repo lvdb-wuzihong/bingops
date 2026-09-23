@@ -26,7 +26,7 @@
 | 模型分层 | ✅ v24 | `cmdb_models.layer` 七层枚举（access/service/middleware/storage/host/network/infra），43 模型全覆盖 0 未分层；总览/拓扑/搜索自动带出（附录 B #38） |
 | 应用主数据 | ✅ v24 | 业务域表（业务域→应用→资源 三层归属）+ dependencies 依赖声明（internal/external，写入校验 internal app_code 存在性）+ 被依赖反查（附录 B #38） |
 | 变更流 | ✅ v24 | `GET /cmdb/changes?scope=all\|mine\|high_risk`：mine=我关注的资源（收藏 join）；high_risk=入口/中间件/存储层变更（layer 判定）（附录 B #38） |
-| 工作台端点 | ✅ | 资产总览 `GET /cmdb/models/overview`（分类→模型→计数单请求聚合）、全局搜索 `GET /cmdb/search`（应用+资源跨域，field_value 恒参与）、收藏三端点（v25 表）；MCP 同步 `search_assets`/`get_models_overview`（清单 14 工具） |
+| 工作台端点 | ✅ | 资产总览 `GET /cmdb/models/overview`（分类→模型→计数单请求聚合）、全局搜索 `GET /cmdb/search`（应用+资源跨域，field_value 恒参与）、**应用拓扑 `GET /apps/{id}/topology`**（G6 数据源：依赖/被依赖/外部/共享资源/归属资源五类边）、收藏三端点（v25 表）；MCP 同步 `search_assets`/`get_models_overview`/`get_app_topology`（清单 15 工具） |
 | 实例/边 | 生产产出中 | 存活资源 1048+（含 AWS/GCP 批次）；**出网边已补**（附录 B #37：SNAT 出网→EIP，42 条实测）；入向（EIP bind/DNAT/解析目标）+ 出向（SNAT）+ 从属链全网画像闭环 |
 | 同步任务 | 多任务支持 | v8 迁移放开 (task_type, target_id) 唯一约束；消费端门控 = 启用任务并集（附录 B #24） |
 
