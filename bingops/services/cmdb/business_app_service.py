@@ -233,21 +233,31 @@ async def update_domain(session: AsyncSession, domain_id: int, payload) -> objec
     return domain
 
 
-def list_dependents(app: object, all_apps: list) -> list[dict]:
-    """被依赖清单：其他应用 dependencies 中 internal 引用了本应用 app_code。"""
+def list_dependents(
+    app: object, all_apps: list, env: str | None = None,
+) -> list[dict]:
+    """被依赖清单：其他应用 dependencies 中 internal 引用了本应用 app_code。
+
+    env 过滤：声明的依赖条目 env 为空（全环境通用）或等于查询环境才计入。
+    """
     dependents = []
     for other in all_apps:
         if other.id == app.id:
             continue
         for dep in other.dependencies or []:
-            if dep.get("type") == "internal" and dep.get("app_code") == app.app_code:
-                dependents.append({
-                    "id": other.id,
-                    "app_code": other.app_code,
-                    "name": other.name,
-                    "owner": other.owner,
-                })
-                break
+            if dep.get("type") != "internal" or dep.get("app_code") != app.app_code:
+                continue
+            dep_env = dep.get("env") or None
+            if env is not None and dep_env is not None and dep_env != env:
+                continue
+            dependents.append({
+                "id": other.id,
+                "app_code": other.app_code,
+                "name": other.name,
+                "owner": other.owner,
+                "env": dep_env,
+            })
+            break
     return dependents
 
 
@@ -265,8 +275,10 @@ async def get_app_topology(session: AsyncSession, app_id: int, env: str | None =
     边：depends_on（声明出向）、depended_by（被依赖）、external_dependency
     （三方）、hosts_resource（归属资源）、shared_resource（其他应用 →
     共享资源，存储级耦合信号）。
-    env 参数：按环境标签（env/k8s:env）过滤资源节点——依赖声明是应用级
-    的不受 env 影响；共享推断只在过滤后的资源集上计算。
+    env 参数：按环境标签（env/k8s:env）过滤资源节点；**依赖边同样过滤**——
+    依赖条目可声明 env（如内部业务 test 连 nacos-test、prod 连
+    nacos-internal-prod），条目 env 为空 = 全环境通用，与查询环境不匹配
+    的声明不显示。共享推断只在过滤后的资源集上计算。
     """
     from bingops.repositories.cmdb.app_resource_repo import CmdbAppResourceRepo
     from bingops.repositories.cmdb.model_repo import CmdbModelRepo
@@ -294,8 +306,12 @@ async def get_app_topology(session: AsyncSession, app_id: int, env: str | None =
 
     add_node(app_node(app, is_center=True))
 
-    # 出向依赖：internal → 应用节点；external → 外部节点
+    # 出向依赖：internal → 应用节点；external → 外部节点。条目 env 为空
+    # = 全环境通用；声明了 env 且与查询环境不匹配则不显示
     for dep in app.dependencies or []:
+        dep_env = dep.get("env") or None
+        if env is not None and dep_env is not None and dep_env != env:
+            continue
         if dep.get("type") == "internal":
             target = apps_by_code.get(dep.get("app_code") or "")
             if target is None:
@@ -304,6 +320,7 @@ async def get_app_topology(session: AsyncSession, app_id: int, env: str | None =
             edges.append({
                 "source": f"app:{app.id}", "target": f"app:{target.id}",
                 "relation": "depends_on", "note": dep.get("note") or "",
+                "env": dep_env,
             })
         elif dep.get("type") == "external":
             ext_key = dep.get("url") or dep.get("name") or ""
@@ -314,18 +331,18 @@ async def get_app_topology(session: AsyncSession, app_id: int, env: str | None =
             })
             edges.append({
                 "source": f"app:{app.id}", "target": ext_id,
-                "relation": "external_dependency",
+                "relation": "external_dependency", "env": dep_env,
             })
 
-    # 被依赖：其他应用 → 本应用
-    for d in list_dependents(app, all_apps):
+    # 被依赖：其他应用 → 本应用（env 过滤与出向依赖同规则）
+    for d in list_dependents(app, all_apps, env):
         target = apps_by_id.get(d["id"])
         if target is None:
             continue
         add_node(app_node(target))
         edges.append({
             "source": f"app:{target.id}", "target": f"app:{app.id}",
-            "relation": "depended_by",
+            "relation": "depended_by", "env": d.get("env"),
         })
 
     # 归属资源（layer ∈ access/service/middleware/storage 才进应用拓扑；env 可选过滤）
@@ -336,6 +353,10 @@ async def get_app_topology(session: AsyncSession, app_id: int, env: str | None =
         r for r in resources
         if layer_by_code.get(r["model_code"]) in TOPOLOGY_RESOURCE_LAYERS
     ]
+    if not kept and resources:
+        # 兑底：应用只有 host 层资源（如部署在 GCE 虚机上的 ES）时全量显示，
+        # 否则拓扑会是没有资源节点的空图
+        kept = resources
     resource_ids = [r["resource_id"] for r in kept]
 
     # 共享推断：这些资源中被其他应用归集的 → 共享标记 + 其他应用节点
@@ -375,11 +396,13 @@ async def get_app_topology(session: AsyncSession, app_id: int, env: str | None =
 
 # ── 应用-资源关联物化（附录 B #13）───────────────────────────────
 
-# 应用只绑服务级 CI（workload/中间件/RDS/入口），不绑 Pod/Node/ECS 等基础设施层
+# 应用只绑服务级 CI（workload/中间件/RDS/入口），不绑 Pod/Node；host 层模型
+# （ECS/GCE/EC2）显式放开——自部署组件（如 GCE 上的 ES）按虚机归集到组件应用
 SERVICE_LEVEL_MODEL_CODES = {
     "k8s_workload", "k8s_service",
     "aliyun_rds", "aliyun_redis", "aliyun_amqp", "aliyun_clb", "aliyun_nlb",
     "gcp_cloudsql", "gcp_redis",
+    "aliyun_ecs", "gcp_compute", "aws_ec2",
 }
 
 # 应用标签键：云/手动标签用 app，K8s labels 经归一化带 k8s: 前缀

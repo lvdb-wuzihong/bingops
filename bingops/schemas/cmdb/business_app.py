@@ -17,7 +17,12 @@ def _validate_pipelines(value: dict | None) -> dict:
 
 
 def _validate_dependencies(value: list | None) -> list:
-    """依赖声明契约校验：internal 必须带 app_code；external 必须带 name/url 之一。"""
+    """依赖声明契约校验：internal 必须带 app_code；external 必须带 name/url 之一。
+
+    条目可选 env 字段（环境名，如 prod）：空 = 全环境通用；声明后应用拓扑
+    按 ?env= 过滤依赖边（如内部业务 test 连 nacos-test、prod 连
+    nacos-internal-prod 的分环境声明）。
+    """
     if value is None:
         return []
     for item in value:
