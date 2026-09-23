@@ -486,7 +486,8 @@ async def list_app_resources(
     """应用下的资源列表（join 资源与模型 code）。
 
     每项附带 env（取自 env/k8s:env 标签）与 region，供前端按环境分组；
-    env 参数非空时服务端过滤。
+    env 参数非空时服务端过滤，**未打 env 标签的资源视为跨环境资产恒显示**
+    （如一套 Nacos 同时服务多环境，混布实例不打 env 标签）。
     """
     from bingops.models.cmdb.app_resource import CmdbAppResource
     from bingops.models.cmdb.model import CmdbModel
@@ -517,7 +518,9 @@ async def list_app_resources(
     result = []
     for link, res, model in items:
         res_env = env_map.get(res.id)
-        if env is not None and res_env != env:
+        # 未打 env 标签的资源视为跨环境资产（如一套 Nacos 同时服务多环境），
+        # 指定环境时恒显示，不被过滤
+        if env is not None and res_env is not None and res_env != env:
             continue
         result.append({
             "resource_id": res.id,
