@@ -385,7 +385,9 @@ ENV_TAG_KEYS = ("env", "k8s:env")
 async def refresh_app_links_from_tags(session: AsyncSession, resource) -> None:
     """按资源当前标签重算 tag 派生应用关联（不 commit，随消费事务提交）。
 
-    仅服务级 CI 参与；manual 关联不受影响。
+    仅服务级 CI 参与；manual 关联不受影响。标签值支持英文逗号分隔多应用
+    （如 `app=app-a,app-b`，平台级共享中间件一次打标归集 N 应用）；
+    GCP/AWS/K8s 的 label 值格式容不下逗号，多值约定仅用于平台手动标签。
     """
     from bingops.models.cmdb.model import CmdbModel
     from bingops.models.cmdb.tag import CmdbResourceTag
@@ -401,7 +403,12 @@ async def refresh_app_links_from_tags(session: AsyncSession, resource) -> None:
             CmdbResourceTag.tag_key.in_(APP_TAG_KEYS),
         )
     )
-    values = {t.tag_value for t in rows.scalars().all() if t.tag_value}
+    values = {
+        part.strip()
+        for t in rows.scalars().all() if t.tag_value
+        for part in t.tag_value.split(",")
+        if part.strip()
+    }
     app_ids: set[int] = set()
     if values:
         result = await session.execute(
