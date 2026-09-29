@@ -27,7 +27,7 @@ async def list_job_executions(
     适用场景：巡检日报"昨日变更"段、根因分析将告警时间与发布 tag 对齐、
     变更风险预检统计目标资源近期变更频率。
     限制：仅第 1 页（默认 20、上限 100）再按时间窗过滤，total 为过滤后条数；
-    不含 params/steps_snapshot/connection 大字段。
+    不含 params/step_snapshot/connection 大字段。
     """
     size = clamp_limit(limit)
     async with session_scope() as session:

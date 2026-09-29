@@ -358,12 +358,24 @@ CREATE TABLE runbooks (
     category      VARCHAR(64),
     description   TEXT,
     params_schema JSONB        NOT NULL DEFAULT '{}',
-    steps         JSONB        NOT NULL DEFAULT '[]',
+    -- 凭据三层分离（v27）：需走 Vault 的入参声明 {变量名: {required, description, default_ref}}
+    secrets_schema JSONB       NOT NULL DEFAULT '{}',
+    -- 唯一步骤（v29 扁平化：一个 runbook = 一个步骤，steps 数组列已删除）
+    exec_type        VARCHAR(16)  NOT NULL DEFAULT 'ansible',  -- ansible|shell|python|terraform
+    entry            TEXT         NOT NULL DEFAULT '',         -- playbook/脚本路径、tf 目录；shell 为命令字符串
+    run_on           VARCHAR(16)  NOT NULL DEFAULT 'target',   -- target=SSH 目标机 | local=runner 本机
+    timeout_sec      INT          NOT NULL DEFAULT 600,
+    rollbackable     BOOLEAN      NOT NULL DEFAULT TRUE,
+    undo_command     TEXT,                                     -- 仅 exec_type=shell
+    serial           VARCHAR(16),                              -- 多目标灰度批次（1 / 30%）
+    batch_pause_sec  INT          NOT NULL DEFAULT 0,
     connection    JSONB        NOT NULL DEFAULT '{}',   -- {ssh_user, ssh_key_ref, become, become_method, become_user}
     target_models JSONB        NOT NULL DEFAULT '["aliyun_ecs", "gcp_compute"]',
+    -- 执行默认绑定：执行未传 target_resource_ids / code_ref 时继承（v26 简化）
+    default_target_resource_ids JSONB NOT NULL DEFAULT '[]',
+    default_code_ref VARCHAR(128),
     version       INT          NOT NULL DEFAULT 1,
     risk_level    VARCHAR(16)  NOT NULL DEFAULT 'low',
-    auto_rollback BOOLEAN      NOT NULL DEFAULT FALSE,
     is_active     BOOLEAN      NOT NULL DEFAULT TRUE,
     created_by    BIGINT       REFERENCES users(id) ON DELETE SET NULL,
     created_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
@@ -508,8 +520,11 @@ CREATE TABLE job_executions (
     runbook_version  INT          NOT NULL,
     code_ref         VARCHAR(128) NOT NULL,
     params           JSONB        NOT NULL DEFAULT '{}',
+    -- 执行期密钥引用快照 {变量名: Vault 钥匙名}（v27）；只存钥匙名，明文永不入库
+    secrets          JSONB        NOT NULL DEFAULT '{}',
     target_resources JSONB        NOT NULL DEFAULT '[]',
-    steps_snapshot   JSONB        NOT NULL DEFAULT '[]',
+    -- 创建时快照的唯一步骤对象（v29：与 runbooks 步骤列同构）
+    step_snapshot    JSONB        NOT NULL DEFAULT '{}',
     connection       JSONB        NOT NULL DEFAULT '{}',
     status           VARCHAR(32)  NOT NULL DEFAULT 'pending',
     rollback_policy  VARCHAR(16)  NOT NULL DEFAULT 'manual',

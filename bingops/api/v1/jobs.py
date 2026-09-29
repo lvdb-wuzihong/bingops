@@ -34,12 +34,22 @@ def _runbook_to_response(runbook: Runbook) -> dict:
         category=runbook.category,
         description=runbook.description,
         params_schema=runbook.params_schema or {},
-        steps=runbook.steps or [],
+        secrets_schema=runbook.secrets_schema or {},
+        # v29 扁平单步：步骤列直接回显（不再有 steps 数组）
+        exec_type=runbook.exec_type,
+        entry=runbook.entry,
+        run_on=runbook.run_on,
+        timeout_sec=runbook.timeout_sec,
+        rollbackable=runbook.rollbackable,
+        undo_command=runbook.undo_command,
+        serial=runbook.serial,
+        batch_pause_sec=runbook.batch_pause_sec,
         connection=runbook.connection or {},
         target_models=runbook.target_models or [],
+        default_target_resource_ids=runbook.default_target_resource_ids or [],
+        default_code_ref=runbook.default_code_ref,
         version=runbook.version,
         risk_level=runbook.risk_level,
-        auto_rollback=runbook.auto_rollback,
         is_active=runbook.is_active,
         created_by=runbook.created_by,
         created_at=runbook.created_at,
@@ -54,6 +64,7 @@ def _execution_to_response(execution: JobExecution) -> dict:
         runbook_version=execution.runbook_version,
         code_ref=execution.code_ref,
         params=execution.params or {},
+        secrets=execution.secrets or {},
         target_resources=execution.target_resources or [],
         connection=execution.connection or {},
         status=execution.status,
@@ -122,7 +133,15 @@ async def create_runbook(
     session: AsyncSession = Depends(get_db_session),
     current_user: User = require_permission("runbook:create"),
 ):
-    """创建 runbook。"""
+    """创建 runbook（v29 扁平单步：一个 runbook = 一个步骤）。
+
+    必填只两项：exec_type（ansible | shell | python | terraform）+ entry。
+    entry 语义随类型变：ansible=playbook 路径、python=脚本入口、
+    terraform=工作目录、shell 恒为命令字符串。
+    run_on 缺省按类型推断（ansible/shell=target 需目标机与 ssh_key_ref；
+    python=local 无目标机）；steps 数组已不接收。
+    需走 Vault 的值声明在 secrets_schema，与 params_schema（明文）分开。
+    """
     runbook = await job_service.create_runbook(session, payload, current_user)
     return success_response(
         data=_runbook_to_response(runbook), message="Runbook created", http_status=201,
@@ -189,7 +208,12 @@ async def create_execution(
     session: AsyncSession = Depends(get_db_session),
     current_user: User = require_permission("job:create"),
 ):
-    """创建并下发执行（目标/步骤/版本三快照 + 并发目标锁）。"""
+    """创建并下发执行（目标/步骤/版本三快照 + 并发目标锁）。
+
+    target_resource_ids 与 code_ref 可省略：未传则继承 runbook 的默认绑定与默认版本；
+    全 local 型任务（python/terraform）可无目标。
+    secrets 传 {变量名: Vault 钥匙名}，变量名必须在 runbook.secrets_schema 声明集内。
+    """
     execution = await job_service.create_execution(session, payload, current_user)
     return success_response(
         data=_execution_to_response(execution), message="Job dispatched", http_status=201,

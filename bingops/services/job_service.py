@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from bingops.core.config import settings
 from bingops.core.exceptions import (
     ConflictError,
     ExternalServiceError,
@@ -50,42 +51,170 @@ _IP_FIELD_CANDIDATES = ("private_ip", "internal_ip", "ip")
 # K8s 对象（P2 local 模式）与自建主机模型按需扩入
 DEFAULT_TARGET_MODELS: list[str] = ["aliyun_ecs", "gcp_compute"]
 
+# 唯一步骤的缺省超时（秒）
+DEFAULT_STEP_TIMEOUT_SEC = 600
+
+# 可平铺传入的 connection 糖字段（归一进 connection JSONB，不入表结构）
+_SUGAR_CONNECTION_FIELDS = (
+    "ssh_user", "ssh_key_ref", "become", "become_method", "become_user",
+)
+
+# 执行类型 → 默认执行位置（v29 扁平单步）：ansible/shell 跑在目标机上，
+# python/terraform 在 runner 本机
+EXEC_TYPE_RUN_ON: dict[str, str] = {
+    "ansible": "target",
+    "shell": "target",
+    "python": "local",
+    "terraform": "local",
+}
+
+RUN_ON_VALUES = ("target", "local")
+
+# 单步模型的固定步骤 key（job_steps 行标识；回滚行同 key、不同 attempt_type）
+SINGLE_STEP_KEY = "main"
+
+# runbooks 的步骤列（PUT 部分更新时与存量列合并后整体校验）
+_STEP_COLUMNS = (
+    "exec_type", "entry", "run_on", "timeout_sec", "rollbackable",
+    "undo_command", "serial", "batch_pause_sec",
+)
+
+# 定义类字段变更 → version +1（execution 快照语义）
+_DEFINITION_FIELDS = (
+    *_STEP_COLUMNS, "params_schema", "secrets_schema", "connection",
+    "target_models", "default_target_resource_ids", "default_code_ref",
+)
+
+# 报错即文档：契约不满足时把最小可用示例直接回给作者
+MINIMAL_RUNBOOK_HINT = (
+    '{"name": "...", "exec_type": "python", "entry": "scripts/xxx.py",'
+    ' "params_schema": {}, "secrets_schema": {"DB_PASSWORD": {"required": true}},'
+    ' "default_target_resource_ids": [1], "ssh_user": "root",'
+    ' "ssh_key_ref": "<Vault 键名>"}'
+)
+
 ROLLBACKABLE_SOURCE_STATUSES = ("failed",)
 
 
 # ── Runbook 管理 ──────────────────────────────────────────────────────────────
 
 
-def _validate_steps(steps: list[dict]) -> list[dict]:
-    """步骤契约校验（P1 仅 ansible）：key/playbook 必备、key 唯一。"""
-    seen: set[str] = set()
-    for i, step in enumerate(steps):
-        if not isinstance(step, dict):
-            raise ValidationError(f"steps[{i}] must be an object")
-        key = step.get("key")
-        if not key or not isinstance(key, str):
-            raise ValidationError(f"steps[{i}].key is required")
-        if key in seen:
-            raise ValidationError(f"duplicate step key: {key}")
-        seen.add(key)
-        step_type = step.get("type", "ansible")
-        if step_type != "ansible":
-            raise ValidationError(
-                f"step '{key}': unsupported type '{step_type}' (P1: ansible only)",
-            )
-        if not step.get("playbook"):
-            raise ValidationError(f"step '{key}': playbook is required")
-    return steps
+def enabled_exec_types() -> set[str]:
+    """平台允许创建/执行的执行类型白名单。
 
-
-def _validate_connection(connection: dict) -> None:
-    """connection 契约校验（P1 ssh 模式）：ssh_key_ref 必备，真钥匙在 Vault。
-
-    在 bingops 侧 fail-fast（422），不把契约校验责任推给 runner。
+    上线顺序保险：runner 尚未支持某 executor 时收紧配置，
+    平台侧即拒绝创建，而不是等任务下发后失败。
     """
+    return {t.strip() for t in settings.job_step_types.split(",") if t.strip()}
+
+
+def run_on_of(exec_type: str, run_on: str | None) -> str:
+    """执行位置：显式 run_on 优先，否则按执行类型缺省。"""
+    return run_on or EXEC_TYPE_RUN_ON.get(exec_type, "target")
+
+
+def _build_step(
+    exec_type: str, entry: str, run_on: str | None = None,
+    timeout_sec: int | None = None, rollbackable: bool = True,
+    undo_command: str | None = None, serial: str | None = None,
+    batch_pause_sec: int | None = None,
+) -> dict:
+    """校验并归一出唯一步骤的列值（v29 扁平化：不再有 steps 数组）。
+
+    返回的键与 runbooks 步骤列一一对应；execution 快照与 dispatch 消息都由这些列组装。
+    entry 语义随 exec_type 变，shell 恒为命令字符串（避免“路径还是命令”的隐式判断）。
+    """
+    if exec_type not in EXEC_TYPE_RUN_ON:
+        raise ValidationError(
+            f"unknown exec_type '{exec_type}' (supported: {sorted(EXEC_TYPE_RUN_ON)})",
+        )
+    if exec_type not in enabled_exec_types():
+        raise ValidationError(
+            f"exec_type '{exec_type}' is not enabled "
+            f"(BINGOPS_JOB_STEP_TYPES={sorted(enabled_exec_types())})",
+        )
+    if not isinstance(entry, str) or not entry.strip():
+        raise ValidationError(f"entry is required; minimal example: {MINIMAL_RUNBOOK_HINT}")
+    final_run_on = run_on_of(exec_type, run_on)
+    if final_run_on not in RUN_ON_VALUES:
+        raise ValidationError(f"run_on must be one of {list(RUN_ON_VALUES)}")
+    if exec_type != "shell" and undo_command:
+        raise ValidationError("undo_command is only meaningful for exec_type=shell")
+    return {
+        "exec_type": exec_type,
+        "entry": entry.strip(),
+        "run_on": final_run_on,
+        "timeout_sec": timeout_sec or DEFAULT_STEP_TIMEOUT_SEC,
+        "rollbackable": rollbackable,
+        "undo_command": undo_command,
+        "serial": serial,
+        "batch_pause_sec": batch_pause_sec or 0,
+    }
+
+
+def step_of(runbook: Runbook) -> dict:
+    """从 runbook 步骤列组装 dispatch / 快照用的唯一步骤对象。"""
+    return {
+        "key": SINGLE_STEP_KEY,
+        "name": runbook.name,
+        "type": runbook.exec_type,
+        "run_on": runbook.run_on,
+        "entry": runbook.entry,
+        "timeout_sec": runbook.timeout_sec,
+        "serial": runbook.serial,
+        "batch_pause_sec": runbook.batch_pause_sec,
+        "rollbackable": runbook.rollbackable,
+        "undo_command": runbook.undo_command,
+    }
+
+
+def _merge_connection(base: dict | None, sugar: dict) -> dict:
+    """connection 平铺糖字段并入既有 JSONB 结构（糖字段优先于嵌套同名键）。"""
+    merged = dict(base or {})
+    for field in _SUGAR_CONNECTION_FIELDS:
+        if sugar.get(field) is not None:
+            merged[field] = sugar[field]
+    return merged
+
+
+def _validate_connection(connection: dict, required: bool = True) -> None:
+    """connection 契约校验：ssh_key_ref 必备，真钥匙在 Vault。
+
+    v27：required 由执行位置决定——run_on=local 的任务（python/terraform/shell local）
+    无 SSH 连接，不再因 ssh_key_ref 被硬卡。
+    在 bingops 侧 fail-fast（400），不把契约校验责任推给 runner。
+    """
+    if not required:
+        return
     ref = (connection or {}).get("ssh_key_ref")
     if not isinstance(ref, str) or not ref.strip():
         raise ValidationError("runbook connection.ssh_key_ref is required (Vault key name)")
+
+
+def _validate_secrets(secrets_schema: dict, secrets: dict) -> dict:
+    """secrets 校验：变量名必须已声明、必填项齐备、default_ref 回填。
+
+    值一律是 Vault 钥匙名（路径#字段），平台不解析内容、不做路径白名单——
+    能读哪些密钥由 runner AppRole 的 Vault policy 决定（单一权限事实源）。
+    只允许 runbook 预先声明的变量名，防执行者注入任意变量名拉取未预期密钥。
+    """
+    declared = secrets_schema or {}
+    normalized = dict(secrets or {})
+    undeclared = sorted(set(normalized) - set(declared))
+    if undeclared:
+        raise ValidationError(f"secrets not declared in runbook secrets_schema: {undeclared}")
+    for name, spec in declared.items():
+        value = normalized.get(name)
+        if value is None:
+            if isinstance(spec, dict) and spec.get("default_ref"):
+                normalized[name] = spec["default_ref"]
+                continue
+            if isinstance(spec, dict) and spec.get("required"):
+                raise ValidationError(f"missing required secret: {name}")
+            continue
+        if not isinstance(value, str) or not value.strip():
+            raise ValidationError(f"secret '{name}' must be a non-empty Vault key reference")
+    return normalized
 
 
 def _validate_params(params_schema: dict, params: dict) -> dict:
@@ -134,19 +263,30 @@ async def list_runbooks(
 
 
 async def create_runbook(session: AsyncSession, payload: RunbookCreate, user: User) -> Runbook:
-    _validate_steps(payload.steps)
-    _validate_connection(payload.connection)
+    step = _build_step(
+        payload.exec_type, payload.entry, run_on=payload.run_on,
+        timeout_sec=payload.timeout_sec, rollbackable=payload.rollbackable,
+        undo_command=payload.undo_command,
+        serial=payload.serial, batch_pause_sec=payload.batch_pause_sec,
+    )
+    connection = _merge_connection(
+        payload.connection, {f: getattr(payload, f) for f in _SUGAR_CONNECTION_FIELDS},
+    )
+    # v27：仅 run_on=target 时需要 SSH 私钥（无主机任务不卡）
+    _validate_connection(connection, required=step["run_on"] == "target")
     runbook = Runbook(
         name=payload.name,
         category=payload.category,
         description=payload.description,
         params_schema=payload.params_schema,
-        steps=payload.steps,
-        connection=payload.connection,
+        secrets_schema=payload.secrets_schema,
+        connection=connection,
         target_models=payload.target_models or list(DEFAULT_TARGET_MODELS),
+        default_target_resource_ids=list(payload.default_target_resource_ids or []),
+        default_code_ref=payload.default_code_ref,
         risk_level=payload.risk_level,
-        auto_rollback=payload.auto_rollback,
         created_by=user.id,
+        **step,
     )
     runbook = await RunbookRepo(session).create(runbook)
     await session.commit()
@@ -164,14 +304,26 @@ async def get_runbook(session: AsyncSession, runbook_id: int) -> Runbook:
 async def update_runbook(session: AsyncSession, runbook_id: int, payload: RunbookUpdate) -> Runbook:
     runbook = await get_runbook(session, runbook_id)
     data = payload.model_dump(exclude_unset=True)
-    if "steps" in data:
-        _validate_steps(data["steps"])
-    if "connection" in data:
-        _validate_connection(data["connection"])
-    # 定义类字段变更 → version +1（execution 快照语义）
-    definition_changed = any(
-        k in data for k in ("steps", "params_schema", "connection", "target_models")
+    # 步骤列部分更新：与存量列合并后整体校验（只改 timeout 也不会破坏入口契约），
+    # 并把归一后的缺省值回写 data（run_on 等推断值不落库为空）
+    if any(k in data for k in _STEP_COLUMNS):
+        merged = {k: data.get(k, getattr(runbook, k)) for k in _STEP_COLUMNS}
+        data.update(_build_step(**merged))
+    # 平铺 connection 键写进 connection JSONB 后从 data 剔除，
+    # 否则下方 setattr 会往模型上挂不属于表结构的属性
+    conn_sugar = {k: data[k] for k in _SUGAR_CONNECTION_FIELDS if k in data}
+    if "connection" in data or conn_sugar:
+        base = data["connection"] if "connection" in data else (runbook.connection or {})
+        data["connection"] = _merge_connection(base, conn_sugar)
+        for key in conn_sugar:
+            data.pop(key, None)
+    # connection 契约按最终执行位置决定（改成 local 后不再要求 ssh_key_ref）
+    _validate_connection(
+        data.get("connection", runbook.connection),
+        required=data.get("run_on", runbook.run_on) == "target",
     )
+    # 定义类字段变更 → version +1（execution 快照语义）
+    definition_changed = any(k in data for k in _DEFINITION_FIELDS)
     for key, value in data.items():
         setattr(runbook, key, value)
     if definition_changed:
@@ -242,7 +394,7 @@ async def _snapshot_targets(
 
 
 def _build_dispatch(
-    execution: JobExecution, command: str, steps: list[dict] | None = None,
+    execution: JobExecution, command: str, step: dict | None = None,
 ) -> JobDispatchMessage:
     return JobDispatchMessage(
         message_id=str(uuid.uuid4()),
@@ -250,20 +402,20 @@ def _build_dispatch(
         execution_id=execution.id,
         code_ref=execution.code_ref,
         params=execution.params,
+        # 只带钥匙名；真钥匙由 runner 在 executor 之前统一解析并加入 redact
+        secrets=execution.secrets,
         connection=execution.connection,
         targets=[ExecutionTarget(**t) for t in execution.target_resources],
-        steps=[
-            DispatchStep(**s)
-            for s in (steps if steps is not None else execution.steps_snapshot)
-        ],
+        # v29：单步对象（回滚时控制面把快照原样重发，runner 注入 BINGOPS_ACTION=undo）
+        step=DispatchStep(**(step if step is not None else execution.step_snapshot)),
     )
 
 
 async def _send_dispatch(
-    execution: JobExecution, command: str, steps: list[dict] | None = None,
+    execution: JobExecution, command: str, step: dict | None = None,
 ) -> None:
     try:
-        await dispatcher.send_dispatch(_build_dispatch(execution, command, steps))
+        await dispatcher.send_dispatch(_build_dispatch(execution, command, step))
     except RuntimeError as exc:
         # Kafka 未启用/未注入：下发通道不可用，503 语义（配置类失败而非外部故障）
         raise ExternalServiceError("kafka", str(exc), http_status=503) from exc
@@ -294,16 +446,31 @@ async def create_execution(
     runbook = await get_runbook(session, payload.runbook_id)
     if not runbook.is_active:
         raise ConflictError("Runbook", f"runbook {runbook.id} is deactivated")
-    # 存量 runbook 可能创建於校验上线前：下发前再验一次 connection 契约
-    _validate_connection(runbook.connection)
+    # 存量 runbook 可能创建於契约演进前：下发前再验一次；local 任务不要求 ssh_key_ref
+    needs_targets = runbook.run_on == "target"
+    _validate_connection(runbook.connection, required=needs_targets)
     params = _validate_params(runbook.params_schema, payload.params)
+    secrets = _validate_secrets(runbook.secrets_schema, payload.secrets)
 
     # P3 高危门控：中高危必须挂已审批工单（先于目标快照，提前拒绝）
     await _check_approval_gate(session, runbook, payload.ticket_id, user)
 
-    targets = await _snapshot_targets(session, payload.target_resource_ids)
+    # 目标继承（v26）+ 按步骤类型可选（v27）：未传取 runbook 默认绑定；
+    # 显式传空数组视为无目标，不继承。无 run_on=target 步骤的任务允许无目标。
+    # 继承来的目标照走 running / target_models 白名单 / 并发锁硬校验——简化的是
+    # 填写量，不是安全边界
+    resource_ids = payload.target_resource_ids
+    if resource_ids is None:
+        resource_ids = list(runbook.default_target_resource_ids or []) if needs_targets else []
+    if needs_targets and not resource_ids:
+        raise ValidationError(
+            "target_resource_ids is required: none provided and "
+            f"runbook {runbook.id} has no default binding"
+        )
+    targets = await _snapshot_targets(session, resource_ids) if resource_ids else []
 
-    # P3 封禁窗口门控：命中全局/模型范围封禁即拒绝（含工单自动下发路径）
+    # P3 封禁窗口门控：命中全局/模型范围封禁即拒绝（含工单自动下发路径）。
+    # v27 无目标任务已核：scope 为空的全局封禁对空 model_codes 照样命中，不会绕过
     model_codes = {t.model_code for t in targets if t.model_code}
     freezes = await change_freeze_service.find_active_freezes_for_models(session, model_codes)
     if freezes:
@@ -330,15 +497,26 @@ async def create_execution(
                 f"(status={exe.status})",
             )
 
+    # 版本回落链（v26）：显式传 > runbook.default_code_ref > 平台配置；
+    # 全空即拒绝——不给“默认 main”兜底，避免同一执行对应不同代码破坏快照语义
+    code_ref = payload.code_ref or runbook.default_code_ref or settings.job_default_code_ref
+    if not code_ref:
+        raise ValidationError(
+            "code_ref is required: none provided, runbook has no default_code_ref "
+            "and platform BINGOPS_JOB_DEFAULT_CODE_REF is empty"
+        )
+
     execution = JobExecution(
         runbook_id=runbook.id,
         runbook_version=runbook.version,
-        code_ref=payload.code_ref,
+        code_ref=code_ref,
         params=params,
+        secrets=secrets,
         target_resources=[t.model_dump() for t in targets],
-        steps_snapshot=list(runbook.steps),
+        step_snapshot=step_of(runbook),
         connection=runbook.connection,
-        rollback_policy="auto" if runbook.auto_rollback else "manual",
+        # v28：一律手动回滚（runbook.auto_rollback 已删除；本列是 P2 解冻时的落点）
+        rollback_policy="manual",
         ticket_id=payload.ticket_id,
         triggered_by=user.id,
     )
@@ -398,49 +576,44 @@ async def cancel_execution(session: AsyncSession, execution_id: int) -> JobExecu
     return execution
 
 
-async def _completed_rollbackable_steps(
-    session: AsyncSession, execution: JobExecution,
-) -> list[dict]:
-    """回滚链过滤：已完成（do 步骤 status=success）且声明 rollbackable 的步骤。
+async def _rollback_step(session: AsyncSession, execution: JobExecution) -> dict | None:
+    """回滚前置过滤（v29 单步版）：步骤声明 rollbackable 且 do 尝试已成功才允许回滚。
 
-    runner 无状态，不知道哪些步骤跑过——控制面按 job_steps 过滤后下发；
-    未执行（失败步之后的 skipped）与失败步本身不进回滚链。
+    runner 无状态：控制面判定后把快照步骤原样下发并注入 BINGOPS_ACTION=undo。
+    不可逆步骤或 do 未成功的执行（如 prepare 阶段就失败）返回 None。
     """
+    step = execution.step_snapshot or {}
+    if not step.get("rollbackable"):
+        return None
     done = {
         s.step_key
         for s in await JobStepRepo(session).list_by_execution(execution.id)
         if s.attempt_type == "do" and s.status == "success"
     }
-    return [
-        s for s in execution.steps_snapshot or []
-        if s.get("rollbackable") and s.get("key") in done
-    ]
+    return step if step.get("key") in done else None
 
 
 async def trigger_rollback(session: AsyncSession, execution: JobExecution) -> JobExecution:
-    """触发回滚下发（手动 API 与自动回滚共用）。"""
+    """触发回滚下发（手动 API；自动回滚已冻结）。"""
     if execution.status not in ROLLBACKABLE_SOURCE_STATUSES:
         raise ConflictError(
             "JobExecution",
             f"execution {execution.id} cannot rollback (status={execution.status})",
         )
-    # 回滚链过滤（runner 无状态，控制面给什么跑什么）：仅已完成且 rollbackable 的步骤
-    rollback_steps = await _completed_rollbackable_steps(session, execution)
-    if not rollback_steps:
+    step = await _rollback_step(session, execution)
+    if step is None:
         raise ConflictError(
-            "JobExecution", "no completed rollbackable steps in this execution",
+            "JobExecution",
+            "nothing to rollback: step not rollbackable or not completed successfully",
         )
 
-    await _send_dispatch(execution, "rollback", steps=rollback_steps)
+    await _send_dispatch(execution, "rollback", step=step)
     execution.status = "rolling_back"
     await JobExecutionRepo(session).update(execution)
     await session.commit()
     logger.info(
         "Job rollback dispatched",
-        extra={
-            "execution_id": execution.id,
-            "rollback_steps": [s.get("key") for s in rollback_steps],
-        },
+        extra={"execution_id": execution.id, "rollback_step": step.get("key")},
     )
     return execution
 

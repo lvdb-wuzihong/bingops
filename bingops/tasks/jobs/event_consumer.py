@@ -127,11 +127,10 @@ async def _process(session: AsyncSession, message: JobEventMessage) -> None:
 
 
 def _new_step(execution, message: JobEventMessage, status: str) -> JobStep:
-    """按快照补建步骤行（step_name/serial 取自 steps_snapshot）。"""
-    snapshot = next(
-        (s for s in (execution.steps_snapshot or []) if s.get("key") == message.step_key),
-        {},
-    )
+    """按快照补建步骤行（v29 单步：step_name/type/serial 取自 step_snapshot 对象）。"""
+    snapshot = execution.step_snapshot or {}
+    if message.step_key and snapshot.get("key") not in (None, message.step_key):
+        snapshot = {}  # 快照 key 与事件 key 不一致（脏事件）：不拿错名字建表行
     return JobStep(
         execution_id=execution.id,
         step_key=message.step_key or "",

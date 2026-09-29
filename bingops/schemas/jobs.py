@@ -21,27 +21,69 @@ JOB_EVENTS_TOPIC = "job-events"
 
 
 class RunbookCreate(BaseModel):
+    """创建 Runbook（v29 扁平单步：一个 runbook = 一个步骤）。
+
+    必填只两项：`exec_type`（执行方式，UI 下拉）+ `entry`（入口）。
+    entry 语义随 exec_type 变：ansible=playbook 路径、python=脚本入口、
+    terraform=工作目录、**shell 恒为命令字符串**（跑仓库脚本就写 `bash scripts/x.sh`）。
+    不再接收 `steps` 数组（多步编排不开放）。
+    """
+
     name: str = Field(max_length=128)
+    exec_type: str = Field(description="ansible | shell | python | terraform")
+    entry: str = Field(description="playbook 路径 / 命令字符串 / python 脚本 / tf 目录")
     category: str | None = None
     description: str | None = None
     params_schema: dict = Field(default_factory=dict)
-    steps: list[dict] = Field(min_length=1)
+    # 需走 Vault 的入参声明 {变量名: {required, description, default_ref}}（v27 凭据三层分离）
+    secrets_schema: dict = Field(default_factory=dict)
+    # ── 步骤属性（均有安全缺省值，创建表单不必出现）──
+    run_on: str | None = None      # None → 按 exec_type 推断；target=SSH 目标机，local=runner 本机
+    timeout_sec: int | None = None  # None → 600
+    rollbackable: bool = True       # 不可逆任务显式写 false
+    undo_command: str | None = None  # 仅 exec_type=shell 有效
+    serial: str | None = None       # 多目标灰度批次（1 / 30%）
+    batch_pause_sec: int | None = None
+    # ── 连接：connection 字典或以下平铺糖字段（糖字段覆盖同名键）；
+    # 仅 run_on=target 时需要 ssh_key_ref ──
     connection: dict = Field(default_factory=dict)
+    ssh_user: str | None = None
+    ssh_key_ref: str | None = None
+    become: bool | None = None
+    become_method: str | None = None
+    become_user: str | None = None
+    # ── 以下均有安全缺省值 ──
     target_models: list[str] | None = None  # None → 默认 [aliyun_ecs, gcp_compute]
     risk_level: str = "low"
-    auto_rollback: bool = False
+    # 默认执行目标与版本：执行时不传即继承，执行弹窗可只填参数
+    default_target_resource_ids: list[int] | None = None
+    default_code_ref: str | None = None
 
 
 class RunbookUpdate(BaseModel):
     name: str | None = None
+    exec_type: str | None = None
+    entry: str | None = None
     category: str | None = None
     description: str | None = None
     params_schema: dict | None = None
-    steps: list[dict] | None = None
+    secrets_schema: dict | None = None
+    run_on: str | None = None
+    timeout_sec: int | None = None
+    rollbackable: bool | None = None
+    undo_command: str | None = None
+    serial: str | None = None
+    batch_pause_sec: int | None = None
     connection: dict | None = None
+    ssh_user: str | None = None
+    ssh_key_ref: str | None = None
+    become: bool | None = None
+    become_method: str | None = None
+    become_user: str | None = None
     target_models: list[str] | None = None
     risk_level: str | None = None
-    auto_rollback: bool | None = None
+    default_target_resource_ids: list[int] | None = None
+    default_code_ref: str | None = None
     is_active: bool | None = None
 
 
@@ -51,12 +93,22 @@ class RunbookResponse(BaseModel):
     category: str | None
     description: str | None
     params_schema: dict
-    steps: list
+    secrets_schema: dict
+    # 扁平单步（v29）：步骤列直接回显，不再有 steps 数组
+    exec_type: str
+    entry: str
+    run_on: str
+    timeout_sec: int
+    rollbackable: bool
+    undo_command: str | None
+    serial: str | None
+    batch_pause_sec: int
     connection: dict
     target_models: list
+    default_target_resource_ids: list
+    default_code_ref: str | None
     version: int
     risk_level: str
-    auto_rollback: bool
     is_active: bool
     created_by: int | None
     created_at: datetime
@@ -69,8 +121,12 @@ class RunbookResponse(BaseModel):
 class ExecutionCreate(BaseModel):
     runbook_id: int
     params: dict = Field(default_factory=dict)
-    target_resource_ids: list[int] = Field(min_length=1)
-    code_ref: str = Field(max_length=128)  # git tag
+    # 需走 Vault 的入参：{变量名: Vault 钥匙名}（未传则用 secrets_schema.default_ref 回填）
+    secrets: dict = Field(default_factory=dict)
+    # 未传→继承 runbook.default_target_resource_ids；显式传空数组→不继承（400）
+    target_resource_ids: list[int] | None = None
+    # 未传→runbook.default_code_ref→平台配置 job_default_code_ref；全空则 400
+    code_ref: str | None = Field(default=None, max_length=128)
     ticket_id: int | None = None  # P3：高危 runbook 必须携带已审批通过的工单
 
 
@@ -90,6 +146,7 @@ class ExecutionResponse(BaseModel):
     runbook_version: int
     code_ref: str
     params: dict
+    secrets: dict
     target_resources: list
     connection: dict
     status: str
@@ -135,14 +192,20 @@ class StepLogResponse(BaseModel):
 
 
 class DispatchStep(BaseModel):
-    key: str
+    """下发步骤（v29：单步对象，不再是数组）；字段与 runbooks 步骤列一一对应。"""
+
+    key: str = "main"
     name: str | None = None
     type: str = "ansible"
-    playbook: str
+    # 执行位置：target = SSH 到目标机；local = runner 本机
+    run_on: str = "target"
+    # 执行入口：路径类（playbook/脚本/tf 目录）或 shell 的命令字符串
+    entry: str = ""
     timeout_sec: int | None = None
     serial: str | None = None
     batch_pause_sec: int | None = None
-    rollbackable: bool = False
+    rollbackable: bool = True
+    undo_command: str | None = None
 
 
 class JobDispatchMessage(BaseModel):
@@ -151,10 +214,12 @@ class JobDispatchMessage(BaseModel):
     execution_id: int
     code_ref: str
     params: dict = Field(default_factory=dict)
-    # 只带钥匙名，真钥匙由 runner 现场去 Vault 取
+    # 只带钥匙名，真钥匙由 runner 现场去 Vault 取（v27：与 params 分开的显式密钥集）
+    secrets: dict = Field(default_factory=dict)
+    # 钥匙名进消息，真钥匙由 runner 现场去 Vault 取
     connection: dict = Field(default_factory=dict)
     targets: list[ExecutionTarget] = Field(default_factory=list)
-    steps: list[DispatchStep] = Field(default_factory=list)
+    step: DispatchStep
 
 
 # ── Kafka 消息：job-events（runner → bingops）─────────────────────────────────

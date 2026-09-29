@@ -23,9 +23,13 @@ from bingops.models.base import Base, BaseMixin
 class Runbook(BaseMixin, Base):
     """Runbook（任务模板）。
 
-    steps 为有序步骤 JSON 数组，步骤契约见 docs/task-system-design.md §3：
-    key/name/type/playbook/timeout_sec/serial/batch_pause_sec/rollbackable。
-    编辑 steps/params_schema/connection 时 version +1，execution 创建时快照。
+    steps 列已于 v29 删除：**一个 runbook = 一个扁平步骤**（exec_type / entry / run_on /
+    timeout_sec / rollbackable / undo_command / serial / batch_pause_sec 直接成列），
+    不再有 JSONB 步骤数组；契约见 docs/task-system-design.md §3.5。
+    编辑步骤列/params_schema/secrets_schema/connection/target_models 时 version +1，
+    execution 创建时快照为单个 step_snapshot 对象。
+
+    v26/v27 糖字段（ssh_* / become*）由 job_service 归一进 connection JSONB。
     """
 
     __tablename__ = "runbooks"
@@ -36,19 +40,47 @@ class Runbook(BaseMixin, Base):
     params_schema: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     # params_schema 条目 spec：type(string|number|boolean)/required/default/enum/description；
     # 前端按此渲染动态表单，下发校验时后端自动回填 default
-    steps: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    # 凭据三层分离（v27）：params 明文 / secrets_schema 走 Vault / connection.ssh_key_ref 目标机私钥
+    secrets_schema: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    # secrets_schema 条目 spec：{required, description, default_ref}；键名即注入的大写环境变量名，
+    # 值一律为 Vault 钥匙名（路径#字段），红线：不得存明文
+    # ── 唯一步骤（v29 扁平化：一个 runbook = 一个步骤）──
+    # 执行类型：ansible | shell | python | terraform
+    exec_type: Mapped[str] = mapped_column(String(16), nullable=False, default="ansible")
+    # 执行入口：ansible=playbook 路径、python=脚本入口、terraform=工作目录；
+    # shell 恒为命令字符串（跑仓库脚本就写 bash scripts/x.sh）
+    entry: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    # 执行位置：target = SSH 到目标机；local = runner 本机
+    run_on: Mapped[str] = mapped_column(String(16), nullable=False, default="target")
+    timeout_sec: Mapped[int] = mapped_column(Integer, nullable=False, default=600)
+    # 不可逆任务显式写 false（默认 true：有 undo 分支即可回滚）
+    rollbackable: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    # 仅 exec_type=shell 有意义；其余类型走 BINGOPS_ACTION=undo 分支
+    undo_command: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 多目标灰度：批次大小（1 / 30%）与批间暂停秒数（单目任务用不上，缺省不填）
+    serial: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    batch_pause_sec: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     # 连接配置：{ssh_user, ssh_key_ref, become, become_method, become_user}
     # 钥匙名进消息，真钥匙在 Vault；sudo 密码不进配置（NOPASSWD sudoers 纪律）
+    # v27：仅当存在 run_on=target 步骤时才必需（无主机任务不再被硬卡）
     connection: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     # 目标模型范围（执行清单硬校验依据，P1 默认云主机两类）
     target_models: Mapped[list] = mapped_column(
         JSONB, nullable=False, default=lambda: ["aliyun_ecs", "gcp_compute"],
     )
+    # 默认执行目标（CMDB 资源 ID 数组）：执行未传 target_resource_ids 时继承，
+    # 继承后照走 running/白名单/并发锁硬校验；空数组不参与继承（视为未绑定）
+    default_target_resource_ids: Mapped[list] = mapped_column(
+        JSONB, nullable=False, default=list,
+    )
+    # 缺省仓库版本（git tag/branch）：执行未传 code_ref 时继承；
+    # NULL 回落平台配置 job_default_code_ref，两者皆空则 400 要求显式指定
+    default_code_ref: Mapped[str | None] = mapped_column(String(128), nullable=True)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     risk_level: Mapped[str] = mapped_column(
         String(16), nullable=False, default="low",
     )  # low|medium|high|critical
-    auto_rollback: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # auto_rollback 已于 v28 删除（回滚一律手动）；执行层策略见 job_executions.rollback_policy
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_by: Mapped[int | None] = mapped_column(
         BigInteger, ForeignKey("users.id", ondelete="SET NULL"), nullable=True,
@@ -66,9 +98,12 @@ class JobExecution(BaseMixin, Base):
     runbook_version: Mapped[int] = mapped_column(Integer, nullable=False)
     code_ref: Mapped[str] = mapped_column(String(128), nullable=False)  # git tag 快照
     params: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    # 执行期密钥引用快照 {变量名: Vault 钥匙名}（v27）；runner 现场解析为同名大写 env 并加入 redact
+    secrets: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     # [{resource_id,name,ip,region,model_code}]
     target_resources: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
-    steps_snapshot: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    # 创建时快照的唯一步骤对象（v29：与 runbooks 步骤列同构，含 key/name）
+    step_snapshot: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     # 连接配置快照 {ssh_user, ssh_key_ref}（回滚下发同样需要）
     connection: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     status: Mapped[str] = mapped_column(
