@@ -29,6 +29,11 @@ RUN useradd --create-home --uid 10001 bingops
 
 # 只带已安装的依赖和源码，不带 venv/.env/开发文件
 COPY --from=builder /install /usr/local
+
+# 依赖自检：greenlet 这类条件依赖在部分平台会被 pip 静默跳过（镜像装得上、启动才报错），
+# 因此在构建期就加载一次 asyncio 路径，失败则 build 中断
+RUN python -c "import sqlalchemy.ext.asyncio, asyncpg; print('runtime deps ok')"
+
 COPY --chown=bingops:bingops bingops /app/bingops
 
 WORKDIR /app
