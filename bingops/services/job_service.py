@@ -76,7 +76,6 @@ SINGLE_STEP_KEY = "main"
 # runbooks 的步骤列（PUT 部分更新时与存量列合并后整体校验）
 _STEP_COLUMNS = (
     "exec_type", "entry", "run_on", "timeout_sec", "rollbackable",
-    "undo_command", "serial", "batch_pause_sec",
 )
 
 # 定义类字段变更 → version +1（execution 快照语义）
@@ -116,13 +115,13 @@ def run_on_of(exec_type: str, run_on: str | None) -> str:
 def _build_step(
     exec_type: str, entry: str, run_on: str | None = None,
     timeout_sec: int | None = None, rollbackable: bool = True,
-    undo_command: str | None = None, serial: str | None = None,
-    batch_pause_sec: int | None = None,
 ) -> dict:
     """校验并归一出唯一步骤的列值（v29 扁平化：不再有 steps 数组）。
 
     返回的键与 runbooks 步骤列一一对应；execution 快照与 dispatch 消息都由这些列组装。
     entry 语义随 exec_type 变，shell 恒为命令字符串（避免“路径还是命令”的隐式判断）。
+    v30：不再接受 undo_command / serial / batch_pause_sec——回滚统一由 runner
+    注入 BINGOPS_ACTION=undo，入口没实现 undo 分支就会自己失败并回流 rollback_failed。
     """
     if exec_type not in EXEC_TYPE_RUN_ON:
         raise ValidationError(
@@ -138,17 +137,12 @@ def _build_step(
     final_run_on = run_on_of(exec_type, run_on)
     if final_run_on not in RUN_ON_VALUES:
         raise ValidationError(f"run_on must be one of {list(RUN_ON_VALUES)}")
-    if exec_type != "shell" and undo_command:
-        raise ValidationError("undo_command is only meaningful for exec_type=shell")
     return {
         "exec_type": exec_type,
         "entry": entry.strip(),
         "run_on": final_run_on,
         "timeout_sec": timeout_sec or DEFAULT_STEP_TIMEOUT_SEC,
         "rollbackable": rollbackable,
-        "undo_command": undo_command,
-        "serial": serial,
-        "batch_pause_sec": batch_pause_sec or 0,
     }
 
 
@@ -161,10 +155,7 @@ def step_of(runbook: Runbook) -> dict:
         "run_on": runbook.run_on,
         "entry": runbook.entry,
         "timeout_sec": runbook.timeout_sec,
-        "serial": runbook.serial,
-        "batch_pause_sec": runbook.batch_pause_sec,
         "rollbackable": runbook.rollbackable,
-        "undo_command": runbook.undo_command,
     }
 
 
@@ -266,8 +257,6 @@ async def create_runbook(session: AsyncSession, payload: RunbookCreate, user: Us
     step = _build_step(
         payload.exec_type, payload.entry, run_on=payload.run_on,
         timeout_sec=payload.timeout_sec, rollbackable=payload.rollbackable,
-        undo_command=payload.undo_command,
-        serial=payload.serial, batch_pause_sec=payload.batch_pause_sec,
     )
     connection = _merge_connection(
         payload.connection, {f: getattr(payload, f) for f in _SUGAR_CONNECTION_FIELDS},

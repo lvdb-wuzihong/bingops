@@ -24,8 +24,9 @@ class Runbook(BaseMixin, Base):
     """Runbook（任务模板）。
 
     steps 列已于 v29 删除：**一个 runbook = 一个扁平步骤**（exec_type / entry / run_on /
-    timeout_sec / rollbackable / undo_command / serial / batch_pause_sec 直接成列），
-    不再有 JSONB 步骤数组；契约见 docs/task-system-design.md §3.5。
+    timeout_sec / rollbackable 直接成列），不再有 JSONB 步骤数组；契约见
+    docs/task-system-design.md §3.5。v30 进一步删掉 undo_command / serial /
+    batch_pause_sec 三个细粒度字段（回滚统一约定，并发度下沉到执行机配置）。
     编辑步骤列/params_schema/secrets_schema/connection/target_models 时 version +1，
     execution 创建时快照为单个 step_snapshot 对象。
 
@@ -53,13 +54,10 @@ class Runbook(BaseMixin, Base):
     # 执行位置：target = SSH 到目标机；local = runner 本机
     run_on: Mapped[str] = mapped_column(String(16), nullable=False, default="target")
     timeout_sec: Mapped[int] = mapped_column(Integer, nullable=False, default=600)
-    # 不可逆任务显式写 false（默认 true：有 undo 分支即可回滚）
+    # 不可逆任务显式写 false（默认 true：入口实现了 undo 分支即可回滚）
     rollbackable: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
-    # 仅 exec_type=shell 有意义；其余类型走 BINGOPS_ACTION=undo 分支
-    undo_command: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # 多目标灰度：批次大小（1 / 30%）与批间暂停秒数（单目任务用不上，缺省不填）
-    serial: Mapped[str | None] = mapped_column(String(16), nullable=True)
-    batch_pause_sec: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # v30 删除 undo_command / serial / batch_pause_sec：回滚统一走 BINGOPS_ACTION=undo
+    # 约定，多目标并发度属于执行机部署级配置，不再是任务属性
     # 连接配置：{ssh_user, ssh_key_ref, become, become_method, become_user}
     # 钥匙名进消息，真钥匙在 Vault；sudo 密码不进配置（NOPASSWD sudoers 纪律）
     # v27：仅当存在 run_on=target 步骤时才必需（无主机任务不再被硬卡）

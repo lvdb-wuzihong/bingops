@@ -41,9 +41,8 @@ class RunbookCreate(BaseModel):
     run_on: str | None = None      # None → 按 exec_type 推断；target=SSH 目标机，local=runner 本机
     timeout_sec: int | None = None  # None → 600
     rollbackable: bool = True       # 不可逆任务显式写 false
-    undo_command: str | None = None  # 仅 exec_type=shell 有效
-    serial: str | None = None       # 多目标灰度批次（1 / 30%）
-    batch_pause_sec: int | None = None
+    # v30：undo_command / serial / batch_pause_sec 已删除——回滚统一注入 BINGOPS_ACTION=undo，
+    # 多目标并发度由执行机自身配置决定，不再是任务定义的一部分
     # ── 连接：connection 字典或以下平铺糖字段（糖字段覆盖同名键）；
     # 仅 run_on=target 时需要 ssh_key_ref ──
     connection: dict = Field(default_factory=dict)
@@ -71,9 +70,6 @@ class RunbookUpdate(BaseModel):
     run_on: str | None = None
     timeout_sec: int | None = None
     rollbackable: bool | None = None
-    undo_command: str | None = None
-    serial: str | None = None
-    batch_pause_sec: int | None = None
     connection: dict | None = None
     ssh_user: str | None = None
     ssh_key_ref: str | None = None
@@ -100,9 +96,6 @@ class RunbookResponse(BaseModel):
     run_on: str
     timeout_sec: int
     rollbackable: bool
-    undo_command: str | None
-    serial: str | None
-    batch_pause_sec: int
     connection: dict
     target_models: list
     default_target_resource_ids: list
@@ -202,10 +195,7 @@ class DispatchStep(BaseModel):
     # 执行入口：路径类（playbook/脚本/tf 目录）或 shell 的命令字符串
     entry: str = ""
     timeout_sec: int | None = None
-    serial: str | None = None
-    batch_pause_sec: int | None = None
     rollbackable: bool = True
-    undo_command: str | None = None
 
 
 class JobDispatchMessage(BaseModel):

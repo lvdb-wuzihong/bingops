@@ -366,9 +366,8 @@ CREATE TABLE runbooks (
     run_on           VARCHAR(16)  NOT NULL DEFAULT 'target',   -- target=SSH 目标机 | local=runner 本机
     timeout_sec      INT          NOT NULL DEFAULT 600,
     rollbackable     BOOLEAN      NOT NULL DEFAULT TRUE,
-    undo_command     TEXT,                                     -- 仅 exec_type=shell
-    serial           VARCHAR(16),                              -- 多目标灰度批次（1 / 30%）
-    batch_pause_sec  INT          NOT NULL DEFAULT 0,
+    -- v30 已删除 undo_command / serial / batch_pause_sec：回滚统一注入 BINGOPS_ACTION=undo，
+    -- 多目标并发度下沉为执行机部署级配置
     connection    JSONB        NOT NULL DEFAULT '{}',   -- {ssh_user, ssh_key_ref, become, become_method, become_user}
     target_models JSONB        NOT NULL DEFAULT '["aliyun_ecs", "gcp_compute"]',
     -- 执行默认绑定：执行未传 target_resource_ids / code_ref 时继承（v26 简化）

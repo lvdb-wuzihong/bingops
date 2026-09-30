@@ -127,7 +127,7 @@ async def _process(session: AsyncSession, message: JobEventMessage) -> None:
 
 
 def _new_step(execution, message: JobEventMessage, status: str) -> JobStep:
-    """按快照补建步骤行（v29 单步：step_name/type/serial 取自 step_snapshot 对象）。"""
+    """按快照补建步骤行（v29 单步：step_name/type 取自 step_snapshot 对象）。"""
     snapshot = execution.step_snapshot or {}
     if message.step_key and snapshot.get("key") not in (None, message.step_key):
         snapshot = {}  # 快照 key 与事件 key 不一致（脏事件）：不拿错名字建表行
@@ -138,7 +138,7 @@ def _new_step(execution, message: JobEventMessage, status: str) -> JobStep:
         type=snapshot.get("type", "ansible"),
         attempt_type=message.attempt_type,
         status=status,
-        serial=snapshot.get("serial"),
+        # job_steps.serial 列保留为历史记录；v30 起并发度归 runner 配置，新行恒为 NULL
         started_at=datetime.now(timezone.utc),
     )
 
