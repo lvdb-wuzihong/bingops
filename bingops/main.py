@@ -19,7 +19,17 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from bingops.api import dependencies
 from bingops.api.middleware.request_logging import RequestLoggingMiddleware
-from bingops.api.v1 import alerts, auth, feishu_events, jobs, roles, sd, tickets, users
+from bingops.api.v1 import (
+    alerts,
+    auth,
+    credentials,
+    feishu_events,
+    jobs,
+    roles,
+    sd,
+    tickets,
+    users,
+)
 from bingops.api.v1.cmdb import apps as cmdb_apps
 from bingops.api.v1.cmdb import business_domains as cmdb_business_domains
 from bingops.api.v1.cmdb import changes as cmdb_changes
@@ -174,6 +184,7 @@ app.include_router(catalog_router)
 app.include_router(group_router)
 app.include_router(oncall_router)
 app.include_router(jobs.router)
+app.include_router(credentials.router)
 app.include_router(alerts.router)
 app.include_router(alerts.source_router)
 app.include_router(alerts.channel_router)

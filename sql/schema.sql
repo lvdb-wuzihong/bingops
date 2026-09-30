@@ -348,6 +348,36 @@ CREATE INDEX idx_cmdb_change_type     ON cmdb_change_logs (change_type);
 CREATE INDEX idx_cmdb_change_time     ON cmdb_change_logs (created_at);
 
 -- ============================================================================
+-- 凭据目录（平台级：只存 Vault 引用与元数据，明文禁入）
+-- 主机标签 ssh_credential = credentials.name；任务不再携带 SSH 凭据
+-- 设计见 docs/task-system-design.md §5
+-- ============================================================================
+
+CREATE TABLE credentials (
+    id               BIGSERIAL PRIMARY KEY,
+    name             VARCHAR(128) NOT NULL UNIQUE,      -- 引用键（全局唯一：标签里是裸字符串）
+    kind             VARCHAR(32)  NOT NULL,             -- ssh_key|cloud_ak|db_password|api_token|kubeconfig
+    login_user       VARCHAR(64),                       -- 该钥匙对应的系统用户（选钥匙顺带定身份）
+    vault_path       VARCHAR(512) NOT NULL,             -- 只存路径，绝不存值
+    vault_field      VARCHAR(128),                      -- KV 字段名（path#field 拆分存储）
+    cloud_account    VARCHAR(128),                      -- 适用范围，NULL = 不限
+    region           VARCHAR(64),
+    is_default       BOOLEAN      NOT NULL DEFAULT FALSE,
+    verify_state     VARCHAR(16)  NOT NULL DEFAULT 'unknown',  -- runner 回填：unknown|ok|failed
+    last_verified_at TIMESTAMPTZ,
+    remark           TEXT,
+    is_active        BOOLEAN      NOT NULL DEFAULT TRUE,
+    created_by       BIGINT       REFERENCES users(id) ON DELETE SET NULL,
+    created_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    updated_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+-- 同 kind 只允许一个默认条目（部分唯一索引）
+CREATE UNIQUE INDEX uq_credential_default_per_kind
+    ON credentials (kind) WHERE is_default;
+CREATE INDEX idx_credential_kind_scope ON credentials (kind, cloud_account, region);
+
+-- ============================================================================
 -- 任务系统 runbook 定义（前置于工单系统：tickets.runbook_id 与
 -- job_executions.runbook_id 外键依赖 runbooks，初始化顺序必须先建）
 -- ============================================================================
@@ -682,6 +712,7 @@ BEGIN
             'cmdb_option_sets', 'cmdb_resources', 'cmdb_business_apps',
             'cmdb_tag_definitions', 'cmdb_resource_tags', 'cmdb_sync_tasks',
             'tickets',
+            'credentials',
             'runbooks', 'job_executions', 'job_steps',
             'change_freezes',
             'ticket_catalog', 'ticket_groups', 'oncall_schedules',
@@ -747,6 +778,7 @@ INSERT INTO permissions (code, name) VALUES
 ('playbook:update',    '更新 Playbook'),
 ('playbook:delete',    '删除 Playbook'),
 ('credential:list',    '查看凭据列表'),
+('credential:get',     '查看凭据详情与引用反查（轮换前看影响面）'),
 ('credential:create',  '创建凭据'),
 ('credential:update',  '更新凭据'),
 ('credential:delete',  '删除凭据'),

@@ -19,9 +19,12 @@ from bingops.core.exceptions import (
 )
 from bingops.models.cmdb.model import CmdbModel
 from bingops.models.cmdb.resource import CmdbResource
+from bingops.models.cmdb.tag import CmdbResourceTag
+from bingops.models.credential import HOST_CREDENTIAL_TAG_KEY, Credential
 from bingops.models.jobs import JobExecution, JobStep, Runbook
 from bingops.models.ticket import Ticket
 from bingops.models.user import User
+from bingops.repositories.credential_repo import CredentialRepo
 from bingops.repositories.jobs_repo import (
     JobExecutionRepo,
     JobStepLogRepo,
@@ -168,18 +171,15 @@ def _merge_connection(base: dict | None, sugar: dict) -> dict:
     return merged
 
 
-def _validate_connection(connection: dict, required: bool = True) -> None:
-    """connection 契约校验：ssh_key_ref 必备，真钥匙在 Vault。
+def _validate_connection(connection: dict) -> None:
+    """connection 契约校验（v31 放宽）：SSH 凭据不再要求写在 runbook 上。
 
-    v27：required 由执行位置决定——run_on=local 的任务（python/terraform/shell local）
-    无 SSH 连接，不再因 ssh_key_ref 被硬卡。
-    在 bingops 侧 fail-fast（400），不把契约校验责任推给 runner。
+    凭据由目标机解析（主机标签 → 凭据目录默认 → 此处兜底），所以这里只校
+    “填了就必须是非空字符串”，避免空串下发给 runner。真钥匙始终在 Vault。
     """
-    if not required:
-        return
     ref = (connection or {}).get("ssh_key_ref")
-    if not isinstance(ref, str) or not ref.strip():
-        raise ValidationError("runbook connection.ssh_key_ref is required (Vault key name)")
+    if ref is not None and (not isinstance(ref, str) or not ref.strip()):
+        raise ValidationError("connection.ssh_key_ref must be a non-empty Vault key name")
 
 
 def _validate_secrets(secrets_schema: dict, secrets: dict) -> dict:
@@ -261,8 +261,8 @@ async def create_runbook(session: AsyncSession, payload: RunbookCreate, user: Us
     connection = _merge_connection(
         payload.connection, {f: getattr(payload, f) for f in _SUGAR_CONNECTION_FIELDS},
     )
-    # v27：仅 run_on=target 时需要 SSH 私钥（无主机任务不卡）
-    _validate_connection(connection, required=step["run_on"] == "target")
+    # v31：SSH 凭据不再必填——执行时按目标机解析，connection 仅作兜底
+    _validate_connection(connection)
     runbook = Runbook(
         name=payload.name,
         category=payload.category,
@@ -286,7 +286,7 @@ async def create_runbook(session: AsyncSession, payload: RunbookCreate, user: Us
 async def get_runbook(session: AsyncSession, runbook_id: int) -> Runbook:
     runbook = await RunbookRepo(session).get_by_id(runbook_id)
     if runbook is None:
-        raise NotFoundError(f"Runbook {runbook_id} not found")
+        raise NotFoundError("Runbook", str(runbook_id))
     return runbook
 
 
@@ -306,11 +306,8 @@ async def update_runbook(session: AsyncSession, runbook_id: int, payload: Runboo
         data["connection"] = _merge_connection(base, conn_sugar)
         for key in conn_sugar:
             data.pop(key, None)
-    # connection 契约按最终执行位置决定（改成 local 后不再要求 ssh_key_ref）
-    _validate_connection(
-        data.get("connection", runbook.connection),
-        required=data.get("run_on", runbook.run_on) == "target",
-    )
+    # v31：凭据已不从属任务，这里只校验“填了就得合法”
+    _validate_connection(data.get("connection", runbook.connection))
     # 定义类字段变更 → version +1（execution 快照语义）
     definition_changed = any(k in data for k in _DEFINITION_FIELDS)
     for key, value in data.items():
@@ -338,10 +335,81 @@ async def delete_runbook(session: AsyncSession, runbook_id: int) -> None:
 # ── 执行编排 ──────────────────────────────────────────────────────────────────
 
 
+def _vault_ref(credential: Credential) -> str:
+    """拼 runner 消费的 Vault 引用串（path 或 path#field）。"""
+    if credential.vault_field:
+        return f"{credential.vault_path}#{credential.vault_field}"
+    return credential.vault_path
+
+
+async def _resolve_target_credentials(
+    session: AsyncSession,
+    rows: dict[int, tuple[CmdbResource, str]],
+    connection: dict | None,
+) -> dict[int, tuple[str | None, str | None]]:
+    """逐台目标机解析 (登录用户, SSH 凭据引用)（v31 凭据目录）。
+
+    优先级：主机标签 ssh_credential → 适用范围唯一命中 → 同 kind 的 is_default
+    → runbook.connection.ssh_key_ref（存量兜底，行为不变）。
+    多命中不猜：报错列出候选——猜错的后果是用错账号连上生产机。
+    登录用户：connection.ssh_user（任务声明的身份要求）> 凭据自带的 login_user。
+    """
+    repo = CredentialRepo(session)
+    fallback_ref = (connection or {}).get("ssh_key_ref")
+    fallback_user = (connection or {}).get("ssh_user")
+
+    tag_rows = await session.execute(
+        select(CmdbResourceTag.resource_id, CmdbResourceTag.tag_value).where(
+            CmdbResourceTag.resource_id.in_(list(rows)),
+            CmdbResourceTag.tag_key == HOST_CREDENTIAL_TAG_KEY,
+        )
+    )
+    tagged = dict(tag_rows.all())
+
+    resolved: dict[int, tuple[str | None, str | None]] = {}
+    for rid, (res, _code) in rows.items():
+        credential: Credential | None = None
+        tagged_name = tagged.get(rid)
+        if tagged_name:
+            credential = await repo.get_by_name(tagged_name)
+            if credential is None:
+                raise ValidationError(
+                    f"host '{res.name}' tag ssh_credential='{tagged_name}' "
+                    "not found in credential catalog"
+                )
+        else:
+            candidates = await repo.resolve("ssh_key", res.cloud_account, res.region)
+            if len(candidates) > 1:
+                defaults = [c for c in candidates if c.is_default]
+                if len(defaults) == 1:
+                    candidates = defaults
+                else:
+                    raise ValidationError(
+                        f"host '{res.name}' matches multiple ssh credentials "
+                        f"{[c.name for c in candidates]}; "
+                        "set tag ssh_credential to disambiguate"
+                    )
+            credential = candidates[0] if candidates else await repo.get_default("ssh_key")
+
+        if credential is not None:
+            resolved[rid] = (
+                fallback_user or credential.login_user,
+                _vault_ref(credential),
+            )
+        elif fallback_ref:
+            resolved[rid] = (fallback_user, fallback_ref)
+        else:
+            raise ValidationError(
+                f"host '{res.name}' has no ssh credential: set tag ssh_credential "
+                "on the host, or register a default credential in the catalog"
+            )
+    return resolved
+
+
 async def _snapshot_targets(
-    session: AsyncSession, resource_ids: list[int],
+    session: AsyncSession, resource_ids: list[int], connection: dict | None = None,
 ) -> list[ExecutionTarget]:
-    """从 CMDB 生成目标快照（只带资源坐标，不带 secret）。"""
+    """从 CMDB 生成目标快照，并逐台解析访问凭据（只带 Vault 引用，不带明文）。"""
     result = await session.execute(
         select(CmdbResource, CmdbModel.code)
         .join(CmdbModel, CmdbResource.model_id == CmdbModel.id)
@@ -350,7 +418,7 @@ async def _snapshot_targets(
     rows = {res.id: (res, code) for res, code in result.all()}
     missing = [rid for rid in resource_ids if rid not in rows]
     if missing:
-        raise NotFoundError(f"Target resources not found: {missing}")
+        raise NotFoundError("CmdbResource", str(missing))
 
     # 执行态硬校验：仅 running 可作为执行目标。
     # stopped SSH 必失败、maintenance 变更中；unknown/NULL 按 fail-safe 从严拒绝。
@@ -363,6 +431,9 @@ async def _snapshot_targets(
         detail = ", ".join(f"{name}({status})" for name, status in not_ready)
         raise ValidationError(f"targets not in running state: {detail}")
 
+    # v31：逐台解析登录用户与凭据引用——钥匙跟机器走，不跟任务走
+    creds = await _resolve_target_credentials(session, rows, connection)
+
     targets = []
     for rid in resource_ids:
         res, code = rows[rid]
@@ -374,10 +445,12 @@ async def _snapshot_targets(
             # provider_id 格式 {cluster}/{ns}/{name}（namespace 级）或 {cluster}/{name}
             parts = (res.provider_id or "").split("/")
             namespace = parts[1] if len(parts) >= 3 else None
+        ssh_user, ssh_key_ref = creds[rid]
         targets.append(ExecutionTarget(
             resource_id=res.id, name=res.name, ip=ip, region=res.region, model_code=code,
             cluster_id=res.cloud_account if is_k8s else None,
             namespace=namespace,
+            ssh_user=ssh_user, ssh_key_ref=ssh_key_ref,
         ))
     return targets
 
@@ -435,9 +508,9 @@ async def create_execution(
     runbook = await get_runbook(session, payload.runbook_id)
     if not runbook.is_active:
         raise ConflictError("Runbook", f"runbook {runbook.id} is deactivated")
-    # 存量 runbook 可能创建於契约演进前：下发前再验一次；local 任务不要求 ssh_key_ref
+    # 存量 runbook 可能创建於契约演进前：下发前再验一次 connection 形式
     needs_targets = runbook.run_on == "target"
-    _validate_connection(runbook.connection, required=needs_targets)
+    _validate_connection(runbook.connection)
     params = _validate_params(runbook.params_schema, payload.params)
     secrets = _validate_secrets(runbook.secrets_schema, payload.secrets)
 
@@ -456,7 +529,10 @@ async def create_execution(
             "target_resource_ids is required: none provided and "
             f"runbook {runbook.id} has no default binding"
         )
-    targets = await _snapshot_targets(session, resource_ids) if resource_ids else []
+    targets = (
+        await _snapshot_targets(session, resource_ids, runbook.connection)
+        if resource_ids else []
+    )
 
     # P3 封禁窗口门控：命中全局/模型范围封禁即拒绝（含工单自动下发路径）。
     # v27 无目标任务已核：scope 为空的全局封禁对空 model_codes 照样命中，不会绕过
@@ -536,7 +612,7 @@ async def create_execution(
 async def get_execution(session: AsyncSession, execution_id: int) -> JobExecution:
     execution = await JobExecutionRepo(session).get_by_id(execution_id)
     if execution is None:
-        raise NotFoundError(f"Execution {execution_id} not found")
+        raise NotFoundError("Execution", str(execution_id))
     return execution
 
 
@@ -625,7 +701,7 @@ async def get_step(session: AsyncSession, step_id: int) -> JobStep:
     result = await session.execute(select(_JobStep).where(_JobStep.id == step_id))
     step = result.scalar_one_or_none()
     if step is None:
-        raise NotFoundError(f"Step {step_id} not found")
+        raise NotFoundError("JobStep", str(step_id))
     return step
 
 

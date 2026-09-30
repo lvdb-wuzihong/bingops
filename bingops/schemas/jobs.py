@@ -131,6 +131,12 @@ class ExecutionTarget(BaseModel):
     model_code: str | None = None
     cluster_id: str | None = None   # K8s 模式（P2）：目标所属集群
     namespace: str | None = None    # K8s 模式（P2）：命名空间
+    # v31：凭据按目标机逐台解析后携带（主机标签 → 凭据目录 → runbook 兜底），
+    # runner 优先用这里的值，connection 退化为任务级兜底
+    ssh_user: str | None = None
+    ssh_key_ref: str | None = None
+    # 中转网关（v32 接入）：为空 = 直连
+    gateway: dict | None = None
 
 
 class ExecutionResponse(BaseModel):

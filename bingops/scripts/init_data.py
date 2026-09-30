@@ -53,6 +53,7 @@ PERMISSIONS: list[tuple[str, str]] = [
     ("playbook:update", "更新 Playbook"),
     ("playbook:delete", "删除 Playbook"),
     ("credential:list", "查看凭据列表"),
+    ("credential:get", "查看凭据详情与引用反查"),
     ("credential:create", "创建凭据"),
     ("credential:update", "更新凭据"),
     ("credential:delete", "删除凭据"),
