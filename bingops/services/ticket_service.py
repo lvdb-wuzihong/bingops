@@ -33,7 +33,7 @@ from bingops.models.ticket import (
     TicketGroup,
 )
 from bingops.models.user import User
-from bingops.repositories.jobs_repo import JobExecutionRepo
+from bingops.repositories.jobs_repo import ACTIVE_EXECUTION_STATUSES, JobExecutionRepo
 from bingops.repositories.ticket_meta_repo import (
     OncallScheduleRepo,
     TicketCatalogRepo,
@@ -373,7 +373,8 @@ async def dispatch_ticket_job(
         raise ValidationError("code_ref (git tag) is required to dispatch")
 
     latest = await JobExecutionRepo(session).get_latest_by_ticket(ticket_id)
-    if latest is not None and latest.status in ("pending", "running", "rolling_back"):
+    # 活跃态集合复用仓储层定义（v37 起无 rolling_back），避免两处字面量漂移
+    if latest is not None and latest.status in ACTIVE_EXECUTION_STATUSES:
         raise ConflictError(
             "JobExecution", f"ticket {ticket_id} already has active execution {latest.id}",
         )

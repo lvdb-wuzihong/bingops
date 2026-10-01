@@ -419,9 +419,8 @@ CREATE TABLE runbooks (
     entry            TEXT         NOT NULL DEFAULT '',         -- playbook/脚本路径、tf 目录；shell 为命令字符串
     run_on           VARCHAR(16)  NOT NULL DEFAULT 'target',   -- target=SSH 目标机 | local=runner 本机
     timeout_sec      INT          NOT NULL DEFAULT 600,
-    rollbackable     BOOLEAN      NOT NULL DEFAULT TRUE,
-    -- v30 已删除 undo_command / serial / batch_pause_sec：回滚统一注入 BINGOPS_ACTION=undo，
-    -- 多目标并发度下沉为执行机部署级配置
+    -- v30 已删除 undo_command / serial / batch_pause_sec（并发度下沉为执行机部署级配置）
+    -- v37 已删除 rollbackable：平台不提供回滚，失败由人看日志修
     connection    JSONB        NOT NULL DEFAULT '{}',   -- {ssh_user, ssh_key_ref, become, become_method, become_user}
     target_models JSONB        NOT NULL DEFAULT '["aliyun_ecs", "gcp_compute"]',
     -- v36 已删除 default_target_resource_ids / default_code_ref：目标机与代码
@@ -578,8 +577,8 @@ CREATE TABLE job_executions (
     -- 创建时快照的唯一步骤对象（v29：与 runbooks 步骤列同构）
     step_snapshot    JSONB        NOT NULL DEFAULT '{}',
     connection       JSONB        NOT NULL DEFAULT '{}',
-    status           VARCHAR(32)  NOT NULL DEFAULT 'pending',
-    rollback_policy  VARCHAR(16)  NOT NULL DEFAULT 'manual',
+    status           VARCHAR(32)  NOT NULL DEFAULT 'pending',  -- pending|running|success|failed|cancelled
+    -- v37 已删除 rollback_policy（manual|auto）：无回滚则无策略之分
     ticket_id        BIGINT,
     triggered_by     BIGINT       NOT NULL REFERENCES users(id),
     started_at       TIMESTAMPTZ,
@@ -596,7 +595,7 @@ CREATE TABLE job_steps (
     step_key      VARCHAR(64) NOT NULL,
     step_name     VARCHAR(128),
     type          VARCHAR(16) NOT NULL DEFAULT 'ansible',
-    attempt_type  VARCHAR(16) NOT NULL DEFAULT 'do',
+    -- v37 已删除 attempt_type（do|rollback）：一步一行，不存在第二次尝试
     status        VARCHAR(32) NOT NULL DEFAULT 'pending',
     serial        VARCHAR(16),
     exit_code     INT,
@@ -605,7 +604,7 @@ CREATE TABLE job_steps (
     finished_at   TIMESTAMPTZ,
     created_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     updated_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    CONSTRAINT uq_job_step_key_attempt UNIQUE (execution_id, step_key, attempt_type)
+    CONSTRAINT uq_job_step_key UNIQUE (execution_id, step_key)
 );
 CREATE INDEX idx_job_step_exec ON job_steps (execution_id);
 
@@ -866,7 +865,6 @@ INSERT INTO permissions (code, name) VALUES
 ('job:get',        '查看任务执行详情'),
 ('job:create',     '创建并下发任务'),
 ('job:cancel',     '取消任务'),
-('job:rollback',   '回滚任务'),
 ('change_freeze:list',   '查看变更封禁窗口'),
 ('change_freeze:create', '创建变更封禁窗口'),
 ('change_freeze:delete', '删除变更封禁窗口'),

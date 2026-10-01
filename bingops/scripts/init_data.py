@@ -111,7 +111,7 @@ PERMISSIONS: list[tuple[str, str]] = [
     ("job:get", "查看任务执行详情"),
     ("job:create", "创建并下发任务"),
     ("job:cancel", "取消任务"),
-    ("job:rollback", "回滚任务"),
+    # job:rollback 已于 v37 下线（平台不提供回滚），迁移里会 DELETE 旧权限行
     ("alert:list", "查看告警事件与规则映射"),
     ("alert:create", "创建告警规则映射"),
     ("alert:update", "更新告警规则映射"),

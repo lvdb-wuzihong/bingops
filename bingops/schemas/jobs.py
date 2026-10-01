@@ -1,7 +1,7 @@
 """任务系统 Pydantic 模型（API DTO + Kafka 消息契约）。
 
 Kafka 契约见 docs/task-system-design.md §9.2：
-- job-dispatch：bingops → runner（command=execute|rollback）
+- job-dispatch：bingops → runner（v37 起只有“执行”一种语义，command 字段已删）
 - job-events：runner → bingops（step_started|log|step_finished|execution_finished）
 """
 
@@ -45,9 +45,8 @@ class RunbookCreate(BaseModel):
     # ── 步骤属性（均有安全缺省值，创建表单不必出现）──
     run_on: str | None = None      # None → 按 exec_type 推断；target=SSH 目标机，local=runner 本机
     timeout_sec: int | None = None  # None → 600
-    rollbackable: bool = True       # 不可逆任务显式写 false
-    # v30：undo_command / serial / batch_pause_sec 已删除——回滚统一注入 BINGOPS_ACTION=undo，
-    # 多目标并发度由执行机自身配置决定，不再是任务定义的一部分
+    # v30：undo_command / serial / batch_pause_sec 已删除；多目标并发度由执行机自身配置决定
+    # v37：rollbackable 也已删除——平台不提供回滚，失败由人根据日志修复
     # v34：连接三件套（登录用户/密钥/提权）已全部撤到执行面——
     # 「以谁的身份连」在执行时才确定，不属于任务定义
     # ── 以下均有安全缺省值 ──
@@ -67,7 +66,6 @@ class RunbookUpdate(BaseModel):
     secrets_schema: dict | None = None
     run_on: str | None = None
     timeout_sec: int | None = None
-    rollbackable: bool | None = None
     target_models: list[str] | None = None
     risk_level: str | None = None
     is_active: bool | None = None
@@ -85,7 +83,6 @@ class RunbookResponse(BaseModel):
     entry: str
     run_on: str
     timeout_sec: int
-    rollbackable: bool
     connection: dict
     target_models: list
     version: int
@@ -147,7 +144,6 @@ class ExecutionResponse(BaseModel):
     target_resources: list
     connection: dict
     status: str
-    rollback_policy: str
     ticket_id: int | None
     triggered_by: int
     started_at: datetime | None
@@ -162,7 +158,6 @@ class StepResponse(BaseModel):
     step_key: str
     step_name: str | None
     type: str
-    attempt_type: str
     status: str
     serial: str | None
     exit_code: int | None
@@ -196,15 +191,15 @@ class DispatchStep(BaseModel):
     type: str = "ansible"
     # 执行位置：target = SSH 到目标机；local = runner 本机
     run_on: str = "target"
-    # 执行入口：路径类（playbook/脚本/tf 目录）或 shell 的命令字符串
+    # 执行入口：路径类（playbook/仓库脚本/tf 目录）或 shell 的内联命令
     entry: str = ""
     timeout_sec: int | None = None
-    rollbackable: bool = True
+    # v37：rollbackable 已删除——平台不下发回滚
 
 
 class JobDispatchMessage(BaseModel):
     message_id: str
-    command: str  # execute | rollback
+    # v37：command 字段已删除——取消（cancel）不下发，消息只剩“执行”一种语义
     execution_id: int
     code_ref: str
     params: dict = Field(default_factory=dict)
@@ -223,7 +218,7 @@ class JobEventMessage(BaseModel):
     message_id: str
     execution_id: int
     step_key: str | None = None
-    attempt_type: str = "do"
+    # v37：attempt_type（do|rollback）已删除——一步一行，不存在第二次尝试
     # step_started | log | step_finished | execution_finished
     event_type: str
     seq: int | None = None

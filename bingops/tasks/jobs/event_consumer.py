@@ -3,7 +3,7 @@
 事件类型：
 - step_started：建/更新步骤行为 running
 - log：追加步骤日志行（(step_id, seq) 冲突跳过，防重放重复）
-- step_finished：步骤终态；do 步骤失败推进 execution（auto 策略触发自动回滚）
+- step_finished：步骤终态；失败即把 execution 落 failed（v37：平台不做回滚）
 - execution_finished：execution 终态落定（runner 为终态裁决者）
 """
 
@@ -15,11 +15,9 @@ from datetime import datetime, timezone
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from bingops.core.exceptions import ConflictError
 from bingops.models.jobs import JobStep
 from bingops.repositories.jobs_repo import JobExecutionRepo, JobStepLogRepo, JobStepRepo
 from bingops.schemas.jobs import JobEventMessage
-from bingops.services import job_service
 
 logger = logging.getLogger(f"bingops.{__name__}")
 
@@ -83,9 +81,7 @@ async def _process(session: AsyncSession, message: JobEventMessage) -> None:
         return
 
     step_repo = JobStepRepo(session)
-    step = await step_repo.get_by_key(
-        message.execution_id, message.step_key, message.attempt_type,
-    )
+    step = await step_repo.get_by_key(message.execution_id, message.step_key)
 
     if message.event_type == "step_started":
         if step is None:
@@ -119,8 +115,8 @@ async def _process(session: AsyncSession, message: JobEventMessage) -> None:
             step.finished_at = now
             await step_repo.update(step)
 
-        if step.status == "failed" and message.attempt_type == "do":
-            await _handle_do_step_failure(session, execution)
+        if step.status == "failed":
+            await _finalize_failed(session, execution)
 
 
 # ── 状态推进 ──────────────────────────────────────────────────────────────────
@@ -136,43 +132,23 @@ def _new_step(execution, message: JobEventMessage, status: str) -> JobStep:
         step_key=message.step_key or "",
         step_name=snapshot.get("name"),
         type=snapshot.get("type", "ansible"),
-        attempt_type=message.attempt_type,
         status=status,
         # job_steps.serial 列保留为历史记录；v30 起并发度归 runner 配置，新行恒为 NULL
         started_at=datetime.now(timezone.utc),
     )
 
 
-async def _handle_do_step_failure(session: AsyncSession, execution) -> None:
-    """do 步骤失败：auto 策略触发逆序回滚，manual 策略落 failed 等人工。
-
-    自动回滚守卫：没有任何 do 步骤成功过（如 dispatch 契约校验失败）
-    则无可回滚对象，直接落 failed，避免“没执行却回滚中”的语义荒谬。
-    """
+async def _finalize_failed(session: AsyncSession, execution) -> None:
+    """步骤失败→ execution 落 failed 终态（v37：不再触发任何回滚，等人工）。"""
     if execution.status != "running":
         return
-    has_done = await JobStepRepo(session).has_succeeded_do_step(execution.id)
-    if execution.rollback_policy == "auto" and has_done:
-        execution.status = "failed"
-        await JobExecutionRepo(session).update(execution)
-        try:
-            await job_service.trigger_rollback(session, execution)
-        except ConflictError:
-            # 边角：成功步骤均非 rollbackable → 无回滚链，落 failed 终态
-            execution.finished_at = datetime.now(timezone.utc)
-            await JobExecutionRepo(session).update(execution)
-            logger.info(
-                "Auto rollback skipped (no completed rollbackable steps)",
-                extra={"execution_id": execution.id},
-            )
-    else:
-        execution.status = "failed"
-        execution.finished_at = datetime.now(timezone.utc)
-        await JobExecutionRepo(session).update(execution)
-        logger.info(
-            "Job execution failed (manual rollback policy)",
-            extra={"execution_id": execution.id},
-        )
+    execution.status = "failed"
+    execution.finished_at = datetime.now(timezone.utc)
+    await JobExecutionRepo(session).update(execution)
+    logger.info(
+        "Job execution failed (manual fix required; no rollback)",
+        extra={"execution_id": execution.id},
+    )
 
 
 async def _finalize_execution(session: AsyncSession, execution, message: JobEventMessage) -> None:
@@ -182,9 +158,7 @@ async def _finalize_execution(session: AsyncSession, execution, message: JobEven
     allowed = {
         "success": {"running"},
         "failed": {"running", "pending"},
-        "rolled_back": {"rolling_back"},
-        "partial_rollback": {"rolling_back"},
-        "rollback_failed": {"rolling_back"},
+        # v37：rolled_back / partial_rollback / rollback_failed 三个终态随回滚下线
     }
     if execution.status not in allowed.get(final, set()):
         logger.debug(

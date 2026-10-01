@@ -40,7 +40,6 @@ def _runbook_to_response(runbook: Runbook) -> dict:
         entry=runbook.entry,
         run_on=runbook.run_on,
         timeout_sec=runbook.timeout_sec,
-        rollbackable=runbook.rollbackable,
         connection=runbook.connection or {},
         target_models=runbook.target_models or [],
         version=runbook.version,
@@ -63,7 +62,6 @@ def _execution_to_response(execution: JobExecution) -> dict:
         target_resources=execution.target_resources or [],
         connection=execution.connection or {},
         status=execution.status,
-        rollback_policy=execution.rollback_policy,
         ticket_id=execution.ticket_id,
         triggered_by=execution.triggered_by,
         started_at=execution.started_at,
@@ -80,7 +78,6 @@ def _step_to_response(step: JobStep) -> dict:
         step_key=step.step_key,
         step_name=step.step_name,
         type=step.type,
-        attempt_type=step.attempt_type,
         status=step.status,
         serial=step.serial,
         exit_code=step.exit_code,
@@ -246,15 +243,9 @@ async def cancel_execution(
     return success_response(data=_execution_to_response(execution), message="Job cancelled")
 
 
-@router.post("/executions/{execution_id}/rollback")
-async def rollback_execution(
-    execution_id: int,
-    session: AsyncSession = Depends(get_db_session),
-    _user: User = require_permission("job:rollback"),
-):
-    """手动触发回滚（逆序重跑已完成且 rollbackable 的步骤 undo 分支）。"""
-    execution = await job_service.rollback_execution(session, execution_id)
-    return success_response(data=_execution_to_response(execution), message="Rollback dispatched")
+# 回滚入口已于 v37 整体下线（POST /executions/{id}/rollback、rollbackable、
+# rollback_policy、attempt_type 均删除）：runner 从未实现 undo，契约里留着
+# 只会让人以为“失败可以一键撤销”。失败就落 failed，由人看日志修。
 
 
 # ── 步骤日志 ──────────────────────────────────────────────────────────────────

@@ -24,13 +24,12 @@ class Runbook(BaseMixin, Base):
     """Runbook（任务模板）。
 
     steps 列已于 v29 删除：**一个 runbook = 一个扁平步骤**（exec_type / entry / run_on /
-    timeout_sec / rollbackable 直接成列），不再有 JSONB 步骤数组；契约见
-    docs/task-system-design.md §3.5。v30 进一步删掉 undo_command / serial /
-    batch_pause_sec 三个细粒度字段（回滚统一约定，并发度下沉到执行机配置）。
+    timeout_sec 直接成列），不再有 JSONB 步骤数组；契约见
+    docs/task-system-design.md §3.5。v30 删掉 undo_command / serial /
+    batch_pause_sec；**v37 删掉 rollbackable——回滚能力整体下线**（runner 从未实现，
+    契约里留着只会让人以为“失败可以一键撤销”）。
     编辑步骤列/params_schema/secrets_schema/connection/target_models 时 version +1，
     execution 创建时快照为单个 step_snapshot 对象。
-
-    v26/v27 糖字段（ssh_* / become*）由 job_service 归一进 connection JSONB。
     """
 
     __tablename__ = "runbooks"
@@ -46,21 +45,17 @@ class Runbook(BaseMixin, Base):
     # secrets_schema 条目 spec：{required, description, default_ref}；键名即注入的大写环境变量名，
     # 值一律为 Vault 钥匙名（路径#字段），红线：不得存明文
     # ── 唯一步骤（v29 扁平化：一个 runbook = 一个步骤）──
-    # 执行类型：ansible | shell | python | terraform
+    # 执行类型：ansible | shell | script | python | terraform
     exec_type: Mapped[str] = mapped_column(String(16), nullable=False, default="ansible")
-    # 执行入口：ansible=playbook 路径、python=脚本入口、terraform=工作目录；
-    # shell 恒为命令字符串（跑仓库脚本就写 bash scripts/x.sh）
+    # 执行入口：ansible=playbook 路径、script=仓库内脚本文件（推送执行）、
+    # python=脚本入口、terraform=工作目录；shell 恒为内联命令（在目标机 shell 里跑）
     entry: Mapped[str] = mapped_column(Text, nullable=False, default="")
     # 执行位置：target = SSH 到目标机；local = runner 本机
     run_on: Mapped[str] = mapped_column(String(16), nullable=False, default="target")
     timeout_sec: Mapped[int] = mapped_column(Integer, nullable=False, default=600)
-    # 不可逆任务显式写 false（默认 true：入口实现了 undo 分支即可回滚）
-    rollbackable: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
-    # v30 删除 undo_command / serial / batch_pause_sec：回滚统一走 BINGOPS_ACTION=undo
-    # 约定，多目标并发度属于执行机部署级配置，不再是任务属性
-    # 连接配置：{ssh_user, ssh_key_ref, become, become_method, become_user}
-    # 钥匙名进消息，真钥匙在 Vault；sudo 密码不进配置（NOPASSWD sudoers 纪律）
-    # v27：仅当存在 run_on=target 步骤时才必需（无主机任务不再被硬卡）
+    # v37 删除 rollbackable：平台不提供回滚。失败就是失败，由人根据日志修复；
+    # 入口脚本自己保留 undo 分支也无害，但平台不再注入 BINGOPS_ACTION=undo 去触发
+    # 连接配置：v34 起创建面不再写入，仅存存量兜底与 become* 提权开关
     connection: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     # 目标模型范围（执行清单硬校验依据，P1 默认云主机两类）
     target_models: Mapped[list] = mapped_column(
@@ -73,7 +68,7 @@ class Runbook(BaseMixin, Base):
     risk_level: Mapped[str] = mapped_column(
         String(16), nullable=False, default="low",
     )  # low|medium|high|critical
-    # auto_rollback 已于 v28 删除（回滚一律手动）；执行层策略见 job_executions.rollback_policy
+    # auto_rollback / rollback_policy 均已删除（v28/v37）：平台不做回滚，也无自动/手动之分
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_by: Mapped[int | None] = mapped_column(
         BigInteger, ForeignKey("users.id", ondelete="SET NULL"), nullable=True,
@@ -102,11 +97,9 @@ class JobExecution(BaseMixin, Base):
     status: Mapped[str] = mapped_column(
         String(32), nullable=False, default="pending",
     )
-    # pending|running|success|failed|rolling_back|rolled_back|
-    # partial_rollback|rollback_failed|cancelled
-    rollback_policy: Mapped[str] = mapped_column(
-        String(16), nullable=False, default="manual",
-    )  # manual|auto
+    # pending|running|success|failed|cancelled（v37：rolling_back / rolled_back /
+    # partial_rollback / rollback_failed 四个回滚态随能力一并下线）
+    # v37 删除 rollback_policy：不存在回滚，就无“自动/手动”之分
     ticket_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)  # P3 审批挂接
     triggered_by: Mapped[int] = mapped_column(
         BigInteger, ForeignKey("users.id"), nullable=False,
@@ -116,13 +109,11 @@ class JobExecution(BaseMixin, Base):
 
 
 class JobStep(BaseMixin, Base):
-    """步骤执行记录（回滚 = 同 step_key 的 attempt_type='rollback' 新行）。"""
+    """步骤执行记录（v37 起一步一行，不再有 do/rollback 两次尝试）。"""
 
     __tablename__ = "job_steps"
     __table_args__ = (
-        UniqueConstraint(
-            "execution_id", "step_key", "attempt_type", name="uq_job_step_key_attempt",
-        ),
+        UniqueConstraint("execution_id", "step_key", name="uq_job_step_key"),
     )
 
     execution_id: Mapped[int] = mapped_column(
@@ -131,10 +122,11 @@ class JobStep(BaseMixin, Base):
     step_key: Mapped[str] = mapped_column(String(64), nullable=False)
     step_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
     type: Mapped[str] = mapped_column(String(16), nullable=False, default="ansible")
-    attempt_type: Mapped[str] = mapped_column(String(16), nullable=False, default="do")
+    # v37 删除 attempt_type（do|rollback）：无回滚则恒为 do，无信息量
     status: Mapped[str] = mapped_column(
         String(32), nullable=False, default="pending",
-    )  # pending|running|success|failed|skipped|rolled_back|rollback_failed
+    )  # pending|running|success|failed|skipped
+    # job_steps.serial 保留为历史记录列（v30 起新行恒为 NULL，并发度归 runner）
     serial: Mapped[str | None] = mapped_column(String(16), nullable=True)
     exit_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)

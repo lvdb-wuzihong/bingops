@@ -78,12 +78,12 @@ EXEC_TYPE_RUN_ON: dict[str, str] = {
 
 RUN_ON_VALUES = ("target", "local")
 
-# 单步模型的固定步骤 key（job_steps 行标识；回滚行同 key、不同 attempt_type）
+# 单步模型的固定步骤 key（job_steps 行标识；v37 起一步一行，无第二次尝试）
 SINGLE_STEP_KEY = "main"
 
 # runbooks 的步骤列（PUT 部分更新时与存量列合并后整体校验）
 _STEP_COLUMNS = (
-    "exec_type", "entry", "run_on", "timeout_sec", "rollbackable",
+    "exec_type", "entry", "run_on", "timeout_sec",
 )
 
 # 定义类字段变更 → version +1（execution 快照语义）
@@ -98,8 +98,6 @@ MINIMAL_RUNBOOK_HINT = (
     '{"name": "...", "exec_type": "python", "entry": "scripts/xxx.py",'
     ' "params_schema": {}, "secrets_schema": {"DB_PASSWORD": {"required": true}}}'
 )
-
-ROLLBACKABLE_SOURCE_STATUSES = ("failed",)
 
 
 # ── Runbook 管理 ──────────────────────────────────────────────────────────────
@@ -121,14 +119,13 @@ def run_on_of(exec_type: str, run_on: str | None) -> str:
 
 def _build_step(
     exec_type: str, entry: str, run_on: str | None = None,
-    timeout_sec: int | None = None, rollbackable: bool = True,
+    timeout_sec: int | None = None,
 ) -> dict:
     """校验并归一出唯一步骤的列值（v29 扁平化：不再有 steps 数组）。
 
     返回的键与 runbooks 步骤列一一对应；execution 快照与 dispatch 消息都由这些列组装。
-    entry 语义随 exec_type 变，shell 恒为命令字符串（避免“路径还是命令”的隐式判断）。
-    v30：不再接受 undo_command / serial / batch_pause_sec——回滚统一由 runner
-    注入 BINGOPS_ACTION=undo，入口没实现 undo 分支就会自己失败并回流 rollback_failed。
+    entry 语义随 exec_type 显式区分（shell=内联命令 / script=仓库内脚本），不做隐式猜。
+    v37：rollbackable 已删除——平台不提供回滚能力，也不注入 BINGOPS_ACTION=undo。
     """
     if exec_type not in EXEC_TYPE_RUN_ON:
         raise ValidationError(
@@ -149,7 +146,6 @@ def _build_step(
         "entry": entry.strip(),
         "run_on": final_run_on,
         "timeout_sec": timeout_sec or DEFAULT_STEP_TIMEOUT_SEC,
-        "rollbackable": rollbackable,
     }
 
 
@@ -162,7 +158,6 @@ def step_of(runbook: Runbook) -> dict:
         "run_on": runbook.run_on,
         "entry": runbook.entry,
         "timeout_sec": runbook.timeout_sec,
-        "rollbackable": runbook.rollbackable,
     }
 
 
@@ -283,7 +278,7 @@ async def create_runbook(session: AsyncSession, payload: RunbookCreate, user: Us
     _validate_secrets_schema(payload.secrets_schema)
     step = _build_step(
         payload.exec_type, payload.entry, run_on=payload.run_on,
-        timeout_sec=payload.timeout_sec, rollbackable=payload.rollbackable,
+        timeout_sec=payload.timeout_sec,
     )
     # v34：连接三件套已撤到执行面——runbook 不再持有任何连接信息，
     # 登录用户/密钥/提权全部在执行时提供
@@ -410,12 +405,9 @@ async def _snapshot_targets(
     return targets
 
 
-def _build_dispatch(
-    execution: JobExecution, command: str, step: dict | None = None,
-) -> JobDispatchMessage:
+def _build_dispatch(execution: JobExecution, step: dict | None = None) -> JobDispatchMessage:
     return JobDispatchMessage(
         message_id=str(uuid.uuid4()),
-        command=command,
         execution_id=execution.id,
         code_ref=execution.code_ref,
         params=execution.params,
@@ -423,16 +415,16 @@ def _build_dispatch(
         secrets=execution.secrets,
         connection=execution.connection,
         targets=[ExecutionTarget(**t) for t in execution.target_resources],
-        # v29：单步对象（回滚时控制面把快照原样重发，runner 注入 BINGOPS_ACTION=undo）
+        # v29：单步对象；v37：不再有“重发快照 + 注入 undo”的回滚路径
         step=DispatchStep(**(step if step is not None else execution.step_snapshot)),
     )
 
 
 async def _send_dispatch(
-    execution: JobExecution, command: str, step: dict | None = None,
+    execution: JobExecution, step: dict | None = None,
 ) -> None:
     try:
-        await dispatcher.send_dispatch(_build_dispatch(execution, command, step))
+        await dispatcher.send_dispatch(_build_dispatch(execution, step))
     except RuntimeError as exc:
         # Kafka 未启用/未注入：下发通道不可用，503 语义（配置类失败而非外部故障）
         raise ExternalServiceError("kafka", str(exc), http_status=503) from exc
@@ -556,8 +548,7 @@ async def create_execution(
                if needs_targets else {}),
             "become": become,
         },
-        # v28：一律手动回滚（runbook.auto_rollback 已删除；本列是 P2 解冻时的落点）
-        rollback_policy="manual",
+        # v37：rollback_policy 列已删——不存在回滚，也无自动/手动之分
         ticket_id=payload.ticket_id,
         triggered_by=user.id,
     )
@@ -565,7 +556,7 @@ async def create_execution(
     await session.commit()  # 先提交再下发：防止 runner 事件回流时 execution 行尚未落库
 
     try:
-        await _send_dispatch(execution, "execute")
+        await _send_dispatch(execution)
     except Exception:
         # 下发失败（如 Kafka 未启用）：置 failed 释放目标锁，避免 pending 残留
         execution.status = "failed"
@@ -604,7 +595,7 @@ async def list_executions(
 
 async def cancel_execution(session: AsyncSession, execution_id: int) -> JobExecution:
     execution = await get_execution(session, execution_id)
-    if execution.status not in ("pending", "running", "rolling_back"):
+    if execution.status not in ("pending", "running"):
         raise ConflictError(
             "JobExecution",
             f"execution {execution_id} cannot be cancelled (status={execution.status})",
@@ -617,51 +608,12 @@ async def cancel_execution(session: AsyncSession, execution_id: int) -> JobExecu
     return execution
 
 
-async def _rollback_step(session: AsyncSession, execution: JobExecution) -> dict | None:
-    """回滚前置过滤（v29 单步版）：步骤声明 rollbackable 且 do 尝试已成功才允许回滚。
-
-    runner 无状态：控制面判定后把快照步骤原样下发并注入 BINGOPS_ACTION=undo。
-    不可逆步骤或 do 未成功的执行（如 prepare 阶段就失败）返回 None。
-    """
-    step = execution.step_snapshot or {}
-    if not step.get("rollbackable"):
-        return None
-    done = {
-        s.step_key
-        for s in await JobStepRepo(session).list_by_execution(execution.id)
-        if s.attempt_type == "do" and s.status == "success"
-    }
-    return step if step.get("key") in done else None
-
-
-async def trigger_rollback(session: AsyncSession, execution: JobExecution) -> JobExecution:
-    """触发回滚下发（手动 API；自动回滚已冻结）。"""
-    if execution.status not in ROLLBACKABLE_SOURCE_STATUSES:
-        raise ConflictError(
-            "JobExecution",
-            f"execution {execution.id} cannot rollback (status={execution.status})",
-        )
-    step = await _rollback_step(session, execution)
-    if step is None:
-        raise ConflictError(
-            "JobExecution",
-            "nothing to rollback: step not rollbackable or not completed successfully",
-        )
-
-    await _send_dispatch(execution, "rollback", step=step)
-    execution.status = "rolling_back"
-    await JobExecutionRepo(session).update(execution)
-    await session.commit()
-    logger.info(
-        "Job rollback dispatched",
-        extra={"execution_id": execution.id, "rollback_step": step.get("key")},
-    )
-    return execution
-
-
-async def rollback_execution(session: AsyncSession, execution_id: int) -> JobExecution:
-    execution = await get_execution(session, execution_id)
-    return await trigger_rollback(session, execution)
+# ── 回滚能力已于 v37 整体下线 ────────────────────────────────────────────
+# 删除的入参/字段：runbooks.rollbackable、job_executions.rollback_policy、
+# job_steps.attempt_type、dispatch.command、POST /executions/{id}/rollback。
+# 理由：runner 从未实现 undo，契约里留着会让人以为“失败可以一键撤销”；
+# 内联命令还会产生命令假成功。失败就落 failed，由人看日志修。
+# 将来解冻的正确形态：先定“撤销什么、谁审批、失败如何可见”，而不是复活这几个字段。
 
 
 # ── 步骤与日志查询 ────────────────────────────────────────────────────────────

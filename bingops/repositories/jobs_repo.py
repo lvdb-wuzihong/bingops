@@ -9,7 +9,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bingops.models.jobs import JobExecution, JobStep, JobStepLog, Runbook
 
 # 执行中的状态集合（并发目标锁校验用）
-ACTIVE_EXECUTION_STATUSES = ("pending", "running", "rolling_back")
+# 活跃执行态（并发目标锁判定）：v37 起无 rolling_back——平台不做回滚
+ACTIVE_EXECUTION_STATUSES = ("pending", "running")
 
 
 class RunbookRepo:
@@ -140,14 +141,12 @@ class JobStepRepo:
         await self.session.flush()
         return step
 
-    async def get_by_key(
-        self, execution_id: int, step_key: str, attempt_type: str = "do",
-    ) -> JobStep | None:
+    async def get_by_key(self, execution_id: int, step_key: str) -> JobStep | None:
+        """按 (执行, 步骤 key) 取行（v37：attempt_type 已删，一步一行）。"""
         result = await self.session.execute(
             select(JobStep).where(
                 JobStep.execution_id == execution_id,
                 JobStep.step_key == step_key,
-                JobStep.attempt_type == attempt_type,
             )
         )
         return result.scalar_one_or_none()
@@ -160,18 +159,8 @@ class JobStepRepo:
         )
         return list(result.scalars().all())
 
-    async def has_succeeded_do_step(self, execution_id: int) -> bool:
-        """是否存在成功完成的 do 步骤（自动回滚守卫：无成功步骤则无可回滚对象）。"""
-        result = await self.session.execute(
-            select(func.count())
-            .select_from(JobStep)
-            .where(
-                JobStep.execution_id == execution_id,
-                JobStep.attempt_type == "do",
-                JobStep.status == "success",
-            )
-        )
-        return (result.scalar() or 0) > 0
+    # v37 删除 has_succeeded_do_step()：它是自动回滚的守卫（无成功步骤则无可回滚对象），
+    # 回滚能力下线后已无调用方
 
 
 class JobStepLogRepo:
