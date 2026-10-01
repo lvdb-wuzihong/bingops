@@ -380,7 +380,7 @@ CREATE INDEX idx_credential_kind_scope ON credentials (kind, cloud_account, regi
 
 -- ============================================================================
 -- 中转网关（bastion）：网络拓扑事实，不是任务属性
--- 选路由机器归属（vpc/云账号/地域/显式主机）在执行期算出，见 §5.2
+-- 选路由机器所属 VPC 在执行期算出（v35 单一维度），见 §5.2
 -- ============================================================================
 
 CREATE TABLE job_gateways (
@@ -391,10 +391,10 @@ CREATE TABLE job_gateways (
     login_user       VARCHAR(64)  NOT NULL DEFAULT 'root',
     -- 网关自身登录钥匙：引用 credentials.name（可反查“哪些网关还在用这把钥匙”）
     ssh_credential   VARCHAR(128),
-    -- 选择维度：{vpc_ids:[], cloud_accounts:[], regions:[], resource_ids:[]}
-    -- 空 scope 不匹配任何机器（不提供全局兜底，避免误配接管全部流量）
-    scope            JSONB        NOT NULL DEFAULT '{}',
-    priority         INT          NOT NULL DEFAULT 100,  -- 多网关命中时升序取首
+    -- 本网关接管哪些 VPC（与 cmdb_resources.fields->>'vpc_id' 比对）
+    -- 空数组 = 不接管任何机器（不提供全局兜底，避免误配接管全部流量）；
+    -- 同一 VPC 只允许被一条启用网关声明（服务层写入校验）
+    vpc_ids        JSONB        NOT NULL DEFAULT '[]',
     remark           TEXT,
     is_active        BOOLEAN      NOT NULL DEFAULT TRUE,
     created_by       BIGINT       REFERENCES users(id) ON DELETE SET NULL,
@@ -402,7 +402,7 @@ CREATE TABLE job_gateways (
     updated_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_job_gateway_active ON job_gateways (is_active, priority);
+CREATE INDEX idx_job_gateway_active ON job_gateways (is_active);
 
 -- ============================================================================
 -- 任务系统 runbook 定义（前置于工单系统：tickets.runbook_id 与

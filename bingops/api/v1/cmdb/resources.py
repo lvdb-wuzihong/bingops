@@ -62,6 +62,10 @@ async def list_resources(
         default=None,
         description="按动态字段值精确检索（如 IP/连接地址/实例 ID），全字段匹配",
     ),
+    field_key: str | None = Query(
+        default=None,
+        description="配合 field_value 限定只看哪个字段（如 vpc_id）；不传则全字段匹配",
+    ),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     session: AsyncSession = Depends(get_db_session),
@@ -77,6 +81,7 @@ async def list_resources(
         region=region,
         keyword=keyword,
         field_value=field_value,
+        field_key=field_key,
         page=page,
         page_size=page_size,
     )

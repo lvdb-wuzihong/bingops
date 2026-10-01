@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import String, func, or_, select, cast
+from sqlalchemy import String, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bingops.models.cmdb.model import CmdbModel
@@ -176,6 +176,7 @@ class CmdbResourceRepo:
         region: str | None = None,
         keyword: str | None = None,
         field_value: str | None = None,
+        field_key: str | None = None,
         exact: bool = False,
         page: int = 1,
         page_size: int = 20,
@@ -211,7 +212,13 @@ class CmdbResourceRepo:
                 )
             query = query.where(kw_filter)
             count_query = count_query.where(kw_filter)
-        if field_value:
+        if field_key and field_value:
+            # 指定字段等值查（如按 vpc_id 筛主机、按环境筛机器）：比全字段模糊匹配
+            # 准确，且走 JSONB 路径等值，不会把别的字段值误当命中
+            fv_filter = CmdbResource.fields[field_key].astext == field_value
+            query = query.where(fv_filter)
+            count_query = count_query.where(fv_filter)
+        elif field_value:
             # 动态字段值精确检索（agent 排障主路径：IP/连接地址/实例 ID → 资源）。
             # JSON 序列化文本中字符串值带双引号边界，"10.0.0.5" 不会误报 "10.0.0.50"；
             # 嵌套数组/对象内的值同样命中。fields::text 无法用 GIN 索引，全表扫描——

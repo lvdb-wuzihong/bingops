@@ -378,7 +378,7 @@ async def _snapshot_targets(
         detail = ", ".join(f"{name}({status})" for name, status in not_ready)
         raise ValidationError(f"targets not in running state: {detail}")
 
-    # 中转路径：执行未指定时按机器归属自动选路（cloud_account/region/vpc）
+    # 中转路径：未指定网关时按机器所属 VPC 自动选路（v35 单一维度）
     active_gateways = await JobGatewayRepo(session).list_active()
     forced_gateway = (
         await gateway_service.gateway_payload_by_name(session, gateway_name)
@@ -396,8 +396,7 @@ async def _snapshot_targets(
             # provider_id 格式 {cluster}/{ns}/{name}（namespace 级）或 {cluster}/{name}
             parts = (res.provider_id or "").split("/")
             namespace = parts[1] if len(parts) >= 3 else None
-        host = {"resource_id": res.id, "cloud_account": res.cloud_account,
-                "region": res.region, "vpc_id": fields.get("vpc_id")}
+        host = {"vpc_id": fields.get("vpc_id")}
         gateway_payload = forced_gateway if forced_gateway is not None else (
             await gateway_service.gateway_payload_for_host(session, host, active_gateways)
         )

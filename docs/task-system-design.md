@@ -26,6 +26,7 @@
 | 15 | **凭据属于机器，不属于任务**（v31） | 不变式：**凭据的解析时机必须与“机器被确定的时机”一致**。机器在执行期选定，所以定义期无法决定用哪把钥匙——`connection.ssh_key_ref` 从必填降为兜底，新增 `credentials` 凭据目录，执行期逐台解析写入 `targets[]`。同时这也修掉了“一条 runbook 打 30 台只能共用一把钥匙”的表达空洞 |
 | 16 | **登录身份归执行，不归任务也不归钥匙**（v33→v34） | 用户环境事实：**同一把钥匙常被授权给不同主机的不同用户（跨用户是常态）**。两次修正：v33 先删掉凭据上的 `login_user`（授权不属于钥匙材料）；v34 再撤掉主机标签 `ssh_user`/`ssh_credential` 的链路地位（预配标签不是用户要的交互），登录用户/钥匙/提权全部在**执行时填写**：`ExecutionCreate.ssh_user + ssh_credential + become`。凭据目录退回纯钥匙材料（同 `vault_path` 多条目 = 多身份），解析链：执行时填写 > `runbook.connection` 存量兜底 > 400 |
 | 17 | **runbook 定义面零连接字段**（v34） | 截图里“兜底登录用户/兜底登录密钥”两个框的根因在后端契约（`RunbookCreate` 还在收 `connection`，`ExecutionCreate` 没有连接入口）。v34 撤掉创建面全部连接字段，`runbooks.connection` 列保留仅作存量兜底与提权存储；**runbook 只回答“连上之后干什么”，“怎么连、用谁连”属于执行** |
+| 18 | **网关关联维度只留 VPC**（v35） | v32 的 `scope` 四维（vpc/账号/区域/资源 ID）+ `priority` 是“没拍板就把选择权外包给表单”。VPC 与跳板天然一对一，所以 `scope` → `vpc_ids` 单列、`priority` 删除，并加“一个 VPC 只能一条启用网关”写入校验（重复 409）。附带更正一个错报：曾结论“aliyun_ecs/gcp_compute 无 vpc_id”——那是拿 `cmdb-model-presets.md` 推断的，**真实库两个机型都有**（文档不是事实源） |
 
 ---
 
@@ -355,15 +356,19 @@ step:      pending → running → success / failed / skipped / rolled_back / ro
 
 **引用反查**（`GET /api/v1/credentials/{id}/usage`）：返回被多少 runbook 引用（v34 起主机标签不再是执行链路一环，仅作历史参考）。这是密钥轮换前的必看信息；有引用时**不允许删除**，只能停用（`is_active=false`）。
 
-### 5.2 中转网关与选路（v32）
+### 5.2 中转网关与选路（v32 四维 → v35 收敛为只按 VPC）
 
-机器要怎么才被连到（直连还是经哪个 bastion）是**网络拓扑事实**，不是任务属性。让每个 runbook 写 `proxy_hop` 的后果是：漏写 → SSH 超时 → 现象像 playbook 写错。现在由机器归属在执行期算出。
+机器要怎么才被连到（直连还是经哪个 bastion）是**网络拓扑事实**，不是任务属性。让每个 runbook 写 `proxy_hop` 的后果是：漏写 → SSH 超时 → 现象像 playbook 写错。现在由机器所属 VPC 在执行期算出。
 
-**`job_gateways`**：`name` / `host` / `port` / `login_user` / `ssh_credential` / `scope` / `priority`。关键三点：
+**`job_gateways`**：`name` / `host` / `port` / `login_user` / `ssh_credential` / **`vpc_ids`** / `remark`。关键三点：
 
+- **关联维度只有 VPC 一个**：VPC 之间默认不通、同一 VPC 内的机器走同一个跳板，这是云网络的天然形状。库里 `aliyun_ecs.fields` 带 `vpc_id`+`vswitch_id`、`gcp_compute.fields` 带 `vpc_id`（已探测确认），机器选择器可直接用 `GET /cmdb/resources?model_id=…&field_key=vpc_id&field_value=vpc-2ze…` 筛
+- **一个 VPC 只允许一条启用网关接管**（写入校验，重复即 409 指名是哪条）：多网关声明同一 VPC 时“谁生效”取决于遍历顺序，而 runner 并未实现跳板故障转移——这种多义没有正当用途，所以 `priority` 一并删除
 - **`ssh_credential` 引用 `credentials.name`**（不是裸 Vault 路径）——轮换时能反查“哪些网关还在用这把钥匙”，且写入时校验存在与 kind 匹配
-- **`scope` 多维匹配**：`{vpc_ids, cloud_accounts, regions, resource_ids}`，命中任一即服务。**空 scope 不匹配任何机器**——不提供“全局兜底网关”，因为一个误配条目就会接管全部流量，那种故障比连不上更难查
-- **多命中按 `priority` 升序取首**，排序在 `pick_gateway` 内部做（不依赖调用方传已排序列表）
+
+> **v32 为何做错了**：当时“网关按什么维度关联机器”没拍板，就把 vpc/账号/区域/资源 ID 四个维度全塞进 `scope` 让运维自己填——那是**把未决策外包给表单**：四个框里多数永远不填，填了还要记“任一命中 / 空不接管 / priority 升序”三条规则。v35 收敛后表单只剩一个 VPC 多选。
+>
+> 刻意不做“空 vpc_ids = 全局兜底网关”：一个误配条目就会接管全部流量，那种故障比连不上更难查。
 
 **选路结果写入 dispatch 的 `targets[].gateway`**（`None` = 直连），**执行面可用 `gateway_name` 强制指定**（全员走该网关，未填自动选路）：
 
@@ -444,15 +449,14 @@ CREATE TABLE job_gateways (
     port             INT          NOT NULL DEFAULT 22,
     login_user       VARCHAR(64)  NOT NULL DEFAULT 'root',
     ssh_credential   VARCHAR(128),                     -- 引用 credentials.name（非裸路径）
-    scope            JSONB        NOT NULL DEFAULT '{}',  -- vpc_ids/cloud_accounts/regions/resource_ids
-    priority         INT          NOT NULL DEFAULT 100,   -- 多命中时升序取首
+    vpc_ids          JSONB        NOT NULL DEFAULT '[]',  -- 接管的 VPC（v35 唯一关联维度）
     remark           TEXT,
     is_active        BOOLEAN      NOT NULL DEFAULT TRUE,
     created_by       BIGINT       REFERENCES users(id) ON DELETE SET NULL,
     created_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     updated_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
-CREATE INDEX idx_job_gateway_active ON job_gateways (is_active, priority);
+CREATE INDEX idx_job_gateway_active ON job_gateways (is_active);
 
 -- ============================================================================
 -- Runbook（任务模板）
@@ -662,6 +666,8 @@ bingops-runner/
 | **执行弹窗连接区**（v34 新增） | 三个输入件：**登录用户**（文本框）+ **SSH 钥匙**（下拉，数据源 `GET /api/v1/credentials?kind=ssh_key`，提交 `ssh_credential=条目名`）+ **提权开关**（默认关）；另有可选 **中转网关** 下拉（`GET /api/v1/job-gateways`，留空自动选路）。目标型任务缺用户/钥匙后端 400，报错文案已可直接展示 | 不给入口用户就只能把身份写在 runbook 里，回到“定义期猜钥匙”的老路 |
 | 执行详情 | `rollback_policy` 恒 manual，自动回滚开关从 UI 移除；`auto_rollback` **已从响应体删除**，前端任何引用都是 undefined | 用户勾了“失败自动回滚”以为已生效（实际始终手动） |
 | **凭据目录页** | `GET /api/v1/credentials?kind=ssh_key` 供执行弹窗下拉；详情页挂 `GET /{id}/usage` 展示引用反查（轮换前必看）；**表单上不要出现任何明文凭据输入框**，也不要把 `vault_path` 当可编辑文本让运维背；**v33：表单没有“登录用户”字段** | 回到手打路径的老问题；误删在用的钥匙 |
+| **中转网关页** | 表单只留 6 个框：名称 / 主机 IP / 端口 / 登录用户 / 跳板凭据（下拉，可空=复用目标机钥匙）/ **接管 VPC（多选，数据源 `GET /cmdb/resources?model_code=aliyun_vpc|gcp_vpc`，不让人手打 ID）**。**区域/云账号/资源 ID 三个框与 priority 已删**（v35）；同一 VPC 被别的网关占用时后端返 409，直接展示即可 | 四个维度框三个不填，用户仍要理解“任一命中/空不接管/priority 升序”三条规则 |
+| **机器选择器按 VPC 筛**（v35 新增能力） | `GET /cmdb/resources?model_id=<aliyun_ecs>&status=running&field_key=vpc_id&field_value=vpc-2ze…`（`field_key` 不传则退回全字段匹配） | 跨 VPC 时只能逐台认，或把“哪些机器同网”记在人脑子里 |
 | ~~主机标签配置/可达性看板~~（v34 已删） | 不需要为执行预配主机标签，`GET /job-gateways/reachability` 已随主机标签链路一并删除——连通性由执行本身回答，失败事件回流执行记录 | 维护一个前提已不存在的预检页 |
 
 验证基线（后端已断言）：`POST /runbooks` 只传 `{name, exec_type, entry, params_schema, secrets_schema}` → 201；`POST /executions` 目标型任务缺 `ssh_user`/`ssh_credential` → 400 报错指名缺哪样；旧前端多传 `steps`/`auto_rollback`/`connection` 不报错但被忽略（需前端跟进移除渲染）。
@@ -683,6 +689,6 @@ bingops-runner/
 | ~~`type: python` 与 `exec_mode: local`~~（v27 已落地） | python executor 已实现（步骤级 `run_on=local`）；不再需要独立的 `exec_mode` 字段——执行位置属于步骤属性而非 runbook 属性 | 已结案 |
 | ⚠ **runner 必须按 v29/v30 新消息形态重构** | dispatch 的 `steps` 数组已改为 `step` 单对象、入口字段统一为 `entry`、新增 `run_on`/`secrets`；**v30 又去掉了 step 里的 `serial`/`batch_pause_sec`/`undo_command`**，多目标并发度改读 runner 自己的 `max_parallel_hosts`。已部署 runner 不升级则**所有新任务不可执行**（无法解析 `step`）；旧 ansible 任务回滚不受影响（历史 execution 自带 step_snapshot，多余键被忽略）。部 bingops 前先把 runner 跟齐，期间可用 `BINGOPS_JOB_STEP_TYPES=ansible` 只允许已验证类型 | v29/v30 上线 |
 | terraform executor 的 state 后端 | 本轮只注册 type 占位；启动时再定 local / http backend+OSS（先前分析已倾向 bingops 自实现 http backend，锁为协议原生） | P2 |
-| **中转网关独立表**（v32 落地，v34 简化） | `job_gateways` 表 + CRUD + 按 scope 选路写入 `targets[].gateway`，执行面可用 `gateway_name` 强制指定。**`GET /reachability` 预检视图已删**（其前提“凭据预配在主机标签上”随 v34 不成立；连通性由执行本身回答）；scope 仍支持四维任一命中，真实跨 VPC 场景验证后可收敛 | 已落地 |
+| **中转网关独立表**（v32 落地，v35 收敛） | `job_gateways` 表 + CRUD + 按 **vpc_id 单维度**选路写入 `targets[].gateway`，执行面可用 `gateway_name` 强制指定。`scope` 四维与 `priority` 已删（v35），一个 VPC 只允许一条启用网关接管（写入 409）。`GET /reachability` 预检视图已删（v34） | 已落地 |
 | **`secrets_schema` 接凭据目录**（v32 已落地） | `secrets` 的值可直填 `credentials.name`，条目可选 `kind` 限定类型（声明了就强制走目录并校验，拼错名字/拿错类型在创建执行时 400）；未声明 `kind` 时保留裸 Vault 路径透传，存量 runbook 不受影响 | 已落地 |
 | `verify_state` 回填由谁做 | 方案 C 已定（bingops 不连 Vault，避开破"Vault 唯一出口"纪律）；需 runner 实现：取 Vault 成功/失败时回写 `credentials.verify_state` + `last_verified_at` | v32（runner） |

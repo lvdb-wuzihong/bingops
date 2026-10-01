@@ -53,7 +53,7 @@ class JobGatewayRepo:
             await self.session.execute(select(func.count()).select_from(query.subquery()))
         ).scalar() or 0
         query = (
-            query.order_by(JobGateway.priority, JobGateway.name)
+            query.order_by(JobGateway.name)
             .offset((page - 1) * page_size)
             .limit(page_size)
         )
@@ -61,10 +61,10 @@ class JobGatewayRepo:
         return list(result.scalars().all()), total
 
     async def list_active(self) -> list[JobGateway]:
-        """全部启用中的网关：选路时在内存里做 scope 匹配（数量级很小）。"""
+        """全部启用中的网关：选路时在内存里按 vpc_id 比对（数量级很小）。"""
         result = await self.session.execute(
             select(JobGateway)
             .where(JobGateway.is_active.is_(True))
-            .order_by(JobGateway.priority, JobGateway.name)
+            .order_by(JobGateway.name)
         )
         return list(result.scalars().all())

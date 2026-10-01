@@ -1,4 +1,4 @@
-"""中转网关 API：网关管理 + 主机可达性视图。"""
+"""中转网关 API：网关清单与 VPC 接管关系维护。"""
 
 from __future__ import annotations
 
@@ -27,8 +27,7 @@ def _to_response(gateway: JobGateway) -> dict:
         port=gateway.port,
         login_user=gateway.login_user,
         ssh_credential=gateway.ssh_credential,
-        scope=gateway.scope or {},
-        priority=gateway.priority,
+        vpc_ids=list(gateway.vpc_ids or []),
         remark=gateway.remark,
         is_active=gateway.is_active,
         created_by=gateway.created_by,

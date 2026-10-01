@@ -7,20 +7,6 @@ from datetime import datetime
 from pydantic import BaseModel, Field
 
 
-class GatewayScope(BaseModel):
-    """选择维度：命中任一即视为该网关可服务这台机器。"""
-
-    vpc_ids: list[str] = Field(default_factory=list)
-    cloud_accounts: list[str] = Field(default_factory=list)
-    regions: list[str] = Field(default_factory=list)
-    resource_ids: list[int] = Field(default_factory=list)
-
-    def is_empty(self) -> bool:
-        return not (
-            self.vpc_ids or self.cloud_accounts or self.regions or self.resource_ids
-        )
-
-
 class GatewayCreate(BaseModel):
     name: str = Field(min_length=1, max_length=128)
     host: str = Field(min_length=1, max_length=128)
@@ -28,8 +14,9 @@ class GatewayCreate(BaseModel):
     login_user: str = Field(default="root", max_length=64)
     # 引用 credentials.name（kind=ssh_key）；留空表示网关用目标机同一把钥匙
     ssh_credential: str | None = Field(default=None, max_length=128)
-    scope: GatewayScope = Field(default_factory=GatewayScope)
-    priority: int = Field(default=100, ge=0, le=1000)
+    # 本网关接管哪些 VPC（v35 唯一关联维度）：前端应下拉选 CMDB 里的
+    # aliyun_vpc / gcp_vpc，不让人手打 VPC ID
+    vpc_ids: list[str] = Field(default_factory=list)
     remark: str | None = None
 
 
@@ -39,8 +26,7 @@ class GatewayUpdate(BaseModel):
     port: int | None = Field(default=None, ge=1, le=65535)
     login_user: str | None = Field(default=None, max_length=64)
     ssh_credential: str | None = Field(default=None, max_length=128)
-    scope: GatewayScope | None = None
-    priority: int | None = Field(default=None, ge=0, le=1000)
+    vpc_ids: list[str] | None = None
     remark: str | None = None
     is_active: bool | None = None
 
@@ -52,8 +38,7 @@ class GatewayResponse(BaseModel):
     port: int
     login_user: str
     ssh_credential: str | None
-    scope: dict
-    priority: int
+    vpc_ids: list
     remark: str | None
     is_active: bool
     created_by: int | None
