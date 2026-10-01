@@ -103,7 +103,8 @@ class ExecutionCreate(BaseModel):
     secrets: dict = Field(default_factory=dict)
     # 目标机：v36 起必须每次显式传（runbook 已无默认绑定），无 target 型步骤的任务可空
     target_resource_ids: list[int] | None = None
-    # 仓库版本：显式传 > 平台配置 BINGOPS_JOB_DEFAULT_CODE_REF > 400
+    # 仓库版本：ansible/script/python 型必填（显式传 > 平台配置 > 400）；
+    # shell 的内联命令不依赖仓库代码，可留空（v38）
     code_ref: str | None = Field(default=None, max_length=128)
     ticket_id: int | None = None  # P3：高危 runbook 必须携带已审批通过的工单
     # ── 连接三件套（v34：执行时填写，不进 runbook 定义）──
@@ -201,6 +202,7 @@ class JobDispatchMessage(BaseModel):
     message_id: str
     # v37：command 字段已删除——取消（cancel）不下发，消息只剩“执行”一种语义
     execution_id: int
+    # git tag 快照；**空串 = 本执行不依赖仓库代码**（shell 内联命令），runner 据此跳过 clone
     code_ref: str
     params: dict = Field(default_factory=dict)
     # 只带钥匙名，真钥匙由 runner 现场去 Vault 取（v27：与 params 分开的显式密钥集）

@@ -81,6 +81,17 @@ RUN_ON_VALUES = ("target", "local")
 # 单步模型的固定步骤 key（job_steps 行标识；v37 起一步一行，无第二次尝试）
 SINGLE_STEP_KEY = "main"
 
+# 入口指向仓库文件的执行类型：这些类型的 code_ref 必须固定版本。
+# shell 的 entry 是内联命令，runner 不 clone 任何代码——给它一个 git tag 没有
+# 意义（v38：修 v36 的一刀切，当时“跑一句 df -h”会被 code_ref 必填 400 卡住）
+TYPES_WITH_REPO_CODE = ("ansible", "script", "python", "terraform")
+
+
+def requires_code_ref(exec_type: str) -> bool:
+    """该执行类型是否依赖仓库代码（决定 code_ref 是否必填）。"""
+    return exec_type in TYPES_WITH_REPO_CODE
+
+
 # runbooks 的步骤列（PUT 部分更新时与存量列合并后整体校验）
 _STEP_COLUMNS = (
     "exec_type", "entry", "run_on", "timeout_sec",
@@ -523,13 +534,15 @@ async def create_execution(
                 f"(status={exe.status})",
             )
 
-    # 版本回落链（v36）：显式传 > 平台配置；全空即拒绝。不在 runbook 上缓存
-    # 默认版本——不给“同一执行对应不同代码”留静默路径，也不让旧 tag 静默生效
-    code_ref = payload.code_ref or settings.job_default_code_ref
-    if not code_ref:
+    # 版本要求按类型判定（v38）：入口在仓库里的类型必须固定版本（不给“默认 main”、
+    # 也不在 runbook 上缓存）；shell 的内联命令不 clone 代码，code_ref 留空即合法，
+    # runner 据此跳过仓库拉取
+    code_ref = (payload.code_ref or settings.job_default_code_ref or "").strip()
+    if requires_code_ref(runbook.exec_type) and not code_ref:
         raise ValidationError(
-            "code_ref is required: 未显式传仓库版本，且平台未配置 "
-            "BINGOPS_JOB_DEFAULT_CODE_REF（前端可用「复用上次的版本」带入）"
+            f"code_ref is required for exec_type={runbook.exec_type}: 入口指向仓库文件，"
+            "必须固定 git 版本；未显式传且平台未配置 BINGOPS_JOB_DEFAULT_CODE_REF"
+            "（前端可用「复用上次的版本」带入）"
         )
 
     execution = JobExecution(

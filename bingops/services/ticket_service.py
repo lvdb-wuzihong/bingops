@@ -369,9 +369,6 @@ async def dispatch_ticket_job(
         raise ValidationError(
             f"Ticket must be open to dispatch (status={ticket.status})",
         )
-    if not code_ref or not code_ref.strip():
-        raise ValidationError("code_ref (git tag) is required to dispatch")
-
     latest = await JobExecutionRepo(session).get_latest_by_ticket(ticket_id)
     # 活跃态集合复用仓储层定义（v37 起无 rolling_back），避免两处字面量漂移
     if latest is not None and latest.status in ACTIVE_EXECUTION_STATUSES:
@@ -385,6 +382,11 @@ async def dispatch_ticket_job(
         raise NotFoundError("Runbook", str(runbook_id))
     if not runbook.is_active:
         raise ConflictError("Runbook", f"runbook {runbook_id} is deactivated")
+    # v38：版本要求按执行类型判定——shell 的内联命令不依赖仓库代码，可不传
+    if job_service.requires_code_ref(runbook.exec_type) and not (code_ref or "").strip():
+        raise ValidationError(
+            f"code_ref (git tag) is required to dispatch exec_type={runbook.exec_type}"
+        )
     params = job_service._validate_params(runbook.params_schema, params)
 
     targets = list(target_resource_ids) if target_resource_ids else (
