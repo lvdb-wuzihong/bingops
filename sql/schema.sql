@@ -357,7 +357,8 @@ CREATE TABLE credentials (
     id               BIGSERIAL PRIMARY KEY,
     name             VARCHAR(128) NOT NULL UNIQUE,      -- 引用键（全局唯一：标签里是裸字符串）
     kind             VARCHAR(32)  NOT NULL,             -- ssh_key|cloud_ak|db_password|api_token|kubeconfig
-    login_user       VARCHAR(64),                       -- 该钥匙对应的系统用户（选钥匙顺带定身份）
+    -- v33 已删除 login_user：跨用户是常态（同一把钥匙授权给不同主机的不同用户），
+    -- 登录身份属于主机（标签 ssh_user），不属于钥匙材料
     vault_path       VARCHAR(512) NOT NULL,             -- 只存路径，绝不存值
     vault_field      VARCHAR(128),                      -- KV 字段名（path#field 拆分存储）
     cloud_account    VARCHAR(128),                      -- 适用范围，NULL = 不限

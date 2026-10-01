@@ -71,6 +71,8 @@ class HostReachability(BaseModel):
     cloud_account: str | None = None
     region: str | None = None
     vpc_id: str | None = None
+    # 登录身份（v33：属于主机标签，跨用户环境同一把钥匙可对应多个用户）
+    login_user: str | None = None
     # 凭据是否解析得到（v31 目录 + 主机标签）
     credential: str | None = None
     credential_ok: bool = False

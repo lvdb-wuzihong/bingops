@@ -24,6 +24,7 @@
 | 13 | **扁平单步引擎**（v28→v29） | **一个 runbook = 一个步骤**，且 `steps` 概念彻底消失：API 入参、`runbooks.steps` 列、`job_executions.steps_snapshot`、dispatch 的 steps 数组全部删除，改为步骤列 + 单个 `step_snapshot` 对象 + 消息里的 `step` 对象。**属破坏性变更，runner 需按本文档同步重构**。你们仓库已证明该形态正确：整条流程写在一个 playbook 里，role 才是复杂度容身处 |
 | 14 | **字段按“该问谁”分类**（v30） | 任务属性（跑什么/在哪跑）才进表单；基础设施属性（登录凭据/超时/版本/并发度）配一次即可；记账属性（key/name/run_on）全由后端生成。据此删掉 `undo_command`（回滚统一走 `BINGOPS_ACTION=undo` 约定）与 `serial`/`batch_pause_sec`（并发度下沉到 runner 配置）——**三个都是“每次都不填但每次都看得到”的噪声字段** |
 | 15 | **凭据属于机器，不属于任务**（v31） | 不变式：**凭据的解析时机必须与“机器被确定的时机”一致**。机器在执行期选定，所以定义期无法决定用哪把钥匙——`connection.ssh_key_ref` 从必填降为兜底，新增 `credentials` 凭据目录，执行期逐台解析写入 `targets[]`。同时这也修掉了“一条 runbook 打 30 台只能共用一把钥匙”的表达空洞 |
+| 16 | **登录身份归主机**（v33） | 用户环境事实：**同一把钥匙常被授权给不同主机的不同用户**。v31 把 `login_user` 放在凭据上等于把「授权」硬编码进「钥匙材料」——轮换时要改 N 行、目录里全是成对的别名条目。改为：凭据目录退回纯钥匙材料（删列），登录身份归主机标签 `ssh_user`；解析链：任务声明 > 主机标签 > 400 指名主机。同钥匙多身份的登记姿势 = 同 `vault_path` 多条目 |
 
 ---
 
@@ -332,22 +333,27 @@ step:      pending → running → success / failed / skipped / rolled_back / ro
 
 **凭据目录 `credentials`**：把“哪把钥匙、属于谁、能干什么”收敛成可下拉选择的实体。只存 Vault 引用与元数据，**明文禁入**（入口有 `-----BEGIN` / `PRIVATE KEY` 等特征串拦截）；`name` 全局唯一（因为引用点是裸字符串）；`kind ∈ ssh_key|cloud_ak|db_password|api_token|kubeconfig`。
 
-**主机侧引用**：主机资源标签 `ssh_credential = credentials.name`（复用 `cmdb_resource_tags`，零新表）。`login_user` 绑在凭据上，选钥匙顺带定身份。
+**主机侧引用**：主机打两个标签——`ssh_credential = credentials.name`（钥匙材料）、`ssh_user = 登录用户`（**v33：身份归主机**，同一把钥匙授权给不同主机的不同用户是常态）。复用 `cmdb_resource_tags`，零新表。
 
-**解析优先级**（`job_service._resolve_target_credentials`，执行创建时逐台计算）：
+**解析优先级**（`job_service._resolve_target_access` → `credential_service.resolve_host_credentials`，执行创建时逐台计算）：
 
-```
-主机标签 ssh_credential
-  → 适用范围（cloud_account + region）唯一命中
-  → 同 kind 的 is_default 条目
-  → runbook.connection.ssh_key_ref（存量兜底，行为不变）
-  → 都没有：400，报错指名是哪台机器缺什么
+```text
+登录身份：connection.ssh_user（任务声明的身份要求）
+          > 主机标签 ssh_user
+          > 都没有：400，报错指名是哪台机器缺什么
+
+钥匙材料：主机标签 ssh_credential
+          → 适用范围（cloud_account + region）唯一命中
+          → 同 kind 的 is_default 条目
+          → connection.ssh_key_ref（存量兜底）
+          → 都没有：400（与身份缺口合并为同一条报错）
 ```
 
 两条硬规则：
 
 - **多命中不猜**：候选 > 1 且无默认项时直接 400 列出候选名。猜错的后果是用错账号连上生产机，比报错严重得多
-- **登录用户优先级**：`connection.ssh_user`（任务声明的身份要求）> 凭据自带 `login_user`。刻意**不设平台级默认用户**——默认 `root` 这种约定会把漏配置变成高危行为
+- **登录用户优先级**：`connection.ssh_user`（任务声明的身份要求）> 主机标签 `ssh_user`。刻意**不设平台级默认用户**——默认 `root` 这种约定会把漏配置变成高危行为
+- **多命中/双缺口合并报**：候选 > 1 且无默认、或身份缺失，两类缺口合并进同一条 400（`resolve_host_credentials` 收集全部 errors 再返回），避免“修一个又冒一个”的排查体验
 
 **为什么不搞 Vault 路径白名单**：能读哪些路径由 runner AppRole 的 Vault policy 决定（单一权限事实源），bingops 不重复实现一套权限。`verify_state` / `last_verified_at` 由 **runner 回填**，bingops 全程不连 Vault（方案 C：保住“Vault 唯一出口在 runner”这条纪律）。
 
@@ -422,7 +428,7 @@ CREATE TABLE credentials (
     id               BIGSERIAL PRIMARY KEY,
     name             VARCHAR(128) NOT NULL UNIQUE,  -- 引用键（主机标签填这个）
     kind             VARCHAR(32)  NOT NULL,         -- ssh_key|cloud_ak|db_password|api_token|kubeconfig
-    login_user       VARCHAR(64),                   -- 该钥匙对应的系统用户
+    -- v33 已删除 login_user：跨用户是常态，登录身份归主机标签 ssh_user
     vault_path       VARCHAR(512) NOT NULL,         -- 只存路径，绝不存值
     vault_field      VARCHAR(128),                  -- path#field 拆分后的字段名
     cloud_account    VARCHAR(128),                  -- 适用范围，NULL = 不限
@@ -659,8 +665,8 @@ bingops-runner/
 | 编辑回显 | 直读 runbook 响应的**步骤列**（`exec_type`/`entry`/`run_on`/`timeout_sec`/`rollbackable`…，v29 已无 steps 数组；`run_on` 已显式回写） | 自己再推一遍缺省值，与后端推断不一致 |
 | 新增执行 | `target_resource_ids` 与 `code_ref` **去掉必填限制**：runbook 响应已带 `default_target_resource_ids`/`default_code_ref`，非空则预填可留空；无目标任务（entry 型）不渲染机器选择器 | 卡住提交，或强迫用户每次背 CMDB 数 ID 与 git tag |
 | 执行详情 | `rollback_policy` 恒 manual，自动回滚开关从 UI 移除；`auto_rollback` **已从响应体删除**，前端任何引用都是 undefined | 用户勾了“失败自动回滚”以为已生效（实际始终手动） |
-| **凭据目录页**（新增） | `GET /api/v1/credentials?kind=ssh_key` 作为下拉数据源；详情页挂 `GET /{id}/usage` 展示引用反查（轮换前必看）；**表单上不要出现任何明文凭据输入框**，也不要把 `vault_path` 当可编辑文本让运维背 | 回到手打路径的老问题；误删在用的钥匙 |
-| 执行弹窗回显 | 选完目标机后，从响应 `target_resources[].ssh_user/ssh_key_ref` **只读展示**“将以 ops@10.0.0.5 访问，密钥 ssh/keys/ops-vpc-a”，不做下拉选择（多命中已在后端 400，不会到这一步） | 用户无法确认“到底会用哪把钥匙”，出错时只能猜 |
+| **凭据目录页**（新增） | `GET /api/v1/credentials?kind=ssh_key` 作为下拉数据源；详情页挂 `GET /{id}/usage` 展示引用反查（轮换前必看）；**表单上不要出现任何明文凭据输入框**，也不要把 `vault_path` 当可编辑文本让运维背；**v33：表单没有“登录用户”字段**（登录身份归主机标签 `ssh_user`） | 回到手打路径的老问题；误删在用的钥匙 |
+| 执行弹窗回显 | 选完目标机后，从响应 `target_resources[].ssh_user/ssh_key_ref/gateway` **只读展示**“将以 ops@10.0.0.5 经 gw-nocid 访问，密钥 ssh/keys/ops-vpc-a”，不做下拉选择（多命中已在后端 400，不会到这一步） | 用户无法确认“到底会用哪把钥匙、走哪条路”，出错时只能猜 |
 
 验证基线（后端已断言）：`POST /runbooks` 只传 `{name, exec_type, entry, params_schema, secrets_schema}` → 201 且步骤列已按类型推断（`run_on=local` 时不要求 `ssh_key_ref`）；旧前端多传 `steps`/`auto_rollback` 不报错但被忽略（需前端跟进移除渲染）。
 

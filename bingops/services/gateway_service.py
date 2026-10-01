@@ -232,6 +232,10 @@ async def reachability(
             missing.append(
                 "ssh_credential：主机未打凭据标签，且目录中无唯一匹配的默认凭据"
             )
+        login_user = cred.login_user if cred else None
+        if not login_user:
+            # 跨用户是常态：登录身份属于主机，没有它任务无法指定“以谁的身份连”
+            missing.append("ssh_user：主机未打登录用户标签")
         result.append({
             "resource_id": host["resource_id"],
             "name": host["name"],
@@ -240,6 +244,7 @@ async def reachability(
             "cloud_account": host["cloud_account"],
             "region": host["region"],
             "vpc_id": host["vpc_id"],
+            "login_user": login_user,
             "credential": cred.credential_name if cred else None,
             "credential_ok": bool(cred and not cred.error and cred.vault_ref),
             "gateway": gateway.name if gateway else None,

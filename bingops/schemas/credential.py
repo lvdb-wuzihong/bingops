@@ -13,7 +13,8 @@ class CredentialCreate(BaseModel):
     # 只存引用：Vault 路径（+ 可选字段名），任何字段都不得出现明文凭据值
     vault_path: str = Field(min_length=1, max_length=512)
     vault_field: str | None = Field(default=None, max_length=128)
-    login_user: str | None = Field(default=None, max_length=64)
+    # v33：login_user 已删除——同一把钥匙常被授权给不同主机的不同用户，
+    # 登录身份属于主机（标签 ssh_user），不属于钥匙材料
     cloud_account: str | None = Field(default=None, max_length=128)
     region: str | None = Field(default=None, max_length=64)
     is_default: bool = False
@@ -25,7 +26,6 @@ class CredentialUpdate(BaseModel):
     kind: str | None = None
     vault_path: str | None = Field(default=None, min_length=1, max_length=512)
     vault_field: str | None = Field(default=None, max_length=128)
-    login_user: str | None = Field(default=None, max_length=64)
     cloud_account: str | None = Field(default=None, max_length=128)
     region: str | None = Field(default=None, max_length=64)
     is_default: bool | None = None
@@ -37,7 +37,6 @@ class CredentialResponse(BaseModel):
     id: int
     name: str
     kind: str
-    login_user: str | None
     vault_path: str
     vault_field: str | None
     cloud_account: str | None

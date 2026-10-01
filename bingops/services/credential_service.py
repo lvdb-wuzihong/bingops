@@ -18,6 +18,7 @@ from bingops.models.cmdb.tag import CmdbResourceTag
 from bingops.models.credential import (
     CREDENTIAL_KINDS,
     HOST_CREDENTIAL_TAG_KEY,
+    HOST_USER_TAG_KEY,
     Credential,
 )
 from bingops.models.jobs import Runbook
@@ -72,7 +73,6 @@ async def create_credential(
     _validate(payload.kind, {
         "vault_path": payload.vault_path,
         "vault_field": payload.vault_field,
-        "login_user": payload.login_user,
         "remark": payload.remark,
     })
     repo = CredentialRepo(session)
@@ -82,7 +82,6 @@ async def create_credential(
     credential = Credential(
         name=payload.name,
         kind=payload.kind,
-        login_user=payload.login_user,
         vault_path=payload.vault_path,
         vault_field=payload.vault_field,
         cloud_account=payload.cloud_account,
@@ -123,7 +122,7 @@ async def update_credential(
     data = payload.model_dump(exclude_unset=True)
     _validate(data.get("kind", credential.kind), {
         name: data.get(name)
-        for name in ("vault_path", "vault_field", "login_user", "remark")
+        for name in ("vault_path", "vault_field", "remark")
         if name in data
     })
     new_name = data.get("name")
@@ -233,12 +232,17 @@ async def resolve_host_credentials(
     hosts: list[tuple[int, str, str | None, str | None]],
     connection: dict | None = None,
 ) -> dict[int, ResolvedCredential]:
-    """逐台解析 (登录用户, Vault 凭据引用)。
+    """逐台解析 (登录用户, Vault 凭据引用)（v33：身份与钥匙都归主机）。
 
-    优先级：主机标签 ssh_credential → 适用范围唯一命中 → 同 kind 的 is_default
-    → connection.ssh_key_ref（存量兜底，行为不变）。登录用户：
-    connection.ssh_user（任务声明的身份要求）> 凭据自带 login_user；
-    刻意不设平台级默认用户——默认 root 会把漏配置变成高危行为。
+    登录身份：connection.ssh_user（任务声明的身份要求，如高危任务强制低权）
+    > 主机标签 ssh_user。**跨用户是常态**——同一把钥匙常被授权给不同主机的
+    不同用户，所以“用哪个用户连”属于主机，不属于钥匙；刻意不设平台级默认。
+
+    钥匙材料：主机标签 ssh_credential → 适用范围唯一命中 → 同 kind 的
+    is_default → connection.ssh_key_ref（存量兜底，行为不变）。
+
+    多命中不猜；两类缺口（缺身份 / 缺钥匙）合并进同一条报错，
+    由调用方决定报 400（创建执行）还是收集（可达视图）。
 
     hosts 元素 = (resource_id, name, cloud_account, region)。
     """
@@ -246,55 +250,76 @@ async def resolve_host_credentials(
     fallback_ref = (connection or {}).get("ssh_key_ref")
     fallback_user = (connection or {}).get("ssh_user")
 
-    tagged: dict[int, str] = {}
+    tagged: dict[int, dict[str, str]] = {}
     ids = [h[0] for h in hosts]
     if ids:
         tag_rows = await session.execute(
-            select(CmdbResourceTag.resource_id, CmdbResourceTag.tag_value).where(
+            select(
+                CmdbResourceTag.resource_id,
+                CmdbResourceTag.tag_key,
+                CmdbResourceTag.tag_value,
+            ).where(
                 CmdbResourceTag.resource_id.in_(ids),
-                CmdbResourceTag.tag_key == HOST_CREDENTIAL_TAG_KEY,
+                CmdbResourceTag.tag_key.in_(
+                    (HOST_CREDENTIAL_TAG_KEY, HOST_USER_TAG_KEY)
+                ),
             )
         )
-        tagged = dict(tag_rows.all())
+        for rid, key, value in tag_rows.all():
+            tagged.setdefault(rid, {})[key] = value
 
     out: dict[int, ResolvedCredential] = {}
     for rid, host_name, cloud_account, region in hosts:
+        tags = tagged.get(rid, {})
+        errors: list[str] = []
+
+        # ① 登录身份：任务声明 > 主机标签。无平台级默认（默认 root 会把
+        # 漏配置变成高危行为），缺失就是缺口，由可达视图暴露
+        login_user = fallback_user or tags.get(HOST_USER_TAG_KEY)
+        if not login_user:
+            errors.append(
+                "lacks ssh_user tag (跨用户环境下登录身份属于主机，"
+                "请给主机打 ssh_user 标签)"
+            )
+
+        # ② 钥匙材料：主机标签 → 范围唯一命中 → is_default → connection 兜底。
+        #    多命中/零命中只报一个原因，不与「has no credential」自相矛盾
         credential: Credential | None = None
-        tagged_name = tagged.get(rid)
+        tagged_name = tags.get(HOST_CREDENTIAL_TAG_KEY)
         if tagged_name:
             credential = await repo.get_by_name(tagged_name)
             if credential is None:
-                out[rid] = ResolvedCredential(error=(
-                    f"host '{host_name}' tag ssh_credential='{tagged_name}' "
-                    "not found in credential catalog"
-                ))
-                continue
+                errors.append(
+                    f"tag ssh_credential='{tagged_name}' not found in credential catalog"
+                )
         else:
             candidates = await repo.resolve("ssh_key", cloud_account, region)
-            if len(candidates) > 1:
-                defaults = [c for c in candidates if c.is_default]
-                if len(defaults) == 1:
-                    candidates = defaults
-                else:
-                    out[rid] = ResolvedCredential(error=(
-                        f"host '{host_name}' matches multiple ssh credentials "
-                        f"{[c.name for c in candidates]}; "
-                        "set tag ssh_credential to disambiguate"
-                    ))
-                    continue
-            credential = candidates[0] if candidates else await repo.get_default("ssh_key")
+            defaults = [c for c in candidates if c.is_default]
+            if len(candidates) == 1:
+                credential = candidates[0]
+            elif len(defaults) == 1:
+                credential = defaults[0]
+            elif len(candidates) > 1:
+                errors.append(
+                    f"matches multiple ssh credentials "
+                    f"{[c.name for c in candidates]}; "
+                    "set tag ssh_credential to disambiguate"
+                )
+            elif not fallback_ref:
+                errors.append(
+                    "has no ssh credential: set tag ssh_credential on the host, "
+                    "or register a default credential in the catalog"
+                )
 
-        if credential is not None:
+        if errors:
             out[rid] = ResolvedCredential(
-                login_user=fallback_user or credential.login_user,
-                vault_ref=vault_ref_of(credential),
-                credential_name=credential.name,
+                error=f"host '{host_name}': " + "; ".join(errors)
             )
-        elif fallback_ref:
-            out[rid] = ResolvedCredential(login_user=fallback_user, vault_ref=fallback_ref)
-        else:
-            out[rid] = ResolvedCredential(error=(
-                f"host '{host_name}' has no ssh credential: set tag ssh_credential "
-                "on the host, or register a default credential in the catalog"
-            ))
+            continue
+
+        out[rid] = ResolvedCredential(
+            login_user=login_user,
+            vault_ref=vault_ref_of(credential) if credential else fallback_ref,
+            credential_name=credential.name if credential else None,
+        )
     return out

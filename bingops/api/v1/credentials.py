@@ -27,7 +27,6 @@ def _to_response(credential: Credential) -> dict:
         id=credential.id,
         name=credential.name,
         kind=credential.kind,
-        login_user=credential.login_user,
         vault_path=credential.vault_path,
         vault_field=credential.vault_field,
         cloud_account=credential.cloud_account,

@@ -22,9 +22,11 @@ CREDENTIAL_KINDS = ("ssh_key", "cloud_ak", "db_password", "api_token", "kubeconf
 # Vault 可达性探测状态：由 runner 回填（bingops 不直连 Vault，见设计文档 §5）
 VERIFY_STATES = ("unknown", "ok", "failed")
 
-# 主机标签里引用凭据的 tag_key（tag_value = credentials.name）：
-# 任务不再携带 SSH 凭据，机器在哪、钥匙在哪都由这里回答
+# 主机侧引用的 tag_key（凭据引用值 = credentials.name，登录用户 = 系统用户名）：
+# 任务不再携带 SSH 凭据；**跨用户环境下登录身份属于主机**——同一把钥匙
+# 常被授权给不同主机上的不同用户，“用哪个用户连”也由主机回答
 HOST_CREDENTIAL_TAG_KEY = "ssh_credential"
+HOST_USER_TAG_KEY = "ssh_user"
 
 
 class Credential(BaseMixin, Base):
@@ -42,8 +44,8 @@ class Credential(BaseMixin, Base):
     # 全局唯一：主机标签等引用点是裸字符串，重名会产生歧义
     name: Mapped[str] = mapped_column(String(128), unique=True, nullable=False)
     kind: Mapped[str] = mapped_column(String(32), nullable=False)
-    # 该凭据对应的系统用户（ssh_key 用）；选钥匙顺带定身份，任务不必再填一遍
-    login_user: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # v33 删除 login_user：同一把钥匙常被授权给不同主机上的不同用户（跨用户是常态），
+    # “用哪个用户连”属于主机（标签 ssh_user），不属于钥匙材料
     vault_path: Mapped[str] = mapped_column(String(512), nullable=False)
     # KV v2 的字段名（引用形如 path#field 时拆出来存这列）
     vault_field: Mapped[str | None] = mapped_column(String(128), nullable=True)
