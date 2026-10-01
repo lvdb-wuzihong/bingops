@@ -62,10 +62,8 @@ DEFAULT_TARGET_MODELS: list[str] = ["aliyun_ecs", "gcp_compute"]
 # 唯一步骤的缺省超时（秒）
 DEFAULT_STEP_TIMEOUT_SEC = 600
 
-# 可平铺传入的 connection 糖字段（归一进 connection JSONB，不入表结构）
-_SUGAR_CONNECTION_FIELDS = (
-    "ssh_user", "ssh_key_ref", "become", "become_method", "become_user",
-)
+# 可平铺传入的 connection 糖字段（v34 已从创建面撤除；存量 runbook 的 connection
+# 列保留为兜底与提权存储，仅读取不再写入）
 
 # 执行类型 → 默认执行位置（v29 扁平单步）：ansible/shell 跑在目标机上，
 # python/terraform 在 runner 本机
@@ -95,9 +93,7 @@ _DEFINITION_FIELDS = (
 # 报错即文档：契约不满足时把最小可用示例直接回给作者
 MINIMAL_RUNBOOK_HINT = (
     '{"name": "...", "exec_type": "python", "entry": "scripts/xxx.py",'
-    ' "params_schema": {}, "secrets_schema": {"DB_PASSWORD": {"required": true}},'
-    ' "default_target_resource_ids": [1], "ssh_user": "root",'
-    ' "ssh_key_ref": "<Vault 键名>"}'
+    ' "params_schema": {}, "secrets_schema": {"DB_PASSWORD": {"required": true}}}'
 )
 
 ROLLBACKABLE_SOURCE_STATUSES = ("failed",)
@@ -165,26 +161,6 @@ def step_of(runbook: Runbook) -> dict:
         "timeout_sec": runbook.timeout_sec,
         "rollbackable": runbook.rollbackable,
     }
-
-
-def _merge_connection(base: dict | None, sugar: dict) -> dict:
-    """connection 平铺糖字段并入既有 JSONB 结构（糖字段优先于嵌套同名键）。"""
-    merged = dict(base or {})
-    for field in _SUGAR_CONNECTION_FIELDS:
-        if sugar.get(field) is not None:
-            merged[field] = sugar[field]
-    return merged
-
-
-def _validate_connection(connection: dict) -> None:
-    """connection 契约校验（v31 放宽）：SSH 凭据不再要求写在 runbook 上。
-
-    凭据由目标机解析（主机标签 → 凭据目录默认 → 此处兜底），所以这里只校
-    “填了就必须是非空字符串”，避免空串下发给 runner。真钥匙始终在 Vault。
-    """
-    ref = (connection or {}).get("ssh_key_ref")
-    if ref is not None and (not isinstance(ref, str) or not ref.strip()):
-        raise ValidationError("connection.ssh_key_ref must be a non-empty Vault key name")
 
 
 def _validate_secrets_schema(secrets_schema: dict) -> None:
@@ -306,18 +282,14 @@ async def create_runbook(session: AsyncSession, payload: RunbookCreate, user: Us
         payload.exec_type, payload.entry, run_on=payload.run_on,
         timeout_sec=payload.timeout_sec, rollbackable=payload.rollbackable,
     )
-    connection = _merge_connection(
-        payload.connection, {f: getattr(payload, f) for f in _SUGAR_CONNECTION_FIELDS},
-    )
-    # v31：SSH 凭据不再必填——执行时按目标机解析，connection 仅作兜底
-    _validate_connection(connection)
+    # v34：连接三件套已撤到执行面——runbook 不再持有任何连接信息，
+    # 登录用户/密钥/提权全部在执行时提供
     runbook = Runbook(
         name=payload.name,
         category=payload.category,
         description=payload.description,
         params_schema=payload.params_schema,
         secrets_schema=payload.secrets_schema,
-        connection=connection,
         target_models=payload.target_models or list(DEFAULT_TARGET_MODELS),
         default_target_resource_ids=list(payload.default_target_resource_ids or []),
         default_code_ref=payload.default_code_ref,
@@ -348,16 +320,8 @@ async def update_runbook(session: AsyncSession, runbook_id: int, payload: Runboo
     if any(k in data for k in _STEP_COLUMNS):
         merged = {k: data.get(k, getattr(runbook, k)) for k in _STEP_COLUMNS}
         data.update(_build_step(**merged))
-    # 平铺 connection 键写进 connection JSONB 后从 data 剔除，
-    # 否则下方 setattr 会往模型上挂不属于表结构的属性
-    conn_sugar = {k: data[k] for k in _SUGAR_CONNECTION_FIELDS if k in data}
-    if "connection" in data or conn_sugar:
-        base = data["connection"] if "connection" in data else (runbook.connection or {})
-        data["connection"] = _merge_connection(base, conn_sugar)
-        for key in conn_sugar:
-            data.pop(key, None)
-    # v31：凭据已不从属任务，这里只校验“填了就得合法”
-    _validate_connection(data.get("connection", runbook.connection))
+    # v34：连接三件套已撤到执行面——runbook 编辑不再接受任何连接字段；
+    # 存量行的 connection 列原样保留（执行时仍作兜底）
     # 定义类字段变更 → version +1（execution 快照语义）
     definition_changed = any(k in data for k in _DEFINITION_FIELDS)
     for key, value in data.items():
@@ -385,50 +349,14 @@ async def delete_runbook(session: AsyncSession, runbook_id: int) -> None:
 # ── 执行编排 ──────────────────────────────────────────────────────────────────
 
 
-async def _resolve_target_access(
-    session: AsyncSession,
-    rows: dict[int, tuple[CmdbResource, str]],
-    connection: dict | None,
-) -> dict[int, tuple[str | None, str | None, dict | None]]:
-    """逐台目标机解析 (登录用户, 凭据引用, 中转网关)。
-
-    凭据链由 credential_service 统一提供（可达视图复用同一实现，避免两处漂移）；
-    本函数负责把“解析不出”升级为 400——创建执行时必须失败在执行前，
-    而不是下发后让 runner 报 SSH 超时。
-    网关由 gateway_service 按机器归属算出，None = 直连。
-    """
-    hosts = [
-        (rid, res.name, res.cloud_account, res.region)
-        for rid, (res, _code) in rows.items()
-    ]
-    creds = await credential_service.resolve_host_credentials(session, hosts, connection)
-    active_gateways = await JobGatewayRepo(session).list_active()
-
-    out: dict[int, tuple[str | None, str | None, dict | None]] = {}
-    for rid, (res, _code) in rows.items():
-        cred = creds[rid]
-        if cred.error or not cred.vault_ref:
-            raise ValidationError(cred.error or f"host '{res.name}' ssh credential unresolved")
-        fields = res.fields or {}
-        host = {
-            "resource_id": res.id,
-            "cloud_account": res.cloud_account,
-            "region": res.region,
-            "vpc_id": fields.get("vpc_id"),
-        }
-        gateway_payload = None
-        if gateway_service.pick_gateway(active_gateways, host) is not None:
-            gateway_payload = await gateway_service.gateway_payload_for_host(
-                session, host, active_gateways
-            )
-        out[rid] = (cred.login_user, cred.vault_ref, gateway_payload)
-    return out
-
-
 async def _snapshot_targets(
-    session: AsyncSession, resource_ids: list[int], connection: dict | None = None,
+    session: AsyncSession, resource_ids: list[int], gateway_name: str | None = None,
 ) -> list[ExecutionTarget]:
-    """从 CMDB 生成目标快照，并逐台解析访问凭据（只带 Vault 引用，不带明文）。"""
+    """从 CMDB 生成目标快照（纯坐标 + 中转路径）。
+
+    登录用户与凭据不属于目标——它们在执行面解析（v34），由本函数的调用方
+    统一填进 targets，保证同一执行内身份一致。
+    """
     result = await session.execute(
         select(CmdbResource, CmdbModel.code)
         .join(CmdbModel, CmdbResource.model_id == CmdbModel.id)
@@ -450,8 +378,12 @@ async def _snapshot_targets(
         detail = ", ".join(f"{name}({status})" for name, status in not_ready)
         raise ValidationError(f"targets not in running state: {detail}")
 
-    # v31：逐台解析登录用户与凭据；v32：同时算出中转路径（钥匙跟机器走）
-    access = await _resolve_target_access(session, rows, connection)
+    # 中转路径：执行未指定时按机器归属自动选路（cloud_account/region/vpc）
+    active_gateways = await JobGatewayRepo(session).list_active()
+    forced_gateway = (
+        await gateway_service.gateway_payload_by_name(session, gateway_name)
+        if gateway_name else None
+    )
 
     targets = []
     for rid in resource_ids:
@@ -464,12 +396,16 @@ async def _snapshot_targets(
             # provider_id 格式 {cluster}/{ns}/{name}（namespace 级）或 {cluster}/{name}
             parts = (res.provider_id or "").split("/")
             namespace = parts[1] if len(parts) >= 3 else None
-        ssh_user, ssh_key_ref, gateway = access[rid]
+        host = {"resource_id": res.id, "cloud_account": res.cloud_account,
+                "region": res.region, "vpc_id": fields.get("vpc_id")}
+        gateway_payload = forced_gateway if forced_gateway is not None else (
+            await gateway_service.gateway_payload_for_host(session, host, active_gateways)
+        )
         targets.append(ExecutionTarget(
             resource_id=res.id, name=res.name, ip=ip, region=res.region, model_code=code,
             cluster_id=res.cloud_account if is_k8s else None,
             namespace=namespace,
-            ssh_user=ssh_user, ssh_key_ref=ssh_key_ref, gateway=gateway,
+            gateway=gateway_payload,
         ))
     return targets
 
@@ -527,11 +463,21 @@ async def create_execution(
     runbook = await get_runbook(session, payload.runbook_id)
     if not runbook.is_active:
         raise ConflictError("Runbook", f"runbook {runbook.id} is deactivated")
-    # 存量 runbook 可能创建於契约演进前：下发前再验一次 connection 形式
     needs_targets = runbook.run_on == "target"
-    _validate_connection(runbook.connection)
     params = _validate_params(runbook.params_schema, payload.params)
     secrets = await _validate_secrets(session, runbook.secrets_schema, payload.secrets)
+    # 连接三件套（v34）：登录用户/钥匙/提权在执行面提供。
+    # 优先级：执行时填写 > runbook.connection（存量兜底）；目标型任务缺任一即 400，
+    # 报错直接说清缺哪样——跨用户是常态，身份与钥匙都不属于任务定义
+    login_user = ssh_key_ref = None
+    if needs_targets:
+        login_user, ssh_key_ref = await credential_service.resolve_execution_credentials(
+            session, runbook.connection, payload.ssh_user, payload.ssh_credential,
+        )
+    become = (
+        bool(payload.become) if payload.become is not None
+        else bool((runbook.connection or {}).get("become"))
+    )
 
     # P3 高危门控：中高危必须挂已审批工单（先于目标快照，提前拒绝）
     await _check_approval_gate(session, runbook, payload.ticket_id, user)
@@ -549,9 +495,14 @@ async def create_execution(
             f"runbook {runbook.id} has no default binding"
         )
     targets = (
-        await _snapshot_targets(session, resource_ids, runbook.connection)
+        await _snapshot_targets(session, resource_ids, gateway_name=payload.gateway_name)
         if resource_ids else []
     )
+    # 登录身份与钥匙是执行级事实（v34）：同一执行内逐台同值，
+    # 由 runner 的 target 优先级直接消费；audit 也从 targets 就能看清“以谁连哪台”
+    for t in targets:
+        t.ssh_user = login_user
+        t.ssh_key_ref = ssh_key_ref
 
     # P3 封禁窗口门控：命中全局/模型范围封禁即拒绝（含工单自动下发路径）。
     # v27 无目标任务已核：scope 为空的全局封禁对空 model_codes 照样命中，不会绕过
@@ -598,7 +549,14 @@ async def create_execution(
         secrets=secrets,
         target_resources=[t.model_dump() for t in targets],
         step_snapshot=step_of(runbook),
-        connection=runbook.connection,
+        # connection 快照 = 存量兜底 + 本次执行解析出的身份/钥匙/提权：
+        # runner 只读这一份，不再二次猜测
+        connection={
+            **(runbook.connection or {}),
+            **({"ssh_user": login_user, "ssh_key_ref": ssh_key_ref}
+               if needs_targets else {}),
+            "become": become,
+        },
         # v28：一律手动回滚（runbook.auto_rollback 已删除；本列是 P2 解冻时的落点）
         rollback_policy="manual",
         ticket_id=payload.ticket_id,

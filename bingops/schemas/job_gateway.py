@@ -59,25 +59,3 @@ class GatewayResponse(BaseModel):
     created_by: int | None
     created_at: datetime
     updated_at: datetime
-
-
-class HostReachability(BaseModel):
-    """可达性视图的一行：这台机器能不能被任务访问到、走哪条路、缺什么。"""
-
-    resource_id: int
-    name: str
-    ip: str | None = None
-    model_code: str | None = None
-    cloud_account: str | None = None
-    region: str | None = None
-    vpc_id: str | None = None
-    # 登录身份（v33：属于主机标签，跨用户环境同一把钥匙可对应多个用户）
-    login_user: str | None = None
-    # 凭据是否解析得到（v31 目录 + 主机标签）
-    credential: str | None = None
-    credential_ok: bool = False
-    # 走哪个网关；None 且 gateway_ok=True 表示直连
-    gateway: str | None = None
-    gateway_ok: bool = True
-    # 缺口原因（供"缺什么"看板直接展示，不需要前端再推断）
-    missing: list[str] = Field(default_factory=list)

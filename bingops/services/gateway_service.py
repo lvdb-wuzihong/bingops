@@ -1,20 +1,18 @@
-"""中转网关业务层：选路与可达性。
+"""中转网关业务层：选路与路径组装。
 
 网关描述的是"这台机器要怎么才被连到"，属于网络拓扑事实；因此选路必须在
 执行期由机器归属算出来，而不是让每个 runbook 声明一次（漏声明的后果是 SSH
-超时，现象像 playbook 写错，排查成本极高）。设计见 §5.2。
+超时，现象像 playbook 写错，排查成本极高）。执行面也可用 gateway_name
+强制指定。设计见 §5.2。
 """
 
 from __future__ import annotations
 
 import logging
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bingops.core.exceptions import ConflictError, NotFoundError, ValidationError
-from bingops.models.cmdb.model import CmdbModel
-from bingops.models.cmdb.resource import CmdbResource
 from bingops.models.job_gateway import GATEWAY_SCOPE_KEYS, JobGateway
 from bingops.models.user import User
 from bingops.repositories.job_gateway_repo import JobGatewayRepo
@@ -22,9 +20,6 @@ from bingops.schemas.job_gateway import GatewayCreate, GatewayUpdate
 from bingops.services import credential_service
 
 logger = logging.getLogger(f"bingops.{__name__}")
-
-# 可达性视图默认覆盖的机型（只有这些模型才是可 SSH 的执行目标）
-REACHABILITY_MODEL_CODES = ("aliyun_ecs", "gcp_compute")
 
 # scope 维度 → 主机字段映射（resource_ids 单独按主键判）
 _SCOPE_FIELD_MAP = (
@@ -177,79 +172,20 @@ async def gateway_payload_for_host(
     }
 
 
-async def reachability(
-    session: AsyncSession,
-    model_codes: list[str] | None = None,
-    limit: int = 200,
-) -> list[dict]:
-    """主机可达性视图：凭据是否解析得到 + 走哪条路 + 缺什么。
-
-    只覆盖 running 的机型——非 running 本来就被执行态硬校验拦在门外，
-    列进来只会淹没真正的配置缺口。
-    """
-    codes = model_codes or list(REACHABILITY_MODEL_CODES)
-    rows = await session.execute(
-        select(CmdbResource, CmdbModel.code)
-        .join(CmdbModel, CmdbResource.model_id == CmdbModel.id)
-        .where(
-            CmdbModel.code.in_(codes),
-            CmdbResource.deleted_at.is_(None),
-            CmdbResource.status == "running",
+async def gateway_payload_by_name(session: AsyncSession, name: str) -> dict:
+    """按名字取网关路径（执行面强制指定时用）；不存在或停用即 400。"""
+    gateway = await JobGatewayRepo(session).get_by_name(name)
+    if gateway is None or not gateway.is_active:
+        raise ValidationError(f"gateway '{name}' not found or inactive")
+    ssh_key_ref = None
+    if gateway.ssh_credential:
+        ssh_key_ref = await credential_service.resolve_credential_ref(
+            session, gateway.ssh_credential
         )
-        .order_by(CmdbResource.name)
-        .limit(limit)
-    )
-    hosts: list[dict] = []
-    for res, code in rows.all():
-        fields = res.fields or {}
-        hosts.append({
-            "resource_id": res.id,
-            "name": res.name,
-            "ip": next(
-                (fields.get(k) for k in ("private_ip", "internal_ip", "ip") if fields.get(k)),
-                None,
-            ),
-            "model_code": code,
-            "cloud_account": res.cloud_account,
-            "region": res.region,
-            "vpc_id": fields.get("vpc_id"),
-        })
-
-    creds = await credential_service.resolve_host_credentials(
-        session,
-        [(h["resource_id"], h["name"], h["cloud_account"], h["region"]) for h in hosts],
-    )
-    active = await JobGatewayRepo(session).list_active()
-
-    result: list[dict] = []
-    for host in hosts:
-        cred = creds.get(host["resource_id"])
-        gateway = pick_gateway(active, host)
-        missing: list[str] = []
-        if not host["ip"]:
-            missing.append("ip：主机无内网地址，SSH 无法建立")
-        if cred is None or cred.error or not cred.vault_ref:
-            missing.append(
-                "ssh_credential：主机未打凭据标签，且目录中无唯一匹配的默认凭据"
-            )
-        login_user = cred.login_user if cred else None
-        if not login_user:
-            # 跨用户是常态：登录身份属于主机，没有它任务无法指定“以谁的身份连”
-            missing.append("ssh_user：主机未打登录用户标签")
-        result.append({
-            "resource_id": host["resource_id"],
-            "name": host["name"],
-            "ip": host["ip"],
-            "model_code": host["model_code"],
-            "cloud_account": host["cloud_account"],
-            "region": host["region"],
-            "vpc_id": host["vpc_id"],
-            "login_user": login_user,
-            "credential": cred.credential_name if cred else None,
-            "credential_ok": bool(cred and not cred.error and cred.vault_ref),
-            "gateway": gateway.name if gateway else None,
-            # 无网关 = 直连，不是缺口；是否需要中转只有实测才知道
-            "gateway_ok": True,
-            "missing": missing,
-        })
-    return result
+    return {
+        "name": gateway.name,
+        "host": gateway.host,
+        "port": gateway.port,
+        "ssh_user": gateway.login_user,
+        "ssh_key_ref": ssh_key_ref,
+    }

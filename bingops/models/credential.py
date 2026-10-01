@@ -22,11 +22,10 @@ CREDENTIAL_KINDS = ("ssh_key", "cloud_ak", "db_password", "api_token", "kubeconf
 # Vault 可达性探测状态：由 runner 回填（bingops 不直连 Vault，见设计文档 §5）
 VERIFY_STATES = ("unknown", "ok", "failed")
 
-# 主机侧引用的 tag_key（凭据引用值 = credentials.name，登录用户 = 系统用户名）：
-# 任务不再携带 SSH 凭据；**跨用户环境下登录身份属于主机**——同一把钥匙
-# 常被授权给不同主机上的不同用户，“用哪个用户连”也由主机回答
+# 主机侧引用凭据的 tag_key（值 = credentials.name）。
+# v34：登录身份与凭据选择已全部撤到执行面（ExecutionCreate.ssh_user/ssh_credential），
+# 主机标签不再是执行链路的一环；此常量仅供凭据删除前的引用反查（usage_of）使用
 HOST_CREDENTIAL_TAG_KEY = "ssh_credential"
-HOST_USER_TAG_KEY = "ssh_user"
 
 
 class Credential(BaseMixin, Base):

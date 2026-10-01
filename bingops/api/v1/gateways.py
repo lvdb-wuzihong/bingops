@@ -53,21 +53,6 @@ async def list_gateways(
     return paginated_response(items, total, page, page_size)
 
 
-@router.get("/reachability")
-async def host_reachability(
-    model_code: list[str] | None = Query(None, description="默认覆盖 aliyun_ecs/gcp_compute"),
-    limit: int = Query(200, ge=1, le=500),
-    session: AsyncSession = Depends(get_db_session),
-    _user: User = require_permission("gateway:list"),
-):
-    """主机可达性总览：凭据是否齐、走哪个网关、缺什么。
-
-    注意本路由必须声明在 `/{gateway_id}` 之前，否则 "reachability" 会被当成 id 解析。
-    """
-    rows = await gateway_service.reachability(session, model_codes=model_code, limit=limit)
-    return success_response(data=rows)
-
-
 @router.post("", status_code=201)
 async def create_gateway(
     payload: GatewayCreate,

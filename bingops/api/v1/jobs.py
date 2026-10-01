@@ -135,8 +135,8 @@ async def create_runbook(
     必填只两项：exec_type（ansible | shell | python | terraform）+ entry。
     entry 语义随类型变：ansible=playbook 路径、python=脚本入口、
     terraform=工作目录、shell 恒为命令字符串。
-    run_on 缺省按类型推断（ansible/shell=target 需目标机与 ssh_key_ref；
-    python=local 无目标机）；steps 数组已不接收。
+    run_on 缺省按类型推断（ansible/shell=target，python=local）；steps 已不接收。
+    v34：登录用户/密钥/提权全部在执行时提供，本接口不再接受任何连接字段。
     需走 Vault 的值声明在 secrets_schema，与 params_schema（明文）分开。
     """
     runbook = await job_service.create_runbook(session, payload, current_user)
@@ -207,8 +207,10 @@ async def create_execution(
 ):
     """创建并下发执行（目标/步骤/版本三快照 + 并发目标锁）。
 
-    target_resource_ids 与 code_ref 可省略：未传则继承 runbook 的默认绑定与默认版本；
-    全 local 型任务（python/terraform）可无目标。
+    target_resource_ids 与 code_ref 可省略：未传则继承 runbook 的默认绑定与默认版本。
+    连接三件套（v34）：ssh_user（登录用户）+ ssh_credential（凭据目录条目名）
+    + become（提权）在执行时提供——跨用户是常态，身份与钥匙不属于任务定义；
+    gateway_name 可强制指定中转网关，未填按机器归属自动选路。
     secrets 传 {变量名: Vault 钥匙名}，变量名必须在 runbook.secrets_schema 声明集内。
     """
     execution = await job_service.create_execution(session, payload, current_user)

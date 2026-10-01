@@ -43,14 +43,8 @@ class RunbookCreate(BaseModel):
     rollbackable: bool = True       # 不可逆任务显式写 false
     # v30：undo_command / serial / batch_pause_sec 已删除——回滚统一注入 BINGOPS_ACTION=undo，
     # 多目标并发度由执行机自身配置决定，不再是任务定义的一部分
-    # ── 连接：connection 字典或以下平铺糖字段（糖字段覆盖同名键）；
-    # 仅 run_on=target 时需要 ssh_key_ref ──
-    connection: dict = Field(default_factory=dict)
-    ssh_user: str | None = None
-    ssh_key_ref: str | None = None
-    become: bool | None = None
-    become_method: str | None = None
-    become_user: str | None = None
+    # v34：连接三件套（登录用户/密钥/提权）已全部撤到执行面——
+    # 「以谁的身份连」在执行时才确定，不属于任务定义
     # ── 以下均有安全缺省值 ──
     target_models: list[str] | None = None  # None → 默认 [aliyun_ecs, gcp_compute]
     risk_level: str = "low"
@@ -70,12 +64,6 @@ class RunbookUpdate(BaseModel):
     run_on: str | None = None
     timeout_sec: int | None = None
     rollbackable: bool | None = None
-    connection: dict | None = None
-    ssh_user: str | None = None
-    ssh_key_ref: str | None = None
-    become: bool | None = None
-    become_method: str | None = None
-    become_user: str | None = None
     target_models: list[str] | None = None
     risk_level: str | None = None
     default_target_resource_ids: list[int] | None = None
@@ -121,6 +109,16 @@ class ExecutionCreate(BaseModel):
     # 未传→runbook.default_code_ref→平台配置 job_default_code_ref；全空则 400
     code_ref: str | None = Field(default=None, max_length=128)
     ticket_id: int | None = None  # P3：高危 runbook 必须携带已审批通过的工单
+    # ── 连接三件套（v34：执行时填写，不进 runbook 定义）──
+    # 登录用户：未填 → runbook.connection.ssh_user 存量兜底 → 400
+    ssh_user: str | None = Field(default=None, max_length=64)
+    # 凭据目录条目名（kind=ssh_key），后端展开成 Vault 引用；
+    # 未填 → runbook.connection.ssh_key_ref 存量兜底 → 400
+    ssh_credential: str | None = Field(default=None, max_length=128)
+    # 提权：未填 → false（runbook.connection.become 存量兜底）
+    become: bool | None = None
+    # 中转网关：未填 → 按机器归属自动选路；填 name 强制全员走该网关
+    gateway_name: str | None = Field(default=None, max_length=128)
 
 
 class ExecutionTarget(BaseModel):
@@ -131,8 +129,8 @@ class ExecutionTarget(BaseModel):
     model_code: str | None = None
     cluster_id: str | None = None   # K8s 模式（P2）：目标所属集群
     namespace: str | None = None    # K8s 模式（P2）：命名空间
-    # v31：凭据按目标机逐台解析后携带（主机标签 → 凭据目录 → runbook 兜底），
-    # runner 优先用这里的值，connection 退化为任务级兜底
+    # v31：凭据由执行面解析后逐台携带（同一执行内同值），
+    # runner 优先用这里的值，connection 退化为汇总兜底
     ssh_user: str | None = None
     ssh_key_ref: str | None = None
     # 中转网关（v32 接入）：为空 = 直连
