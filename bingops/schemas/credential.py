@@ -10,25 +10,17 @@ from pydantic import BaseModel, Field
 class CredentialCreate(BaseModel):
     name: str = Field(min_length=1, max_length=128)
     kind: str = Field(description="ssh_key | cloud_ak | db_password | api_token | kubeconfig")
-    # 只存引用：Vault 路径（+ 可选字段名），任何字段都不得出现明文凭据值
-    vault_path: str = Field(min_length=1, max_length=512)
-    vault_field: str | None = Field(default=None, max_length=128)
-    # v33：login_user 已删除——同一把钥匙常被授权给不同主机的不同用户，
-    # 登录身份属于主机（标签 ssh_user），不属于钥匙材料
-    cloud_account: str | None = Field(default=None, max_length=128)
-    region: str | None = Field(default=None, max_length=64)
-    is_default: bool = False
+    # v36：入口只一个框——运维熟悉的 Vault 引用形状 `path` 或 `path#field`。
+    # 早期拆成 vault_path + vault_field 两个输入框，反馈是“不知道哪个才是 Vault”；
+    # 存储仍拆两列（服务层 partition），API 与表单不拆
+    vault_ref: str = Field(min_length=1, max_length=640)
     remark: str | None = None
 
 
 class CredentialUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=128)
     kind: str | None = None
-    vault_path: str | None = Field(default=None, min_length=1, max_length=512)
-    vault_field: str | None = Field(default=None, max_length=128)
-    cloud_account: str | None = Field(default=None, max_length=128)
-    region: str | None = Field(default=None, max_length=64)
-    is_default: bool | None = None
+    vault_ref: str | None = Field(default=None, min_length=1, max_length=640)
     remark: str | None = None
     is_active: bool | None = None
 
@@ -37,11 +29,8 @@ class CredentialResponse(BaseModel):
     id: int
     name: str
     kind: str
-    vault_path: str
-    vault_field: str | None
-    cloud_account: str | None
-    region: str | None
-    is_default: bool
+    # 与入参同形：path 或 path#field（runner 消费的就是这个串）
+    vault_ref: str
     # 探测状态由 runner 回填（bingops 不直连 Vault）：unknown | ok | failed
     verify_state: str
     last_verified_at: datetime | None

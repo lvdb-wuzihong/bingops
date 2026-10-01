@@ -27,11 +27,8 @@ def _to_response(credential: Credential) -> dict:
         id=credential.id,
         name=credential.name,
         kind=credential.kind,
-        vault_path=credential.vault_path,
-        vault_field=credential.vault_field,
-        cloud_account=credential.cloud_account,
-        region=credential.region,
-        is_default=credential.is_default,
+        # 存储拆两列，回显合成单串：与入参同形，前端不需要知道拆分这件事
+        vault_ref=credential_service.vault_ref_of(credential),
         verify_state=credential.verify_state,
         last_verified_at=credential.last_verified_at,
         remark=credential.remark,

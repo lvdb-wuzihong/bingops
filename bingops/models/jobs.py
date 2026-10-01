@@ -66,14 +66,9 @@ class Runbook(BaseMixin, Base):
     target_models: Mapped[list] = mapped_column(
         JSONB, nullable=False, default=lambda: ["aliyun_ecs", "gcp_compute"],
     )
-    # 默认执行目标（CMDB 资源 ID 数组）：执行未传 target_resource_ids 时继承，
-    # 继承后照走 running/白名单/并发锁硬校验；空数组不参与继承（视为未绑定）
-    default_target_resource_ids: Mapped[list] = mapped_column(
-        JSONB, nullable=False, default=list,
-    )
-    # 缺省仓库版本（git tag/branch）：执行未传 code_ref 时继承；
-    # NULL 回落平台配置 job_default_code_ref，两者皆空则 400 要求显式指定
-    default_code_ref: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # v36 已删除 default_target_resource_ids / default_code_ref：目标机与代码版本
+    # 是每次执行的核心决策，缓存在模板上会把“必须确认的一步”变成预选项，
+    # 且 CMDB 自增 ID 与 git tag 都会腐烂。“复用上次的”由前端读执行历史实现
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     risk_level: Mapped[str] = mapped_column(
         String(16), nullable=False, default="low",

@@ -27,6 +27,7 @@
 | 16 | **登录身份归执行，不归任务也不归钥匙**（v33→v34） | 用户环境事实：**同一把钥匙常被授权给不同主机的不同用户（跨用户是常态）**。两次修正：v33 先删掉凭据上的 `login_user`（授权不属于钥匙材料）；v34 再撤掉主机标签 `ssh_user`/`ssh_credential` 的链路地位（预配标签不是用户要的交互），登录用户/钥匙/提权全部在**执行时填写**：`ExecutionCreate.ssh_user + ssh_credential + become`。凭据目录退回纯钥匙材料（同 `vault_path` 多条目 = 多身份），解析链：执行时填写 > `runbook.connection` 存量兜底 > 400 |
 | 17 | **runbook 定义面零连接字段**（v34） | 截图里“兜底登录用户/兜底登录密钥”两个框的根因在后端契约（`RunbookCreate` 还在收 `connection`，`ExecutionCreate` 没有连接入口）。v34 撤掉创建面全部连接字段，`runbooks.connection` 列保留仅作存量兜底与提权存储；**runbook 只回答“连上之后干什么”，“怎么连、用谁连”属于执行** |
 | 18 | **网关关联维度只留 VPC**（v35） | v32 的 `scope` 四维（vpc/账号/区域/资源 ID）+ `priority` 是“没拍板就把选择权外包给表单”。VPC 与跳板天然一对一，所以 `scope` → `vpc_ids` 单列、`priority` 删除，并加“一个 VPC 只能一条启用网关”写入校验（重复 409）。附带更正一个错报：曾结论“aliyun_ecs/gcp_compute 无 vpc_id”——那是拿 `cmdb-model-presets.md` 推断的，**真实库两个机型都有**（文档不是事实源） |
+| 19 | **目标机与版本不得缓存在模板上**（v36） | 删 `runbooks.default_target_resource_ids` / `default_code_ref`。目标机是全文唯一“选错就是事故”的字段（目标锁/封禁/审批/审计的对象），预填把它从“必须确认”降级成“不假思索”；且会腐烂（CMDB 自增 ID、旧 tag）。省点击的正当需求改由前端「复用上次的」读 `job_executions` 快照实现。同时新增 `exec_type=script`：仓库内脚本必须走 ansible `script` 模块推送执行，旧文档“shell 写 `bash scripts/x.sh`”是错的 |
 
 ---
 
@@ -65,7 +66,7 @@ UI ──→ bingops（控制面，无状态 FastAPI）
 
 ### 3.1 最小写法（照抄即可）
 
-作者只需理解 **4 个概念**：叫什么（name）、怎么跑（exec_type + entry）、在哪跑（default_target_resource_ids + ssh_user/ssh_key_ref，仅 target 型）、每次变什么（params_schema / secrets_schema）。其余字段全有安全缺省值，UI 不必出现。
+作者只需理解 **3 个概念**：叫什么（name）、怎么跑（exec_type + entry）、每次变什么（params_schema / secrets_schema）。其余字段全有安全缺省值，UI 不必出现。**“在哪跑”与“用谁连”都属于执行期**（v34 连接三件套、v36 目标机与版本），不在模板里。
 
 **`exec_type` 决定 runner 用哪个 executor，`entry` 的语义随之变**（v29 扁平单步：一个 runbook = 一个步骤，`steps` 数组已从 API、表结构与消息三层删除）：
 
@@ -117,18 +118,19 @@ secrets_schema:
 | 你写的 | 落到哪里 |
 |--------|---------|
 | `exec_type` / `entry` / `run_on` / `timeout_sec` / `rollbackable` | **runbooks 的 5 个步骤列**（v29 扁平化；v30 又删掉 `undo_command`/`serial`/`batch_pause_sec`）——**无数组、无 JSON 可拼** |
-| `ssh_user` / `ssh_key_ref` / `become*` | 并入 `connection` JSONB（与显式 `connection` 共存时，平铺字段覆盖同名键） |
+| `ssh_user` / `ssh_key_ref` / `become*` | v34 已从创建面撤除（`runbooks.connection` 列仅留作存量兜底与提权存储） |
 | 缺省 `run_on` | 按 `exec_type` 推断后**显式落列**（下游不再各自推断） |
 | 缺省 `timeout_sec` / `rollbackable` | 600 / **true**（不可逆是例外，需显式 false） |
-| `default_target_resource_ids` / `default_code_ref` | 独立列（v26），执行未传时继承 |
+| `default_target_resource_ids` / `default_code_ref` | **v36 已删除**（目标机与版本属于每次执行） |
 
 创建 execution 时，8 个步骤列被组装成**单个 `step_snapshot` 对象**快照（`step_of()`，含固定 `key="main"` 与 `name=任务名`），dispatch 与回滚都按它走。
 
-**继承与回落链**（`create_execution`）：
+**执行期入参与回落链**（`create_execution`）：
 
-- `target_resource_ids`：显式传 \< `runbook.default_target_resource_ids` \< 400。**显式传空数组 `[]` 视为“无目标”，不参与继承**（用 `model_fields_set` 区分“未传”与“传空”）
-- `code_ref`：显式传 \< `runbook.default_code_ref` \< `BINGOPS_JOB_DEFAULT_CODE_REF`（默认空）\< 400 引导填 tag。**刻意不给“默认 main”**：分支 HEAD 会移动，同一执行对应不同代码会破坏版本快照语义
-- 继承来的目标**照走全部硬校验**（`status=running`、`target_models` 白名单、并发目标锁）——简化的是填写量，不是安全边界
+- `target_resource_ids`：**必须显式传**（v36）——目标机是整个系统里唯一“选错就是事故”的字段（目标锁/封禁/审批/审计全以它为对象），预选项会把必须确认的一步变成不假思索；无 target 型步骤的任务可空
+- `code_ref`：显式传 \< `BINGOPS_JOB_DEFAULT_CODE_REF`（默认空）\< 400 引导填 tag。**刻意不给“默认 main”**，也不在 runbook 上缓存默认版本：分支 HEAD 会移动、旧 tag 会静默生效
+- “省一次点选”的正当需求由前端做「复用上次的目标机/版本」，数据源是 `job_executions` 快照——历史不会腐烂，且是真实发生过的事
+- 目标机照走全部硬校验（`status=running`、`target_models` 白名单、并发目标锁）——简化的是填写量，不是安全边界
 - 报错即文档：不满足步骤契约时，400 message 内嵌最小可用示例（`MINIMAL_RUNBOOK_HINT`）
 
 **回滚只有一个约定**：入口（脚本 / playbook）自己实现 undo 分支，平台回滚时就是**重跑同一 `entry` 并注入 `BINGOPS_ACTION=undo`**。因此 `rollbackable` 的含义很单纯：“这个入口有没有 undo 分支”。缺省 **true**（旧契约默认 false 会让所有人漏填，导致回滚链静默跳步）；不可逆任务显式关成 false。
@@ -245,7 +247,7 @@ steps:
 
 - `runbooks.version` 整数，每次编辑 +1
 - 任务创建时 **runbook_version + steps + code_ref（git tag）三快照** 进 execution 行——在跑任务永远用创建时的定义与代码
-- code_ref 缺省回落链（`runbook.default_code_ref` → 平台配置）只影响**创建时填什么**，不影响快照：解析后的实际值照旧写入 execution 行
+- code_ref 回落链（v36）：**显式传 > 平台配置 `BINGOPS_JOB_DEFAULT_CODE_REF` > 400**。`runbook.default_code_ref` 已删——在模板上缓存版本会把“选错旧 tag”变成静默默认；前端用「复用上次的版本」从执行历史带入。回落只影响**创建时填什么**，不影响快照：解析后的实际值照旧写入 execution 行
 
 ### 3.5 步骤类型契约（v27 多执行器）
 
@@ -254,19 +256,25 @@ steps:
 | exec_type | entry 语义 | `run_on` 缺省 | 需要 targets | 参数注入 | 回滚入口 |
 |-----------|-----------|--------------|-------------|---------|---------|
 | `ansible` | playbook 路径 | `target` | 是 | extra_vars(params) + env(secrets) | 同 playbook + `BINGOPS_ACTION=undo` |
-| `shell` | **命令字符串**（仓库脚本写 `bash scripts/x.sh`） | `target`（可写 `local`） | `run_on=target` 时是 | env（params+secrets） | `BINGOPS_ACTION=undo`（内联命令无 undo，应关 `rollbackable`） |
+| `shell` | **内联命令**（`df -h`、`systemctl restart nginx`） | `target`（可写 `local`） | `run_on=target` 时是 | env（params+secrets） | `BINGOPS_ACTION=undo`（内联命令无 undo，应关 `rollbackable`） |
+| **`script`（v36 新增）** | **仓库内脚本文件路径**（`scripts/dump_prod.sh`） | `target`（可写 `local`） | `run_on=target` 时是 | env + argv | 同脚本 undo 分支 |
 | `python` | 仓库内脚本入口 | `local` | 否 | env + argv | 同脚本 undo 分支 |
 | `terraform` | 工作目录 | `local` | 否 | `-var` / tfvars | **本轮拒绝创建/执行**（门控未开，state 方案未定） |
 
-其余步骤列：`timeout_sec`（600）、`rollbackable`（true）。`_build_step` 把推断后的 `run_on` **显式落列**，下游不再各自推断。shell 语义已收敛为“entry 恒为命令”，避开“这是路径还是命令”的隐式判断（与你们否掉 `*_ref` 后缀魔法是同一条纪律）。
+其余步骤列：`timeout_sec`（600）、`rollbackable`（true）。`_build_step` 把推断后的 `run_on` **显式落列**，下游不再各自推断。
+
+> **v36 为何新增 `script` 类型**：旧文档里写着“跑仓库脚本就写 `bash scripts/x.sh`”——**那是错的**：`shell` 的 entry 在**目标机的 shell** 里执行，那个路径相对目标机文件系统，而脚本只存在于 runbook git 仓库（只 clone 到 runner），结果必为 `No such file or directory`。Ansible 对这个场景有专门原语：**`script` 模块**（把控制机本地脚本推到目标机临时目录执行并回传 stdout，目标机不需预置文件）。拆成两个显式类型而不是“看 entry 像不像路径”自己猜，与你们否掉 `*_ref` 后缀魔法是同一条纪律。
+
+> **shell 与 script 为何不合并**：分界不是“命令还是文件”，而是**“这段代码归谁管”**。`shell` 的内容在平台（内联 entry）——无版本、无评审、无 undo，它的正当场景就是 **ad-hoc 立即执行**（选机器 + 写命令 + 跑，不进仓库）；`script` 的内容在 git——随 code_ref 固定、可评审、可自带 undo。
+> 只留 `script`：跑一句 `df -h` 也要先建文件、提 MR、打 tag；只留 `shell`：关键逻辑散落在平台快照里，三个月后没人知道它改过几版。选择规则：**要留痕/复用/回滚 → `script`；只是查一下、清一下 → `shell`；逻辑超过一个文件 → `ansible`**。
 
 **v30 删掉的三个字段**（均为基础设施/噪声属性，不再由任务持有）：`undo_command`（回滚统一走 undo 约定）、`serial` 与 `batch_pause_sec`（多目标并发度 = runner 部署级配置 `max_parallel_hosts`）。
 
 **派生与门控**：
 
-- `needs_targets = (runbook.run_on == "target")` → 同时决定 `target_resource_ids` 与 `connection.ssh_key_ref` 是否必填；`step_key` 恒为 `main`（`job_steps` 一行 + 回滚一行）
+- `needs_targets = (runbook.run_on == "target")` → 决定 `target_resource_ids` 是否必填（v36：目标机**必须每次显式传**，不再从 runbook 继承默认绑定）与是否要解析登录用户/凭据；`step_key` 恒为 `main`（`job_steps` 一行 + 回滚一行）
 - 无目标任务**不绕过变更封禁**：`_freeze_hits_models` 中 `scope` 为空即全局命中，空 `model_codes` 照样拦（已核）
-- 类型白名单 `BINGOPS_JOB_STEP_TYPES`（默认 `ansible,shell,python`）：runner 尚未支持某 executor 时收紧配置，平台侧即拒绝创建，而不是下发后失败
+- 类型白名单 `BINGOPS_JOB_STEP_TYPES`（默认 `ansible,shell,script,python`）：runner 尚未支持某 executor 时收紧配置，平台侧即拒绝创建，而不是下发后失败
 
 ### 3.6 凭据三层分离（v27）
 
@@ -276,9 +284,9 @@ steps:
 |----|-------------|---------|------|---------|
 | 明文入参 | `params_schema` | `params` | `job_executions.params` | 普通值（库名、表名、开关） |
 | Vault 入参 | `secrets_schema`：`{VAR: {required, description, default_ref}}` | `secrets: {VAR: "<Vault 路径#字段>"}` | `job_executions.secrets` | **只存钥匙名**，明文永不入库 |
-| 目标机私钥 | `connection.ssh_key_ref` | —（runbook 级） | `runbooks.connection` | 只存钥匙名 |
+| 目标机私钥 | —（v34 起不属于 runbook） | `ssh_credential`（凭据目录条目名） | `job_executions.connection` 快照 | 只存钥匙名，真值由 runner 取 Vault |
 
-> **v31 变更**：上表第三层已从「任务属性」搬迁为「机器属性」——`ssh_key_ref` 不再是 runbook 必填项，而是由 `credentials` 凭据目录 + 主机标签在执行期逐台解析（见 §5.1）；`connection.ssh_key_ref` 降为存量兜底。
+> **v31→v36 变迁**：目标机私钥先是从「任务属性」 搬为「机器属性」（v31 凭据目录 + 主机标签），再由 v34 抬到**执行面**（`ExecutionCreate.ssh_credential`）；`connection.ssh_key_ref` 降为存量兜底。v36 另把凭据目录的入口合并为单个 `vault_ref` 串（见 §5.1）。
 
 规则：
 
@@ -295,7 +303,7 @@ steps:
 
 ### 4.1 端到端流程
 
-1. UI 圈选目标（CMDB 选择器）→ 创建 `job_executions`（params/targets/version 快照）；**v26：runbook 已绑默认目标时此步跳过选择**（继承规则见 §3.1）
+1. UI 圈选目标（CMDB 选择器，可按 VPC 筛）→ 创建 `job_executions`（params/targets/version 快照）；**v36：目标机必须每次显式选择**（不再从 runbook 继承默认绑定）
 2. 并发校验：target_resource_ids 与在跑 execution 交集命中即拒绝（同资源单执行锁）
 3. 审批（P3）：risk_level + 环境维度 → 挂 ticket，通过才下发
 4. bingops 发 `job-dispatch`（**只带 ssh_key_ref 钥匙名，不带 secret**）
@@ -333,7 +341,11 @@ step:      pending → running → success / failed / skipped / rolled_back / ro
 
 ### 5.1 凭据解析（v31 凭据目录 → v34 执行面提供）
 
-**凭据目录 `credentials`**：把“哪把钥匙、能干什么”收敛成可下拉选择的实体。只存 Vault 引用与元数据，**明文禁入**（入口有 `-----BEGIN` / `PRIVATE KEY` 等特征串拦截）；`name` 全局唯一；`kind ∈ ssh_key|cloud_ak|db_password|api_token|kubeconfig`。**目录的单位是钥匙材料，不含用户**——同一把钥匙授权给不同主机的不同用户是常态（跨用户），那属于每次执行的决定。
+**凭据目录 `credentials`**：把“哪把钥匙、在哪取”收敛成可下拉选择的实体。只存 Vault 引用与元数据，**明文禁入**（入口有 `-----BEGIN` / `PRIVATE KEY` 等特征串拦截）；`name` 全局唯一；`kind ∈ ssh_key|cloud_ak|db_password|api_token|kubeconfig`。**目录的单位是钥匙材料，不含用户**——同一把钥匙授权给不同主机的不同用户是常态（跨用户），那属于每次执行的决定。
+
+**入口只有一个 Vault 引用框**（v36）：`vault_ref` 接受运维在 Vault 侧熟悉的形状 `path` 或 `path#field`，服务层 `split_vault_ref()` 拆成两列存储、回显时再合成单串——前端不需要知道拆过。早期做成 `vault_path` + `vault_field` 两个输入框，反馈是“不知道哪个才是 Vault”。
+
+**v36 删掉的三个字段**：`cloud_account` / `region`（适用范围）与 `is_default`（默认凭据）——它们只服务于“按机器自动解析凭据”那条链，而该链已在 v34 被“执行时人选”取代。**没有消费方的字段就是噪声**：表单上那两栏从此没有任何行为后果，却要求用户理解一个不存在的机制。
 
 **解析优先级**（`credential_service.resolve_execution_credentials`，创建执行时一次性解析，无主机标签参与）：
 
@@ -429,10 +441,8 @@ CREATE TABLE credentials (
     kind             VARCHAR(32)  NOT NULL,         -- ssh_key|cloud_ak|db_password|api_token|kubeconfig
     -- v33 已删除 login_user：跨用户是常态，登录身份归主机标签 ssh_user
     vault_path       VARCHAR(512) NOT NULL,         -- 只存路径，绝不存值
-    vault_field      VARCHAR(128),                  -- path#field 拆分后的字段名
-    cloud_account    VARCHAR(128),                  -- 适用范围，NULL = 不限
-    region           VARCHAR(64),
-    is_default       BOOLEAN      NOT NULL DEFAULT FALSE,   -- 同 kind 唯一（部分索引）
+    vault_field      VARCHAR(128),                  -- path#field 拆分后的字段名（入口为单串 vault_ref）
+    -- v36 已删除 cloud_account / region / is_default：无消费方的字段（自动解析链已废）
     verify_state     VARCHAR(16)  NOT NULL DEFAULT 'unknown',  -- runner 回填
     last_verified_at TIMESTAMPTZ,
     remark           TEXT,
@@ -477,8 +487,7 @@ CREATE TABLE runbooks (
     -- v30 已删除 undo_command / serial / batch_pause_sec（回滚统一约定 + 并发度下沉 runner）
     connection    JSONB        NOT NULL DEFAULT '{}',   -- {ssh_user, ssh_key_ref, become, become_method, become_user}；v31 起 ssh_key_ref 仅兜底
     target_models JSONB        NOT NULL DEFAULT '["aliyun_ecs", "gcp_compute"]',
-    default_target_resource_ids JSONB NOT NULL DEFAULT '[]',  -- 执行未传 target 时继承（v26）
-    default_code_ref VARCHAR(128),                  -- 执行未传 code_ref 时继承（v26）
+    -- v36 已删除 default_target_resource_ids / default_code_ref：目标机与版本属于每次执行
     version       INT          NOT NULL DEFAULT 1,      -- 编辑 +1，execution 快照
     risk_level    VARCHAR(16)  NOT NULL DEFAULT 'low',
     is_active     BOOLEAN      NOT NULL DEFAULT TRUE,
@@ -619,7 +628,7 @@ bingops-runner/
 │   ├── secrets_resolver.py  # v27：统一解析 secrets（所有 executor 前置）
 │   ├── redact.py        # 出机前脱敏
 │   ├── executors/       # v27：注册表型，type → handler，统一接口 run(step, ctx)
-│   │   ├── registry.py             # EXECUTORS = {"ansible":..., "shell":..., "python":...}
+│   │   ├── registry.py             # EXECUTORS = {"ansible":..., "shell":..., "script":..., "python":...}
 │   │   ├── ansible_executor.py    # ansible-runner 事件回调 → job-events
 │   │   ├── shell_executor.py      # run_on=target 复用 ansible ad-hoc；local 走 subprocess
 │   │   ├── python_executor.py     # subprocess + requirements（镜像内置）
@@ -640,6 +649,7 @@ bingops-runner/
    - **v31 可选增强**：回填 `credentials.verify_state` / `last_verified_at`（取 Vault 成功=ok、失败=failed），让凭据目录页能显示“这把钥匙上次验证是通的”
 4. **secrets 解析前置**到 executor 之前，一个解析器四种 type 共用；Vault 读失败 → step 失败并回流，不允许空值继续跑
 5. **shell 远端执行复用 ansible ad-hoc**（`ansible -i inv -m shell -a "<entry>"`），**不用 paramiko 自研**：直接复用已实现的 inventory / Vault keyfile / become / proxy_hop 与日志格式，零新增 SSH 代码；`run_on: local` 走 `subprocess`
+   - **v36 新增 `script` executor**：entry 是**仓库内脚本文件路径**，用 `ansible -i inv -m script <path> -a "<参数>"` 把脚本从 runner 推到目标机临时目录执行（目标机不需预置该文件）。**不能拿 shell 模块去 `bash scripts/x.sh`**：那个路径相对目标机文件系统，必失败（旧文档写错过）；两者共用同一套 inventory/凭据/跳板/日志栏
    - **v30：多目标并发度改由 runner 自己的配置 `max_parallel_hosts` 决定**（部署级），消息里不再下发 `serial` / `batch_pause_sec`；需要“逐台执行”就是把该配置调成 1
 6. **python**：`subprocess`，cwd=仓库根，env 含 params+secrets+`BINGOPS_ACTION`，stdout/stderr 逐行 → log 事件，退出码 → step 状态；依赖策略 = 镜像内置 `requirements.txt`（加 SDK 即重建镜像），每任务临时 venv 作退路
 7. **inventory 构建条件化**：`targets` 为空或 `run_on=local` 时不建 inventory、不取 SSH 私钥
@@ -658,14 +668,14 @@ bingops-runner/
 
 | 页面 | 要改 | 不改的后果 |
 |------|------|-----------|
-| 新增/编辑 Runbook | **`exec_type` 下拉（ansible / shell / python）+ `entry` 单输入框** = 两个必填项（v29 已无四个互斥入口字段）；**v34 起“兜底登录用户/兜底登录密钥/提权”三个框从表单删除**（连接三件套全部在执行时填写，创建接口也不再接受） | 用户在定义期被迫回答“用谁连”——跨用户常态下这个答案属于每次执行，不属于任务 |
+| 新增/编辑 Runbook | **`exec_type` 下拉（ansible / shell / script / python）+ `entry` 单输入框** = 两个必填项；**v34 删“兜底登录用户/密钥/提权”三个框，v36 再删“默认目标机 / 默认代码版本”两个框**（表单再减 2）；`entry` 提示语按类型变：选 script 时写“仓库内脚本路径，如 scripts/dump.sh”，选 shell 时写“在目标机执行的命令” | 用户在定义期被迫回答“用谁连、打哪台、跑哪个版本”——这三件都是执行期决定 |
 | 参数区 | `params_schema` + `secrets_schema` 合成**一张表**：每行「名字 / 类型 / 必填 / 默认 / 是否密钥」，勾选即拆进 `secrets_schema`。**两个 JSON 文本框归零，存储仍是三层分离** | 手写 JSON 正是“两小时写不出一个 runbook”的直接原因 |
 | 步骤字段 | 只剩 `timeout_sec` 与 `rollbackable` 两个可选字段（**v30 已删 `undo_command` / `serial` / `batch_pause_sec`**，继续提交会被忽略）；`steps` 同样已不存在 | 表单里留着永远不填的字段 = 每次都要重新理解一遍它是什么意思 |
 | 编辑回显 | 直读 runbook 响应的**步骤列**（`exec_type`/`entry`/`run_on`/`timeout_sec`/`rollbackable`…，v29 已无 steps 数组；`run_on` 已显式回写） | 自己再推一遍缺省值，与后端推断不一致 |
-| 新增执行 | `target_resource_ids` 与 `code_ref` **去掉必填限制**：runbook 响应已带 `default_target_resource_ids`/`default_code_ref`，非空则预填可留空；无目标任务（entry 型）不渲染机器选择器 | 卡住提交，或强迫用户每次背 CMDB 数 ID 与 git tag |
+| 新增执行 | **目标机与版本必须每次选**（v36：runbook 已无默认值可预填）；可选做「复用上次的目标机 / 版本」按钮，数据源取当前用户对该 runbook 的最近一次 `job_executions`；无 target 型任务不渲染机器选择器 | 把“打到哪台”变成不假思索的预选项；或者强迫用户每次背 CMDB 数 ID 与 git tag |
 | **执行弹窗连接区**（v34 新增） | 三个输入件：**登录用户**（文本框）+ **SSH 钥匙**（下拉，数据源 `GET /api/v1/credentials?kind=ssh_key`，提交 `ssh_credential=条目名`）+ **提权开关**（默认关）；另有可选 **中转网关** 下拉（`GET /api/v1/job-gateways`，留空自动选路）。目标型任务缺用户/钥匙后端 400，报错文案已可直接展示 | 不给入口用户就只能把身份写在 runbook 里，回到“定义期猜钥匙”的老路 |
 | 执行详情 | `rollback_policy` 恒 manual，自动回滚开关从 UI 移除；`auto_rollback` **已从响应体删除**，前端任何引用都是 undefined | 用户勾了“失败自动回滚”以为已生效（实际始终手动） |
-| **凭据目录页** | `GET /api/v1/credentials?kind=ssh_key` 供执行弹窗下拉；详情页挂 `GET /{id}/usage` 展示引用反查（轮换前必看）；**表单上不要出现任何明文凭据输入框**，也不要把 `vault_path` 当可编辑文本让运维背；**v33：表单没有“登录用户”字段** | 回到手打路径的老问题；误删在用的钥匙 |
+| **凭据目录页** | `GET /api/v1/credentials?kind=ssh_key` 供执行弹窗下拉；详情页挂 `GET /{id}/usage` 展示引用反查（轮换前必看）；**表单只剩 4 个框**（v36）：名称 / 类型 / **Vault 引用（单串 `vault_ref`，形如 `ssh/keys/ops#private_key`）** / 备注——**已删：登录用户（v33）、适用范围云账号与区域、设为默认（v36）**；不得出现任何明文凭据输入框 | 回到手打路径的老问题；误删在用的钥匙；给用户两个“填了也不会发生”的框 |
 | **中转网关页** | 表单只留 6 个框：名称 / 主机 IP / 端口 / 登录用户 / 跳板凭据（下拉，可空=复用目标机钥匙）/ **接管 VPC（多选，数据源 `GET /cmdb/resources?model_code=aliyun_vpc|gcp_vpc`，不让人手打 ID）**。**区域/云账号/资源 ID 三个框与 priority 已删**（v35）；同一 VPC 被别的网关占用时后端返 409，直接展示即可 | 四个维度框三个不填，用户仍要理解“任一命中/空不接管/priority 升序”三条规则 |
 | **机器选择器按 VPC 筛**（v35 新增能力） | `GET /cmdb/resources?model_id=<aliyun_ecs>&status=running&field_key=vpc_id&field_value=vpc-2ze…`（`field_key` 不传则退回全字段匹配） | 跨 VPC 时只能逐台认，或把“哪些机器同网”记在人脑子里 |
 | ~~主机标签配置/可达性看板~~（v34 已删） | 不需要为执行预配主机标签，`GET /job-gateways/reachability` 已随主机标签链路一并删除——连通性由执行本身回答，失败事件回流执行记录 | 维护一个前提已不存在的预检页 |
@@ -684,7 +694,8 @@ bingops-runner/
 | GitLab 自建与否 | 决定 P2 terraform state 是否可先用 GitLab 原生 backend 过渡 | P2 |
 | **批量 ping 实测连通** | 静态视图只能报“凭据齐不齐、匹配到哪条通道”，“要不要中转”必须实测。阻塞在 **ad-hoc 执行入口**（否则为测连通还得先建一个 runbook）；建议与 ad-hoc 一并做 | P2 |
 | **连接三件套撤到执行面**（v34 已落地） | `RunbookCreate/Update` 撤掉 `connection`/`ssh_user`/`ssh_key_ref`/`become`/`become_method`/`become_user`；`ExecutionCreate` 新增 `ssh_user`/`ssh_credential`/`become`/`gateway_name`。解析链：执行时填写 > `runbook.connection` 存量兜底 > 400；主机标签 `ssh_credential`/`ssh_user` 不再是执行链路一环（`usage` 反查仍读历史标签）。**无 DB 迁移**（targets/connection 均为既有 JSONB，快照即审计） | 已落地 |
-| v26~v34 已收敛项（备忘） | `proxy_hop` → `job_gateways` 表 + 自动选路（v32）；`serial`/`batch_pause_sec` 已删（v30）；`auto_rollback` 已删（v28）；主机标签 `ssh_user`/`ssh_credential` 退出执行链路、凭据 `login_user` 已删（v33/v34，连接三件套归执行面） | - |
+| **定义面再瘦身 + script 类型**（v36 已落地） | 删 `runbooks.default_target_resource_ids`/`default_code_ref`（目标机与版本归执行期，前端改做「复用上次的」）；删 `credentials.cloud_account`/`region`/`is_default` 与两个索引（无消费方）；凭据入口合并为单串 `vault_ref`（存储仍拆两列）；新增 `exec_type=script`（仓库脚本推送执行）。迁移：`sql/migrations/v36_definition_slim.sql` | 已落地 |
+| v26~v36 已收敛项（备忘） | `proxy_hop` → `job_gateways` 表（v32）+ VPC 单维度选路（v35）；`serial`/`batch_pause_sec` 已删（v30）；`auto_rollback` 已删（v28）；主机标签凭据与 `login_user` 退出执行链路（v33/v34）；默认目标机/默认版本/凭据适用范围已删（v36） | - |
 | 仍排除在本轮之外（防边重构边膨胀） | GitLab 仓库同步器、playbook-tree/tag 预检 API、自动回滚解冻、terraform apply 与 state、**多步编排**（v29 已从 API/表结构/消息三层全删；恢复 = 新增一张步骤表的演进） | P2 |
 | ~~`type: python` 与 `exec_mode: local`~~（v27 已落地） | python executor 已实现（步骤级 `run_on=local`）；不再需要独立的 `exec_mode` 字段——执行位置属于步骤属性而非 runbook 属性 | 已结案 |
 | ⚠ **runner 必须按 v29/v30 新消息形态重构** | dispatch 的 `steps` 数组已改为 `step` 单对象、入口字段统一为 `entry`、新增 `run_on`/`secrets`；**v30 又去掉了 step 里的 `serial`/`batch_pause_sec`/`undo_command`**，多目标并发度改读 runner 自己的 `max_parallel_hosts`。已部署 runner 不升级则**所有新任务不可执行**（无法解析 `step`）；旧 ansible 任务回滚不受影响（历史 execution 自带 step_snapshot，多余键被忽略）。部 bingops 前先把 runner 跟齐，期间可用 `BINGOPS_JOB_STEP_TYPES=ansible` 只允许已验证类型 | v29/v30 上线 |

@@ -32,8 +32,29 @@ __all__ = ["HOST_CREDENTIAL_TAG_KEY"]  # 供 job_service 解析目标机凭据�
 _PLAINTEXT_MARKERS = ("-----BEGIN", "PRIVATE KEY", "SSH-RSA AAAA")
 
 
+def split_vault_ref(vault_ref: str) -> tuple[str, str | None]:
+    """入口的单个 Vault 引用串 → (path, field)（v36）。
+
+    接受运维在 Vault 侧熟悉的形状 `path` 或 `path#field`，存储拆两列。
+    早期把它做成两个输入框，结果是“不知道哪个才是 Vault”——一个框
+    比两个框更贴近心智，拆列只是服务层的事。
+    """
+    value = (vault_ref or "").strip()
+    if "#" not in value:
+        if not value:
+            raise ValidationError("vault_ref is required（Vault 路径，形如 ssh/keys/ops）")
+        return value, None
+    path, _, field = value.partition("#")
+    path, field = path.strip(), field.strip()
+    if not path or not field:
+        raise ValidationError("vault_ref 形如 path 或 path#field，'#' 两侧不能为空")
+    if "#" in field:
+        raise ValidationError("vault_ref 只允许一个 '#'（path#field 为单层结构）")
+    return path, field
+
+
 def _validate(kind: str | None, fields: dict) -> None:
-    """kind 白名单 + 明文防呆 + path/field 拆分规范。"""
+    """kind 白名单 + 明文防呆。"""
     if kind is not None and kind not in CREDENTIAL_KINDS:
         raise ValidationError(
             f"unknown kind '{kind}' (supported: {list(CREDENTIAL_KINDS)})"
@@ -48,11 +69,6 @@ def _validate(kind: str | None, fields: dict) -> None:
                 f"{name} 疑似含明文凭据（命中 '{hit}'）；"
                 "凭据目录只允许存 Vault 引用，真值请放 Vault"
             )
-    path = fields.get("vault_path")
-    if path and "#" in path:
-        raise ValidationError(
-            "vault_path 不得包含 '#'；请把字段名填到 vault_field（path#field 已拆分存储）"
-        )
 
 
 async def list_credentials(
@@ -68,11 +84,8 @@ async def list_credentials(
 async def create_credential(
     session: AsyncSession, payload: CredentialCreate, user: User,
 ) -> Credential:
-    _validate(payload.kind, {
-        "vault_path": payload.vault_path,
-        "vault_field": payload.vault_field,
-        "remark": payload.remark,
-    })
+    _validate(payload.kind, {"vault_ref": payload.vault_ref, "remark": payload.remark})
+    vault_path, vault_field = split_vault_ref(payload.vault_ref)
     repo = CredentialRepo(session)
     if await repo.get_by_name(payload.name):
         raise ConflictError("Credential", f"name '{payload.name}' already exists")
@@ -80,17 +93,12 @@ async def create_credential(
     credential = Credential(
         name=payload.name,
         kind=payload.kind,
-        vault_path=payload.vault_path,
-        vault_field=payload.vault_field,
-        cloud_account=payload.cloud_account,
-        region=payload.region,
-        is_default=payload.is_default,
+        vault_path=vault_path,
+        vault_field=vault_field,
         remark=payload.remark,
         created_by=user.id,
     )
     credential = await repo.create(credential)
-    if credential.is_default:
-        await repo.clear_default(credential.kind, except_id=credential.id)
     await session.commit()
     logger.info(
         "Credential created",
@@ -120,17 +128,20 @@ async def update_credential(
     data = payload.model_dump(exclude_unset=True)
     _validate(data.get("kind", credential.kind), {
         name: data.get(name)
-        for name in ("vault_path", "vault_field", "remark")
+        for name in ("vault_ref", "remark")
         if name in data
     })
+    # 入口单串 → 存储两列（不能把 vault_ref 直接 setattr，表上没这列）
+    if "vault_ref" in data:
+        vault_path, vault_field = split_vault_ref(data.pop("vault_ref"))
+        data["vault_path"] = vault_path
+        data["vault_field"] = vault_field
     new_name = data.get("name")
     if new_name and new_name != credential.name:
         if await CredentialRepo(session).get_by_name(new_name):
             raise ConflictError("Credential", f"name '{new_name}' already exists")
     for key, value in data.items():
         setattr(credential, key, value)
-    if credential.is_default:
-        await CredentialRepo(session).clear_default(credential.kind, except_id=credential.id)
     await CredentialRepo(session).update(credential)
     await session.commit()
     logger.info("Credential updated", extra={"credential_id": credential.id})

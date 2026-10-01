@@ -24,14 +24,19 @@ class RunbookCreate(BaseModel):
     """创建 Runbook（v29 扁平单步：一个 runbook = 一个步骤）。
 
     必填只两项：`exec_type`（执行方式，UI 下拉）+ `entry`（入口）。
-    entry 语义随 exec_type 变：ansible=playbook 路径、python=脚本入口、
-    terraform=工作目录、**shell 恒为命令字符串**（跑仓库脚本就写 `bash scripts/x.sh`）。
+    entry 语义随 exec_type 变：ansible=playbook 路径、shell=**内联命令**、
+    script=**仓库内脚本文件路径**（runner 拉仓库后推送执行，目标机不需预置该文件）、
+    python=脚本入口、terraform=工作目录。
     不再接收 `steps` 数组（多步编排不开放）。
     """
 
     name: str = Field(max_length=128)
-    exec_type: str = Field(description="ansible | shell | python | terraform")
-    entry: str = Field(description="playbook 路径 / 命令字符串 / python 脚本 / tf 目录")
+    exec_type: str = Field(
+        description="ansible | shell | script | python | terraform"
+    )
+    entry: str = Field(
+        description="playbook 路径 / 内联命令 / 仓库脚本路径 / python 脚本 / tf 目录"
+    )
     category: str | None = None
     description: str | None = None
     params_schema: dict = Field(default_factory=dict)
@@ -48,9 +53,8 @@ class RunbookCreate(BaseModel):
     # ── 以下均有安全缺省值 ──
     target_models: list[str] | None = None  # None → 默认 [aliyun_ecs, gcp_compute]
     risk_level: str = "low"
-    # 默认执行目标与版本：执行时不传即继承，执行弹窗可只填参数
-    default_target_resource_ids: list[int] | None = None
-    default_code_ref: str | None = None
+    # v36：default_target_resource_ids / default_code_ref 已删除——目标机与版本
+    # 属于每次执行，不得缓存在模板上（前端改用「复用上次的」读执行历史）
 
 
 class RunbookUpdate(BaseModel):
@@ -66,8 +70,6 @@ class RunbookUpdate(BaseModel):
     rollbackable: bool | None = None
     target_models: list[str] | None = None
     risk_level: str | None = None
-    default_target_resource_ids: list[int] | None = None
-    default_code_ref: str | None = None
     is_active: bool | None = None
 
 
@@ -86,8 +88,6 @@ class RunbookResponse(BaseModel):
     rollbackable: bool
     connection: dict
     target_models: list
-    default_target_resource_ids: list
-    default_code_ref: str | None
     version: int
     risk_level: str
     is_active: bool
@@ -104,9 +104,9 @@ class ExecutionCreate(BaseModel):
     params: dict = Field(default_factory=dict)
     # 需走 Vault 的入参：{变量名: Vault 钥匙名}（未传则用 secrets_schema.default_ref 回填）
     secrets: dict = Field(default_factory=dict)
-    # 未传→继承 runbook.default_target_resource_ids；显式传空数组→不继承（400）
+    # 目标机：v36 起必须每次显式传（runbook 已无默认绑定），无 target 型步骤的任务可空
     target_resource_ids: list[int] | None = None
-    # 未传→runbook.default_code_ref→平台配置 job_default_code_ref；全空则 400
+    # 仓库版本：显式传 > 平台配置 BINGOPS_JOB_DEFAULT_CODE_REF > 400
     code_ref: str | None = Field(default=None, max_length=128)
     ticket_id: int | None = None  # P3：高危 runbook 必须携带已审批通过的工单
     # ── 连接三件套（v34：执行时填写，不进 runbook 定义）──

@@ -29,7 +29,7 @@ HOST_CREDENTIAL_TAG_KEY = "ssh_credential"
 
 
 class Credential(BaseMixin, Base):
-    """凭据目录条目：把「哪把钥匙、属于谁、能干什么」收敛成可下拉选择的实体。
+    """凭据目录条目：把“哪把钥匙、在哪取”收敛成可下拉选择的实体。
 
     存在的意义是消灭自由文本的凭据引用——手打 Vault 路径打错了，要等 runner
     异步取值失败才暴露；改成从目录里选，不存在的选项在表单上就选不出来。
@@ -46,13 +46,11 @@ class Credential(BaseMixin, Base):
     # v33 删除 login_user：同一把钥匙常被授权给不同主机上的不同用户（跨用户是常态），
     # “用哪个用户连”属于主机（标签 ssh_user），不属于钥匙材料
     vault_path: Mapped[str] = mapped_column(String(512), nullable=False)
-    # KV v2 的字段名（引用形如 path#field 时拆出来存这列）
+    # KV v2 的字段名（入口收 `path#field` 单串，这里拆两列存）
     vault_field: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    # 适用范围（可空 = 不限）：解析主机凭据时用于唯一匹配
-    cloud_account: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    region: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    # 同 kind 下的兜底凭据（唯一性由部分索引保证）
-    is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # v36 删除 cloud_account / region / is_default：这三个字段只服务于“按机器
+    # 自动解析凭据”的链路，而该链路已在 v34 被“执行时人选”取代——
+    # 没有消费方的字段就是噪声（适用范围与默认项在表单上根本说不清用途）
     verify_state: Mapped[str] = mapped_column(String(16), nullable=False, default="unknown")
     last_verified_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True,

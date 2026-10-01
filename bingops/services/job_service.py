@@ -62,14 +62,16 @@ DEFAULT_TARGET_MODELS: list[str] = ["aliyun_ecs", "gcp_compute"]
 # 唯一步骤的缺省超时（秒）
 DEFAULT_STEP_TIMEOUT_SEC = 600
 
-# 可平铺传入的 connection 糖字段（v34 已从创建面撤除；存量 runbook 的 connection
-# 列保留为兜底与提权存储，仅读取不再写入）
-
-# 执行类型 → 默认执行位置（v29 扁平单步）：ansible/shell 跑在目标机上，
-# python/terraform 在 runner 本机
+# 执行类型 → 默认执行位置（v29 扁平单步）：ansible/shell/script 跑在目标机上，
+# python/terraform 在 runner 本机。
+# shell 与 script 的分界是“入口是什么”而不是“在哪里跑”：shell 的 entry 是
+# 内联命令（目标机 shell 直接执行），script 的 entry 是**仓库内的脚本文件**
+# （runner 从 code_ref 拉仓库后用 ansible script 模块推送执行）——目标机
+# 上并没有那个文件，拿 shell 去 `bash scripts/x.sh` 必失败。
 EXEC_TYPE_RUN_ON: dict[str, str] = {
     "ansible": "target",
     "shell": "target",
+    "script": "target",
     "python": "local",
     "terraform": "local",
 }
@@ -85,9 +87,10 @@ _STEP_COLUMNS = (
 )
 
 # 定义类字段变更 → version +1（execution 快照语义）
+# v36：default_target_resource_ids / default_code_ref 已删除——目标机与版本
+# 是每次执行的核心决策，不得缓存到定义面
 _DEFINITION_FIELDS = (
-    *_STEP_COLUMNS, "params_schema", "secrets_schema", "connection",
-    "target_models", "default_target_resource_ids", "default_code_ref",
+    *_STEP_COLUMNS, "params_schema", "secrets_schema", "connection", "target_models",
 )
 
 # 报错即文档：契约不满足时把最小可用示例直接回给作者
@@ -291,8 +294,6 @@ async def create_runbook(session: AsyncSession, payload: RunbookCreate, user: Us
         params_schema=payload.params_schema,
         secrets_schema=payload.secrets_schema,
         target_models=payload.target_models or list(DEFAULT_TARGET_MODELS),
-        default_target_resource_ids=list(payload.default_target_resource_ids or []),
-        default_code_ref=payload.default_code_ref,
         risk_level=payload.risk_level,
         created_by=user.id,
         **step,
@@ -481,17 +482,16 @@ async def create_execution(
     # P3 高危门控：中高危必须挂已审批工单（先于目标快照，提前拒绝）
     await _check_approval_gate(session, runbook, payload.ticket_id, user)
 
-    # 目标继承（v26）+ 按步骤类型可选（v27）：未传取 runbook 默认绑定；
-    # 显式传空数组视为无目标，不继承。无 run_on=target 步骤的任务允许无目标。
+    # 目标机（v36）：必须由每次执行显式选择，不再从 runbook 继承“默认目标”。
+    # 目标锁/封禁/审批/审计全以目标机为对象，预选项会把最危险的一步变成“不假思索”；
+    # 要省点击就做「复用上次的目标机」（数据源是 job_executions 快照，不会腐烂）。
     # 继承来的目标照走 running / target_models 白名单 / 并发锁硬校验——简化的是
     # 填写量，不是安全边界
-    resource_ids = payload.target_resource_ids
-    if resource_ids is None:
-        resource_ids = list(runbook.default_target_resource_ids or []) if needs_targets else []
+    resource_ids = list(payload.target_resource_ids or [])
     if needs_targets and not resource_ids:
         raise ValidationError(
-            "target_resource_ids is required: none provided and "
-            f"runbook {runbook.id} has no default binding"
+            "target_resource_ids is required: 目标机必须由每次执行显式选择"
+            "（前端可用「复用上次的目标机」从执行历史带入）"
         )
     targets = (
         await _snapshot_targets(session, resource_ids, gateway_name=payload.gateway_name)
@@ -531,13 +531,13 @@ async def create_execution(
                 f"(status={exe.status})",
             )
 
-    # 版本回落链（v26）：显式传 > runbook.default_code_ref > 平台配置；
-    # 全空即拒绝——不给“默认 main”兜底，避免同一执行对应不同代码破坏快照语义
-    code_ref = payload.code_ref or runbook.default_code_ref or settings.job_default_code_ref
+    # 版本回落链（v36）：显式传 > 平台配置；全空即拒绝。不在 runbook 上缓存
+    # 默认版本——不给“同一执行对应不同代码”留静默路径，也不让旧 tag 静默生效
+    code_ref = payload.code_ref or settings.job_default_code_ref
     if not code_ref:
         raise ValidationError(
-            "code_ref is required: none provided, runbook has no default_code_ref "
-            "and platform BINGOPS_JOB_DEFAULT_CODE_REF is empty"
+            "code_ref is required: 未显式传仓库版本，且平台未配置 "
+            "BINGOPS_JOB_DEFAULT_CODE_REF（前端可用「复用上次的版本」带入）"
         )
 
     execution = JobExecution(

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bingops.models.credential import Credential
@@ -51,7 +51,7 @@ class CredentialRepo:
             query = query.where(
                 or_(
                     Credential.name.ilike(f"%{keyword}%"),
-                    Credential.login_user.ilike(f"%{keyword}%"),
+                    Credential.vault_path.ilike(f"%{keyword}%"),
                     Credential.remark.ilike(f"%{keyword}%"),
                 )
             )
@@ -66,38 +66,6 @@ class CredentialRepo:
         result = await self.session.execute(query)
         return list(result.scalars().all()), total
 
-    async def resolve(
-        self, kind: str, cloud_account: str | None, region: str | None,
-    ) -> list[Credential]:
-        """按适用范围匹配启用中的凭据（NULL = 通配）。
-
-        返回列表交给调用方判歧义：唯一命中才自动采用，多命中必须问人，
-        不能靠排序猜——猜错的后果是用错账号连上生产机。
-        """
-        query = select(Credential).where(
-            Credential.kind == kind,
-            Credential.is_active.is_(True),
-            or_(Credential.cloud_account.is_(None), Credential.cloud_account == cloud_account),
-            or_(Credential.region.is_(None), Credential.region == region),
-        )
-        result = await self.session.execute(query.order_by(Credential.name))
-        return list(result.scalars().all())
-
-    async def get_default(self, kind: str) -> Credential | None:
-        result = await self.session.execute(
-            select(Credential).where(
-                Credential.kind == kind,
-                Credential.is_active.is_(True),
-                Credential.is_default.is_(True),
-            )
-        )
-        return result.scalars().first()
-
-    async def clear_default(self, kind: str, except_id: int | None = None) -> None:
-        """同 kind 只允许一个默认条目（设新默认时自动降级旧默认）。"""
-        query = update(Credential).where(
-            Credential.kind == kind, Credential.is_default.is_(True)
-        )
-        if except_id is not None:
-            query = query.where(Credential.id != except_id)
-        await self.session.execute(query.values(is_default=False))
+    # v36 删除 resolve() / get_default() / clear_default()：它们服务于
+    # “按机器适用范围自动匹配凭据 + 同 kind 默认项”的解析链，而该链已在
+    # v34 被“执行时从目录人选”取代——没有调用方的查询方法就是死代码。

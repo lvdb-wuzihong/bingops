@@ -25,9 +25,9 @@ class Settings(BaseSettings):
     # 留空 = 必须显式指定（守住“版本不可移动”快照纪律，见 docs/task-system-design.md §3.4）
     job_default_code_ref: str = ""
 
-    # 任务系统：允许创建/执行的步骤类型白名单（逗号分隔：ansible,shell,python,terraform）。
+    # 任务系统：允许创建/执行的步骤类型白名单（逗号分隔：ansible,shell,script,python,terraform）。
     # 上线顺序保险：runner 尚未支持新 executor 时收紧为 ansible，平台侧即拒绝而不是下发后失败
-    job_step_types: str = "ansible,shell,python"
+    job_step_types: str = "ansible,shell,script,python"
 
     # 日志文件输出：空字符串=不落盘（仅 stdout）；配置后按天轮转+gzip 压缩
     log_dir: str = ""

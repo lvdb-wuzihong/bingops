@@ -360,10 +360,9 @@ CREATE TABLE credentials (
     -- v33 已删除 login_user：跨用户是常态（同一把钥匙授权给不同主机的不同用户），
     -- 登录身份属于主机（标签 ssh_user），不属于钥匙材料
     vault_path       VARCHAR(512) NOT NULL,             -- 只存路径，绝不存值
-    vault_field      VARCHAR(128),                      -- KV 字段名（path#field 拆分存储）
-    cloud_account    VARCHAR(128),                      -- 适用范围，NULL = 不限
-    region           VARCHAR(64),
-    is_default       BOOLEAN      NOT NULL DEFAULT FALSE,
+    vault_field      VARCHAR(128),                      -- KV 字段名（入口收 path#field 单串，存储拆两列）
+    -- v36 删除 cloud_account / region / is_default：它们只服务于已废弃的
+    -- “按机器自动解析凭据”链路（v34 改为执行时人选），无消费方即噪声
     verify_state     VARCHAR(16)  NOT NULL DEFAULT 'unknown',  -- runner 回填：unknown|ok|failed
     last_verified_at TIMESTAMPTZ,
     remark           TEXT,
@@ -373,10 +372,8 @@ CREATE TABLE credentials (
     updated_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
 
--- 同 kind 只允许一个默认条目（部分唯一索引）
-CREATE UNIQUE INDEX uq_credential_default_per_kind
-    ON credentials (kind) WHERE is_default;
-CREATE INDEX idx_credential_kind_scope ON credentials (kind, cloud_account, region);
+-- v36 已删除 uq_credential_default_per_kind（默认凭据概念随 is_default 一起消失）
+CREATE INDEX idx_credential_kind ON credentials (kind);
 
 -- ============================================================================
 -- 中转网关（bastion）：网络拓扑事实，不是任务属性
@@ -427,9 +424,8 @@ CREATE TABLE runbooks (
     -- 多目标并发度下沉为执行机部署级配置
     connection    JSONB        NOT NULL DEFAULT '{}',   -- {ssh_user, ssh_key_ref, become, become_method, become_user}
     target_models JSONB        NOT NULL DEFAULT '["aliyun_ecs", "gcp_compute"]',
-    -- 执行默认绑定：执行未传 target_resource_ids / code_ref 时继承（v26 简化）
-    default_target_resource_ids JSONB NOT NULL DEFAULT '[]',
-    default_code_ref VARCHAR(128),
+    -- v36 已删除 default_target_resource_ids / default_code_ref：目标机与代码
+    -- 版本属于每次执行，缓存在模板上会把“必须确认的一步”变成预选项
     version       INT          NOT NULL DEFAULT 1,
     risk_level    VARCHAR(16)  NOT NULL DEFAULT 'low',
     is_active     BOOLEAN      NOT NULL DEFAULT TRUE,

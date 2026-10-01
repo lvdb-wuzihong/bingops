@@ -43,8 +43,6 @@ def _runbook_to_response(runbook: Runbook) -> dict:
         rollbackable=runbook.rollbackable,
         connection=runbook.connection or {},
         target_models=runbook.target_models or [],
-        default_target_resource_ids=runbook.default_target_resource_ids or [],
-        default_code_ref=runbook.default_code_ref,
         version=runbook.version,
         risk_level=runbook.risk_level,
         is_active=runbook.is_active,
@@ -132,11 +130,13 @@ async def create_runbook(
 ):
     """创建 runbook（v29 扁平单步：一个 runbook = 一个步骤）。
 
-    必填只两项：exec_type（ansible | shell | python | terraform）+ entry。
-    entry 语义随类型变：ansible=playbook 路径、python=脚本入口、
-    terraform=工作目录、shell 恒为命令字符串。
-    run_on 缺省按类型推断（ansible/shell=target，python=local）；steps 已不接收。
+    必填只两项：exec_type（ansible | shell | script | python | terraform）+ entry。
+    entry 语义随类型变：ansible=playbook 路径、shell=内联命令、
+    script=仓库内脚本文件路径（runner 拉仓库后推送执行，目标机不需预置）、
+    python=脚本入口、terraform=工作目录。
+    run_on 缺省按类型推断（ansible/shell/script=target，python=local）；steps 已不接收。
     v34：登录用户/密钥/提权全部在执行时提供，本接口不再接受任何连接字段。
+    v36：不再接受 default_target_resource_ids / default_code_ref（目标机与版本属于执行）。
     需走 Vault 的值声明在 secrets_schema，与 params_schema（明文）分开。
     """
     runbook = await job_service.create_runbook(session, payload, current_user)
