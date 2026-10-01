@@ -19,12 +19,12 @@ from bingops.core.exceptions import (
 )
 from bingops.models.cmdb.model import CmdbModel
 from bingops.models.cmdb.resource import CmdbResource
-from bingops.models.cmdb.tag import CmdbResourceTag
-from bingops.models.credential import HOST_CREDENTIAL_TAG_KEY, Credential
+from bingops.models.credential import CREDENTIAL_KINDS
 from bingops.models.jobs import JobExecution, JobStep, Runbook
 from bingops.models.ticket import Ticket
 from bingops.models.user import User
 from bingops.repositories.credential_repo import CredentialRepo
+from bingops.repositories.job_gateway_repo import JobGatewayRepo
 from bingops.repositories.jobs_repo import (
     JobExecutionRepo,
     JobStepLogRepo,
@@ -39,7 +39,12 @@ from bingops.schemas.jobs import (
     RunbookCreate,
     RunbookUpdate,
 )
-from bingops.services import change_freeze_service
+from bingops.services import (
+    change_freeze_service,
+    credential_service,
+    gateway_service,
+)
+from bingops.services.credential_service import vault_ref_of
 from bingops.tasks.jobs import dispatcher
 
 logger = logging.getLogger(f"bingops.{__name__}")
@@ -182,30 +187,72 @@ def _validate_connection(connection: dict) -> None:
         raise ValidationError("connection.ssh_key_ref must be a non-empty Vault key name")
 
 
-def _validate_secrets(secrets_schema: dict, secrets: dict) -> dict:
-    """secrets 校验：变量名必须已声明、必填项齐备、default_ref 回填。
+def _validate_secrets_schema(secrets_schema: dict) -> None:
+    """secrets_schema 条目形式校验（v32）。
 
-    值一律是 Vault 钥匙名（路径#字段），平台不解析内容、不做路径白名单——
-    能读哪些密钥由 runner AppRole 的 Vault policy 决定（单一权限事实源）。
-    只允许 runbook 预先声明的变量名，防执行者注入任意变量名拉取未预期密钥。
+    条目可选 `kind`：限定引用的凭据类型（如 db_password），前端据此过滤下拉候选；
+    写错类型在创建时就拒，而不是拖到执行时才发现解不出。
+    """
+    for name, spec in (secrets_schema or {}).items():
+        if not isinstance(spec, dict):
+            continue
+        kind = spec.get("kind")
+        if kind is not None and kind not in CREDENTIAL_KINDS:
+            raise ValidationError(
+                f"secrets_schema '{name}': unknown kind '{kind}' "
+                f"(supported: {list(CREDENTIAL_KINDS)})"
+            )
+
+
+async def _validate_secrets(
+    session: AsyncSession, secrets_schema: dict, secrets: dict,
+) -> dict:
+    """secrets 校验 + 凭据目录解析（v32），返回可直接下发的 Vault 引用集。
+
+    值可以是 `credentials.name`（推荐：下拉选、可反查影响面），也可以是裸
+    Vault 路径（存量兼容）。条目声明了 `kind` 时强制走目录并校验类型匹配。
+    平台不读 Vault，只把名字展开成路径；取真值仍是 runner 的唯一出口。
     """
     declared = secrets_schema or {}
-    normalized = dict(secrets or {})
-    undeclared = sorted(set(normalized) - set(declared))
+    provided = dict(secrets or {})
+    undeclared = sorted(set(provided) - set(declared))
     if undeclared:
         raise ValidationError(f"secrets not declared in runbook secrets_schema: {undeclared}")
+
+    repo = CredentialRepo(session)
+    out: dict[str, str] = {}
     for name, spec in declared.items():
-        value = normalized.get(name)
+        spec = spec if isinstance(spec, dict) else {}
+        value = provided.get(name)
         if value is None:
-            if isinstance(spec, dict) and spec.get("default_ref"):
-                normalized[name] = spec["default_ref"]
-                continue
-            if isinstance(spec, dict) and spec.get("required"):
+            if spec.get("default_ref"):
+                value = spec["default_ref"]
+            elif spec.get("required"):
                 raise ValidationError(f"missing required secret: {name}")
-            continue
+            else:
+                continue
         if not isinstance(value, str) or not value.strip():
-            raise ValidationError(f"secret '{name}' must be a non-empty Vault key reference")
-    return normalized
+            raise ValidationError(
+                f"secret '{name}' must be a credential name or a Vault reference"
+            )
+        value = value.strip()
+        credential = await repo.get_by_name(value)
+        if credential is not None:
+            want_kind = spec.get("kind")
+            if want_kind and credential.kind != want_kind:
+                raise ValidationError(
+                    f"secret '{name}': credential '{value}' is kind "
+                    f"'{credential.kind}', expected '{want_kind}'"
+                )
+            out[name] = vault_ref_of(credential)
+        elif spec.get("kind"):
+            raise ValidationError(
+                f"secret '{name}': '{value}' is not in the credential catalog, "
+                f"but this entry requires kind '{spec['kind']}'"
+            )
+        else:
+            out[name] = value  # 存量兼容：直接当 Vault 路径透传
+    return out
 
 
 def _validate_params(params_schema: dict, params: dict) -> dict:
@@ -254,6 +301,7 @@ async def list_runbooks(
 
 
 async def create_runbook(session: AsyncSession, payload: RunbookCreate, user: User) -> Runbook:
+    _validate_secrets_schema(payload.secrets_schema)
     step = _build_step(
         payload.exec_type, payload.entry, run_on=payload.run_on,
         timeout_sec=payload.timeout_sec, rollbackable=payload.rollbackable,
@@ -293,6 +341,8 @@ async def get_runbook(session: AsyncSession, runbook_id: int) -> Runbook:
 async def update_runbook(session: AsyncSession, runbook_id: int, payload: RunbookUpdate) -> Runbook:
     runbook = await get_runbook(session, runbook_id)
     data = payload.model_dump(exclude_unset=True)
+    if "secrets_schema" in data:
+        _validate_secrets_schema(data["secrets_schema"])
     # 步骤列部分更新：与存量列合并后整体校验（只改 timeout 也不会破坏入口契约），
     # 并把归一后的缺省值回写 data（run_on 等推断值不落库为空）
     if any(k in data for k in _STEP_COLUMNS):
@@ -335,75 +385,44 @@ async def delete_runbook(session: AsyncSession, runbook_id: int) -> None:
 # ── 执行编排 ──────────────────────────────────────────────────────────────────
 
 
-def _vault_ref(credential: Credential) -> str:
-    """拼 runner 消费的 Vault 引用串（path 或 path#field）。"""
-    if credential.vault_field:
-        return f"{credential.vault_path}#{credential.vault_field}"
-    return credential.vault_path
-
-
-async def _resolve_target_credentials(
+async def _resolve_target_access(
     session: AsyncSession,
     rows: dict[int, tuple[CmdbResource, str]],
     connection: dict | None,
-) -> dict[int, tuple[str | None, str | None]]:
-    """逐台目标机解析 (登录用户, SSH 凭据引用)（v31 凭据目录）。
+) -> dict[int, tuple[str | None, str | None, dict | None]]:
+    """逐台目标机解析 (登录用户, 凭据引用, 中转网关)。
 
-    优先级：主机标签 ssh_credential → 适用范围唯一命中 → 同 kind 的 is_default
-    → runbook.connection.ssh_key_ref（存量兜底，行为不变）。
-    多命中不猜：报错列出候选——猜错的后果是用错账号连上生产机。
-    登录用户：connection.ssh_user（任务声明的身份要求）> 凭据自带的 login_user。
+    凭据链由 credential_service 统一提供（可达视图复用同一实现，避免两处漂移）；
+    本函数负责把“解析不出”升级为 400——创建执行时必须失败在执行前，
+    而不是下发后让 runner 报 SSH 超时。
+    网关由 gateway_service 按机器归属算出，None = 直连。
     """
-    repo = CredentialRepo(session)
-    fallback_ref = (connection or {}).get("ssh_key_ref")
-    fallback_user = (connection or {}).get("ssh_user")
+    hosts = [
+        (rid, res.name, res.cloud_account, res.region)
+        for rid, (res, _code) in rows.items()
+    ]
+    creds = await credential_service.resolve_host_credentials(session, hosts, connection)
+    active_gateways = await JobGatewayRepo(session).list_active()
 
-    tag_rows = await session.execute(
-        select(CmdbResourceTag.resource_id, CmdbResourceTag.tag_value).where(
-            CmdbResourceTag.resource_id.in_(list(rows)),
-            CmdbResourceTag.tag_key == HOST_CREDENTIAL_TAG_KEY,
-        )
-    )
-    tagged = dict(tag_rows.all())
-
-    resolved: dict[int, tuple[str | None, str | None]] = {}
+    out: dict[int, tuple[str | None, str | None, dict | None]] = {}
     for rid, (res, _code) in rows.items():
-        credential: Credential | None = None
-        tagged_name = tagged.get(rid)
-        if tagged_name:
-            credential = await repo.get_by_name(tagged_name)
-            if credential is None:
-                raise ValidationError(
-                    f"host '{res.name}' tag ssh_credential='{tagged_name}' "
-                    "not found in credential catalog"
-                )
-        else:
-            candidates = await repo.resolve("ssh_key", res.cloud_account, res.region)
-            if len(candidates) > 1:
-                defaults = [c for c in candidates if c.is_default]
-                if len(defaults) == 1:
-                    candidates = defaults
-                else:
-                    raise ValidationError(
-                        f"host '{res.name}' matches multiple ssh credentials "
-                        f"{[c.name for c in candidates]}; "
-                        "set tag ssh_credential to disambiguate"
-                    )
-            credential = candidates[0] if candidates else await repo.get_default("ssh_key")
-
-        if credential is not None:
-            resolved[rid] = (
-                fallback_user or credential.login_user,
-                _vault_ref(credential),
+        cred = creds[rid]
+        if cred.error or not cred.vault_ref:
+            raise ValidationError(cred.error or f"host '{res.name}' ssh credential unresolved")
+        fields = res.fields or {}
+        host = {
+            "resource_id": res.id,
+            "cloud_account": res.cloud_account,
+            "region": res.region,
+            "vpc_id": fields.get("vpc_id"),
+        }
+        gateway_payload = None
+        if gateway_service.pick_gateway(active_gateways, host) is not None:
+            gateway_payload = await gateway_service.gateway_payload_for_host(
+                session, host, active_gateways
             )
-        elif fallback_ref:
-            resolved[rid] = (fallback_user, fallback_ref)
-        else:
-            raise ValidationError(
-                f"host '{res.name}' has no ssh credential: set tag ssh_credential "
-                "on the host, or register a default credential in the catalog"
-            )
-    return resolved
+        out[rid] = (cred.login_user, cred.vault_ref, gateway_payload)
+    return out
 
 
 async def _snapshot_targets(
@@ -431,8 +450,8 @@ async def _snapshot_targets(
         detail = ", ".join(f"{name}({status})" for name, status in not_ready)
         raise ValidationError(f"targets not in running state: {detail}")
 
-    # v31：逐台解析登录用户与凭据引用——钥匙跟机器走，不跟任务走
-    creds = await _resolve_target_credentials(session, rows, connection)
+    # v31：逐台解析登录用户与凭据；v32：同时算出中转路径（钥匙跟机器走）
+    access = await _resolve_target_access(session, rows, connection)
 
     targets = []
     for rid in resource_ids:
@@ -445,12 +464,12 @@ async def _snapshot_targets(
             # provider_id 格式 {cluster}/{ns}/{name}（namespace 级）或 {cluster}/{name}
             parts = (res.provider_id or "").split("/")
             namespace = parts[1] if len(parts) >= 3 else None
-        ssh_user, ssh_key_ref = creds[rid]
+        ssh_user, ssh_key_ref, gateway = access[rid]
         targets.append(ExecutionTarget(
             resource_id=res.id, name=res.name, ip=ip, region=res.region, model_code=code,
             cluster_id=res.cloud_account if is_k8s else None,
             namespace=namespace,
-            ssh_user=ssh_user, ssh_key_ref=ssh_key_ref,
+            ssh_user=ssh_user, ssh_key_ref=ssh_key_ref, gateway=gateway,
         ))
     return targets
 
@@ -512,7 +531,7 @@ async def create_execution(
     needs_targets = runbook.run_on == "target"
     _validate_connection(runbook.connection)
     params = _validate_params(runbook.params_schema, payload.params)
-    secrets = _validate_secrets(runbook.secrets_schema, payload.secrets)
+    secrets = await _validate_secrets(session, runbook.secrets_schema, payload.secrets)
 
     # P3 高危门控：中高危必须挂已审批工单（先于目标快照，提前拒绝）
     await _check_approval_gate(session, runbook, payload.ticket_id, user)

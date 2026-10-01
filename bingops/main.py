@@ -24,6 +24,7 @@ from bingops.api.v1 import (
     auth,
     credentials,
     feishu_events,
+    gateways,
     jobs,
     roles,
     sd,
@@ -185,6 +186,7 @@ app.include_router(group_router)
 app.include_router(oncall_router)
 app.include_router(jobs.router)
 app.include_router(credentials.router)
+app.include_router(gateways.router)
 app.include_router(alerts.router)
 app.include_router(alerts.source_router)
 app.include_router(alerts.channel_router)

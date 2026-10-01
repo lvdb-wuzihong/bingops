@@ -378,6 +378,32 @@ CREATE UNIQUE INDEX uq_credential_default_per_kind
 CREATE INDEX idx_credential_kind_scope ON credentials (kind, cloud_account, region);
 
 -- ============================================================================
+-- 中转网关（bastion）：网络拓扑事实，不是任务属性
+-- 选路由机器归属（vpc/云账号/地域/显式主机）在执行期算出，见 §5.2
+-- ============================================================================
+
+CREATE TABLE job_gateways (
+    id               BIGSERIAL PRIMARY KEY,
+    name             VARCHAR(128) NOT NULL UNIQUE,
+    host             VARCHAR(128) NOT NULL,
+    port             INT          NOT NULL DEFAULT 22,
+    login_user       VARCHAR(64)  NOT NULL DEFAULT 'root',
+    -- 网关自身登录钥匙：引用 credentials.name（可反查“哪些网关还在用这把钥匙”）
+    ssh_credential   VARCHAR(128),
+    -- 选择维度：{vpc_ids:[], cloud_accounts:[], regions:[], resource_ids:[]}
+    -- 空 scope 不匹配任何机器（不提供全局兜底，避免误配接管全部流量）
+    scope            JSONB        NOT NULL DEFAULT '{}',
+    priority         INT          NOT NULL DEFAULT 100,  -- 多网关命中时升序取首
+    remark           TEXT,
+    is_active        BOOLEAN      NOT NULL DEFAULT TRUE,
+    created_by       BIGINT       REFERENCES users(id) ON DELETE SET NULL,
+    created_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    updated_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_job_gateway_active ON job_gateways (is_active, priority);
+
+-- ============================================================================
 -- 任务系统 runbook 定义（前置于工单系统：tickets.runbook_id 与
 -- job_executions.runbook_id 外键依赖 runbooks，初始化顺序必须先建）
 -- ============================================================================
@@ -712,7 +738,7 @@ BEGIN
             'cmdb_option_sets', 'cmdb_resources', 'cmdb_business_apps',
             'cmdb_tag_definitions', 'cmdb_resource_tags', 'cmdb_sync_tasks',
             'tickets',
-            'credentials',
+            'credentials', 'job_gateways',
             'runbooks', 'job_executions', 'job_steps',
             'change_freezes',
             'ticket_catalog', 'ticket_groups', 'oncall_schedules',
@@ -782,6 +808,11 @@ INSERT INTO permissions (code, name) VALUES
 ('credential:create',  '创建凭据'),
 ('credential:update',  '更新凭据'),
 ('credential:delete',  '删除凭据'),
+('gateway:list',       '查看中转网关与主机可达性'),
+('gateway:get',        '查看中转网关详情'),
+('gateway:create',     '创建中转网关'),
+('gateway:update',     '更新中转网关'),
+('gateway:delete',     '删除中转网关'),
 ('task:list',          '查看任务列表'),
 ('task:get',           '查看任务详情'),
 ('task:create',        '创建任务'),

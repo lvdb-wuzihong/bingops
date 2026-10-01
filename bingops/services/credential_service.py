@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -192,3 +193,108 @@ async def delete_credential(session: AsyncSession, credential_id: int) -> None:
     await CredentialRepo(session).delete(credential)
     await session.commit()
     logger.info("Credential deleted", extra={"credential_id": credential_id})
+
+
+# ── 目标机凭据解析（v31；v32 起供网关可达视图复用同一条链）──────────────
+
+
+@dataclass
+class ResolvedCredential:
+    """一台机器的凭据解析结果。`error` 非空表示无法解析，
+    由调用方决定是报错（创建执行）还是收集（可达视图）。"""
+
+    login_user: str | None = None
+    vault_ref: str | None = None
+    credential_name: str | None = None
+    error: str | None = None
+
+
+def vault_ref_of(credential: Credential) -> str:
+    """拼 runner 消费的 Vault 引用串（path 或 path#field）。"""
+    if credential.vault_field:
+        return f"{credential.vault_path}#{credential.vault_field}"
+    return credential.vault_path
+
+
+async def resolve_credential_ref(session: AsyncSession, name: str) -> str:
+    """按名字取 Vault 引用（网关自身钥匙用）；不存在或 kind 不符则 400。"""
+    credential = await CredentialRepo(session).get_by_name(name)
+    if credential is None:
+        raise ValidationError(f"credential '{name}' not found in catalog")
+    if credential.kind != "ssh_key":
+        raise ValidationError(
+            f"credential '{name}' is kind '{credential.kind}', expected 'ssh_key'"
+        )
+    return vault_ref_of(credential)
+
+
+async def resolve_host_credentials(
+    session: AsyncSession,
+    hosts: list[tuple[int, str, str | None, str | None]],
+    connection: dict | None = None,
+) -> dict[int, ResolvedCredential]:
+    """逐台解析 (登录用户, Vault 凭据引用)。
+
+    优先级：主机标签 ssh_credential → 适用范围唯一命中 → 同 kind 的 is_default
+    → connection.ssh_key_ref（存量兜底，行为不变）。登录用户：
+    connection.ssh_user（任务声明的身份要求）> 凭据自带 login_user；
+    刻意不设平台级默认用户——默认 root 会把漏配置变成高危行为。
+
+    hosts 元素 = (resource_id, name, cloud_account, region)。
+    """
+    repo = CredentialRepo(session)
+    fallback_ref = (connection or {}).get("ssh_key_ref")
+    fallback_user = (connection or {}).get("ssh_user")
+
+    tagged: dict[int, str] = {}
+    ids = [h[0] for h in hosts]
+    if ids:
+        tag_rows = await session.execute(
+            select(CmdbResourceTag.resource_id, CmdbResourceTag.tag_value).where(
+                CmdbResourceTag.resource_id.in_(ids),
+                CmdbResourceTag.tag_key == HOST_CREDENTIAL_TAG_KEY,
+            )
+        )
+        tagged = dict(tag_rows.all())
+
+    out: dict[int, ResolvedCredential] = {}
+    for rid, host_name, cloud_account, region in hosts:
+        credential: Credential | None = None
+        tagged_name = tagged.get(rid)
+        if tagged_name:
+            credential = await repo.get_by_name(tagged_name)
+            if credential is None:
+                out[rid] = ResolvedCredential(error=(
+                    f"host '{host_name}' tag ssh_credential='{tagged_name}' "
+                    "not found in credential catalog"
+                ))
+                continue
+        else:
+            candidates = await repo.resolve("ssh_key", cloud_account, region)
+            if len(candidates) > 1:
+                defaults = [c for c in candidates if c.is_default]
+                if len(defaults) == 1:
+                    candidates = defaults
+                else:
+                    out[rid] = ResolvedCredential(error=(
+                        f"host '{host_name}' matches multiple ssh credentials "
+                        f"{[c.name for c in candidates]}; "
+                        "set tag ssh_credential to disambiguate"
+                    ))
+                    continue
+            credential = candidates[0] if candidates else await repo.get_default("ssh_key")
+
+        if credential is not None:
+            out[rid] = ResolvedCredential(
+                login_user=fallback_user or credential.login_user,
+                vault_ref=vault_ref_of(credential),
+                credential_name=credential.name,
+            )
+        elif fallback_ref:
+            out[rid] = ResolvedCredential(login_user=fallback_user, vault_ref=fallback_ref)
+        else:
+            out[rid] = ResolvedCredential(error=(
+                f"host '{host_name}' has no ssh credential: set tag ssh_credential "
+                "on the host, or register a default credential in the catalog"
+            ))
+    return out

@@ -283,6 +283,7 @@ steps:
 - `default_ref` 命中时执行可不填（与 params 的 `default` 回填同构）；值必须是非空字符串，否则 400
 - runner 在 executor **之前**统一解析 secrets → 注入**同名环境变量**（`DB_PASSWORD` → env `DB_PASSWORD`）→ 明文加入 redact 列表；四种 executor 共用同一解析器，脚本/playbook 侧与 Vault 零耦合
 - 存量兼容：`params` 里 `*_ref` 后缀的旧约定 runner 继续按旧规则解析（剥后缀转大写 env），**不迁移、不破坏**；新建 runbook 一律用 `secrets_schema`
+- **v32：`secrets` 的值可以直填 `credentials.name`**——条目可选声明 `kind`（如 `db_password`），此时强制走目录解析并校验类型匹配（拼错名字、拿错类型都在创建执行时 400）；未声明 `kind` 时目录命中就用，否则当裸 Vault 路径透传（存量行为不变）。平台只把名字展开成路径，仍不读 Vault
 - ⚠ **工单自动下发路径不带 secrets**：`ticket_service` 构造 `ExecutionCreate` 只传 `params`（工单无密钥填写环节），因此**经由工单执行的 runbook，其 `secrets_schema` 每一条必须预置 `default_ref`**，否则执行报 `missing required secret`。要支持工单选人时填密钥，需给 `tickets.job_params` 加 `secrets` 键（本轮不做）
 
 ---
@@ -324,7 +325,7 @@ step:      pending → running → success / failed / skipped / rolled_back / ro
 - **Inventory 源 = CMDB**：下发时 bingops 从目标快照生成 `[{resource_id, name, ip, ssh_user, ssh_key_ref, gateway}]`——**v31 起凭据逐台携带**（不同密钥/不同跳板的机器可混在同一任务里），runner 优先用 target 上的值，缺失才回落 `connection`；资源选择器能力在此变现。**v27：全 local 任务不建 inventory**（targets 为空，不取 SSH 私钥）
 - **目标范围硬校验**：runbook.`target_models` 声明 scope（默认 `[aliyun_ecs, gcp_compute]`），`create_execution` 对快照 model_code 越界即 400；前端选择器按 target_models 传 `model_id` 过滤（UX 层，不替代后端校验）；K8s 对象 P2 以 local 模式扩入
 - **执行态硬校验**：目标 `status` 必须 = `running`（stopped SSH 必失败、maintenance 变更中；unknown/NULL 按 fail-safe 从严 400，报错带资源名+实际状态）；前端选择器同步传 `status=running`
-- **网络可达 / 跳板（proxy_hop 契约定稿，v26 冻结未启用）**：runner 部署于同 VPC 直连 22 端口；跳板能力保留在契约里但 UI 不出现、代码不要求（当前目标均为单台同 VPC 操作机）；真出现跨 VPC 需求时按本节实现：跨 VPC 目标在 connection（runbook 级）或 target 同名字段（两级覆盖）声明 `proxy_hop: {host, user, ssh_key_ref}`，runner 渲染 `ansible_ssh_common_args` 为 `ProxyCommand='ssh -i <跳板临时钥> -W %h:%p user@host'`。**坑**：`ansible_ssh_private_key_file` 只作用于最终目标，`ProxyJump=user@host` 简写不认它——跳板私钥必须显式 `-i` 写进 ProxyCommand；跳板钥同 Vault 纪律（临时 0600、用完即删、进 redact）
+- **网络可达 / 跳板**：**v32 起由 `job_gateways` 表 + 自动选路接管，不再让 runbook 写 `proxy_hop`**（漏声明的后果是 SSH 超时，现象像 playbook 写错），渲染细节与 `-i` 坑见 §5.2 与 §9.3 第 7 条；`connection.proxy_hop` 保留为历史字段，新配置不再读它
 - **connection 契约**（v31 降级为任务级兜底）：`ssh_user` 可作“身份要求”保留（高危任务强制低权账号）；`ssh_key_ref` **不再必填**，仅在目标机无标签且目录无默认时兜底；`become` 默认 false / `become_method` 默认 sudo / `become_user` 默认 root；**sudo 密码不进配置**：宿主机 NOPASSWD sudoers 由 bootstrap runbook 统刷，退路 `become_password_ref` 走 Vault+no_log；runner 渲染为 inventory 变量 `ansible_become*`
 
 ### 5.1 凭据解析（v31 凭据目录）
@@ -350,7 +351,30 @@ step:      pending → running → success / failed / skipped / rolled_back / ro
 
 **为什么不搞 Vault 路径白名单**：能读哪些路径由 runner AppRole 的 Vault policy 决定（单一权限事实源），bingops 不重复实现一套权限。`verify_state` / `last_verified_at` 由 **runner 回填**，bingops 全程不连 Vault（方案 C：保住“Vault 唯一出口在 runner”这条纪律）。
 
-**引用反查**（`GET /api/v1/credentials/{id}/usage`）：返回被多少主机标签 / 多少 runbook 引用。这是密钥轮换前的必看信息；有引用时**拒绝删除**，只能停用（`is_active=false`）。
+**引用反查**（`GET /api/v1/credentials/{id}/usage`）：返回被多少主机标签 / 多少 runbook 引用。这是密钥轮换前的必看信息；有引用时**不允许删除**，只能停用（`is_active=false`）。
+
+### 5.2 中转网关与选路（v32）
+
+机器要怎么才被连到（直连还是经哪个 bastion）是**网络拓扑事实**，不是任务属性。让每个 runbook 写 `proxy_hop` 的后果是：漏写 → SSH 超时 → 现象像 playbook 写错。现在由机器归属在执行期算出。
+
+**`job_gateways`**：`name` / `host` / `port` / `login_user` / `ssh_credential` / `scope` / `priority`。关键三点：
+
+- **`ssh_credential` 引用 `credentials.name`**（不是裸 Vault 路径）——轮换时能反查“哪些网关还在用这把钥匙”，且写入时校验存在与 kind 匹配
+- **`scope` 多维匹配**：`{vpc_ids, cloud_accounts, regions, resource_ids}`，命中任一即服务。**空 scope 不匹配任何机器**——不提供“全局兜底网关”，因为一个误配条目就会接管全部流量，那种故障比连不上更难查
+- **多命中按 `priority` 升序取首**，排序在 `pick_gateway` 内部做（不依赖调用方传已排序列表）
+
+**选路结果写入 dispatch 的 `targets[].gateway`**（`None` = 直连）：
+
+```json
+"gateway": {"name": "gw-nocid", "host": "10.0.0.1", "port": 22,
+            "ssh_user": "ops", "ssh_key_ref": "ssh/keys/bastion"}
+```
+
+**可达性总览**（`GET /api/v1/job-gateways/reachability`）：逐台报 `凭据是否解析得到 / 走哪条路 / 缺什么`，`missing` 直接给原因文本（无 IP、无凭据）。这是“凭据归机器”后的必需品——机器数据完整性成了执行成功的前提，没有这个页，失败只会表现为“SSH 超时”。
+
+> **视图边界**：无网关 = 直连，**不算缺口**。一台机器到底需不需要中转，只有实测能知道；本视图只保证“凭据与 IP 齐不齐、配了网关的机器能不能匹配上”。批量 ping 实测待 ad-hoc 执行入口（否则为了测连通还得先建一个 runbook）。
+>
+> **不做第二套 jumpserver**：本模块只回答“怎么连到”与“用哪把钥匙”；“谁能登录哪台机器”的授权继续留在 RBAC 与工单，否则必然与现有权限体系打架。
 
 ---
 
@@ -412,6 +436,23 @@ CREATE TABLE credentials (
     created_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     updated_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
+
+CREATE TABLE job_gateways (
+    id               BIGSERIAL PRIMARY KEY,
+    name             VARCHAR(128) NOT NULL UNIQUE,
+    host             VARCHAR(128) NOT NULL,
+    port             INT          NOT NULL DEFAULT 22,
+    login_user       VARCHAR(64)  NOT NULL DEFAULT 'root',
+    ssh_credential   VARCHAR(128),                     -- 引用 credentials.name（非裸路径）
+    scope            JSONB        NOT NULL DEFAULT '{}',  -- vpc_ids/cloud_accounts/regions/resource_ids
+    priority         INT          NOT NULL DEFAULT 100,   -- 多命中时升序取首
+    remark           TEXT,
+    is_active        BOOLEAN      NOT NULL DEFAULT TRUE,
+    created_by       BIGINT       REFERENCES users(id) ON DELETE SET NULL,
+    created_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    updated_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+CREATE INDEX idx_job_gateway_active ON job_gateways (is_active, priority);
 
 -- ============================================================================
 -- Runbook（任务模板）
@@ -597,12 +638,14 @@ bingops-runner/
    - **v30：多目标并发度改由 runner 自己的配置 `max_parallel_hosts` 决定**（部署级），消息里不再下发 `serial` / `batch_pause_sec`；需要“逐台执行”就是把该配置调成 1
 6. **python**：`subprocess`，cwd=仓库根，env 含 params+secrets+`BINGOPS_ACTION`，stdout/stderr 逐行 → log 事件，退出码 → step 状态；依赖策略 = 镜像内置 `requirements.txt`（加 SDK 即重建镜像），每任务临时 venv 作退路
 7. **inventory 构建条件化**：`targets` 为空或 `run_on=local` 时不建 inventory、不取 SSH 私钥
+   - **v32 跳板渲染**：`target.gateway` 非空则为该主机渲染 `ansible_ssh_common_args = -o ProxyCommand='ssh -i <跳板临时钥> -o StrictHostKeyChecking=accept-new -W %h:%p <gateway.ssh_user>@<gateway.host>:<gateway.port>'`——**必须显式 `-i`**：`ansible_ssh_private_key_file` 只作用于最终目标，`ProxyJump=user@host` 简写不认它；`gateway.ssh_key_ref` 为 null 时复用目标主机同一把钥匙；跳板钥同 Vault 纪律（临时 0600、用完即删、进 redact）
 8. **回滚（v30 收敛为单一约定）**：`command=rollback` 时**统一注入 `BINGOPS_ACTION=undo`** 重跑同一 `entry`（与现有 ansible `bingops_action` extra_var 同一命名体系）；**`undo_command` 字段已删除**，入口没实现 undo 分支就执行失败并回流 `rollback_failed`（可见，不会静默）。step_key 恒为 `main`，回滚行靠 `attempt_type=rollback` 区分
 
 ### 9.4 API 端点（bingops，P1）
 
 - `runbook` CRUD + 版本管理：`/api/v1/jobs/runbooks`
 - 凭据目录（v31，平台级）：`/api/v1/credentials` CRUD + `GET /{id}/usage` 引用反查；权限码 `credential:list/get/create/update/delete`
+- 中转网关（v32）：`/api/v1/job-gateways` CRUD + `GET /reachability` 主机可达性；权限码 `gateway:list/get/create/update/delete`
 - 执行：`POST /api/v1/jobs/executions`（创建即快照）、`GET` 列表/详情、`POST .../cancel`、`POST .../rollback`
 - 日志：`GET /api/v1/jobs/steps/{id}/logs?after_seq=`（SSE live tail）
 
@@ -631,11 +674,12 @@ bingops-runner/
 | 无 env 时的 fail-safe 方向 | 从严（视为 production，多审批）还是从宽（低危放行）；建议从严 | P3 |
 | **`target_models` 目标范围模型优化**（你定下轮再琢磨） | 现状是“模型 code 白名单”一维硬校；方向参照已有案例——**CMDB 输出 Prometheus HTTP SD 时 `http_config` 的做法**：目标集 + 如何访问（凭据引用/参数）一起结块描述，而不是拆成 `target_models` + `connection` + `secrets_schema` 三处。候选方案：目标选择器（selector：模型/标签/env/状态）+ 访问配置块绑定；本期不动契约 | P2 |
 | GitLab 自建与否 | 决定 P2 terraform state 是否可先用 GitLab 原生 backend 过渡 | P2 |
-| v26~v30 冻结项解冻条件 | `proxy_hop`：首次跨 VPC 目标时（走 `connection` 字典，不占表单）。~~`serial`/`batch_pause_sec`~~：v30 已删除，多目标并发度归 runner 配置；~~`auto_rollback`~~：v28 已删除，自动回滚解冻时重建在 execution 层 | P2 |
+| **批量 ping 实测连通** | 静态视图只能报“凭据齐不齐、匹配到哪条通道”，“要不要中转”必须实测。阻塞在 **ad-hoc 执行入口**（否则为测连通还得先建一个 runbook）；建议与 ad-hoc 一并做 | P2 |
+| v26~v32 已收敛项（备忘） | `proxy_hop` 已从 `connection` 字典**升级为 `job_gateways` 表 + 自动选路**（v32）；`serial`/`batch_pause_sec` 已删（v30，并发度归 runner `max_parallel_hosts`）；`auto_rollback` 已删（v28，自动回滚解冻时重建在 execution 层） | - |
 | 仍排除在本轮之外（防边重构边膨胀） | GitLab 仓库同步器、playbook-tree/tag 预检 API、自动回滚解冻、terraform apply 与 state、**多步编排**（v29 已从 API/表结构/消息三层全删；恢复 = 新增一张步骤表的演进） | P2 |
 | ~~`type: python` 与 `exec_mode: local`~~（v27 已落地） | python executor 已实现（步骤级 `run_on=local`）；不再需要独立的 `exec_mode` 字段——执行位置属于步骤属性而非 runbook 属性 | 已结案 |
 | ⚠ **runner 必须按 v29/v30 新消息形态重构** | dispatch 的 `steps` 数组已改为 `step` 单对象、入口字段统一为 `entry`、新增 `run_on`/`secrets`；**v30 又去掉了 step 里的 `serial`/`batch_pause_sec`/`undo_command`**，多目标并发度改读 runner 自己的 `max_parallel_hosts`。已部署 runner 不升级则**所有新任务不可执行**（无法解析 `step`）；旧 ansible 任务回滚不受影响（历史 execution 自带 step_snapshot，多余键被忽略）。部 bingops 前先把 runner 跟齐，期间可用 `BINGOPS_JOB_STEP_TYPES=ansible` 只允许已验证类型 | v29/v30 上线 |
 | terraform executor 的 state 后端 | 本轮只注册 type 占位；启动时再定 local / http backend+OSS（先前分析已倾向 bingops 自实现 http backend，锁为协议原生） | P2 |
-| **中转网关独立表 + 可达性页**（v32） | 方案已定（设计见 §5.1 同层）：`job_gateways(name, host, port, ssh_user, ssh_key_ref, scope JSONB)` + 主机可达性总览（直连/经 gw/不可达、凭据是否完整）+ 批量测试连通（内部发 ansible ping 任务）。**阻塞项：网关按什么维度关联机器——`vpc_id` / CIDR / 云账号**，决定 `scope` 结构 | v32 |
-| **`secrets_schema` 接凭据目录** | 现在 `secrets` 的值仍是手打 Vault 路径；下一步改为引用 `credentials.name`（条目加 `kind` 限定，前端按 kind 过滤下拉），DB 密码/云 AK/GitLab token 统一走目录选择 | v32 |
+| **中转网关独立表 + 可达视图**（v32 已落地） | `job_gateways` 表 + CRUD + 按 scope 选路写入 `targets[].gateway` + `GET /reachability` 静态可达视图。**网关关联维度未拍板，故 `scope` 同时支持 `vpc_ids / cloud_accounts / regions / resource_ids` 命中任一**（CIDR 未支持：需路由知识且 CMDB 无逐主机 CIDR）；真实跨 VPC 场景验证后可收敛为单一维度 | 已落地 |
+| **`secrets_schema` 接凭据目录**（v32 已落地） | `secrets` 的值可直填 `credentials.name`，条目可选 `kind` 限定类型（声明了就强制走目录并校验，拼错名字/拿错类型在创建执行时 400）；未声明 `kind` 时保留裸 Vault 路径透传，存量 runbook 不受影响 | 已落地 |
 | `verify_state` 回填由谁做 | 方案 C 已定（bingops 不连 Vault，避开破"Vault 唯一出口"纪律）；需 runner 实现：取 Vault 成功/失败时回写 `credentials.verify_state` + `last_verified_at` | v32（runner） |
