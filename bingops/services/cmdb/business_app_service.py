@@ -263,8 +263,9 @@ def list_dependents(
 
 # ── 应用拓扑（G6 数据源）─────────────────────────────────────────────────
 
-# 应用拓扑中展示的资源层：入口/服务/中间件/存储（host 基础设施层走资源拓扑，防爆）
-TOPOLOGY_RESOURCE_LAYERS = ("access", "service", "middleware", "storage")
+# 应用拓扑中展示的资源层：与归集白名单对齐（host 层自部署组件如 ES/ELK 按虚机
+# 归集后应进拓扑）；误归集风险由打标的显式性控制
+TOPOLOGY_RESOURCE_LAYERS = ("access", "service", "middleware", "storage", "host")
 
 
 async def get_app_topology(session: AsyncSession, app_id: int, env: str | None = None) -> dict:
