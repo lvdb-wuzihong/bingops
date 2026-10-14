@@ -324,6 +324,18 @@ def resolve_credential(ref: str) -> str | None:
 - **一致性哈希分片（worker_id/total_workers）**：HPA 扩缩容时 N 变化 → 规则漂移 → for_rounds 计数失效 → 防抖抖动；动态共识复杂度违背无锁设计。静态归属分片（分片单位=数据源）更简更稳；
 - **防抖状态入 Redis**：计数丢失的后果是漏报几轮（方向安全：告警重启宁漏勿误），非误报；为可容忍代价引入 Redis 依赖不划算。「推给 PromQL FOR 语法」不可实现——FOR 是 rule engine 概念，裸 query 无此语义，必须执行器自维护（即 for_rounds）。
 
+### 飞书卡片渲染契约与夜莺对齐评估（2026-10-14 定稿）
+
+**渲染层格式化职责分离**：评估器产出结构化 details（CH=单行两列文本契约；PromQL=vector 摘要 `[{metric: {labels}, value}]`，条数取规则 detail_limit），事件表 JSONB 保持结构化存储（后续 agent 降噪/分析直接消费）；飞书显示层按形态分派格式化（执行器 `_format_details`）：str 原样（CH），list[dict] 转逐样本 lark_md 行（`key=value … → **value**`，上限 20 条/800 字符截断）。数据与显示分离：事件表永远存结构化，飞书只负责人读。
+
+**触发值语义（与夜莺差异点）**：PromQL 的 `total_count` = 命中**序列条数**（非业务值）；夜莺「触发值 16988」对应的业务数值在各样本的 `value` 里，渲染层逐样本加粗展示。单序列规则的效果等价于夜莺触发值，多序列规则比夜莺多一层「命中了几条序列」的信息。
+
+**事件详情链接**：执行器先回报拿响应 `event_id` → 卡片追加「事件详情」按钮（`{frontend_base_url}/alerts/events/{event_id}`，`frontend_base_url` 进 NotifyConfig 可选配置）；依赖平台前端事件详情视图（前端待补，最低形态为列表页锚点过滤）。
+
+**屏蔽（对应夜莺「屏蔽1小时」）**：`alert_mutes`（labels 匹配 + 时间窗）二期已规划，与「认领/解决」事件处置交互同期实施；短期变通为规则级 `notify_enabled` 关闭。
+
+**对齐结论**：显示形态可对齐夜莺卡片约 90%（红色 header/名称/级别/labels 平铺/触发值逐样本/时间/查看曲线均已支撑或小改可支撑）；「屏蔽」为唯一需平台新功能的项，已列入二期清单。
+
 **采纳项（2026-09-10 第二轮评审补充）**：
 - **唯一索引加数据源维度**：`uq_alert_active_firing` 改为 `(source, rule_code, COALESCE(monitoring_source_id, 0))`——修复平台原生规则（source 固定 bingops）跨数据源同名 code 互相吞没的正确性 bug；事件归属取规则绑定的数据源；
 - **error 顺延推导窗口**：评估失败（error 回报）时顺延活跃 firing 的 `last_seen_at`——评估失败=状态未知，保守保持告警，防数据源断连导致的 stale 假恢复风暴（优于「扫描时查 error 子查询」的冻结方案，实现更简）；

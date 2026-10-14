@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from bingops.api.dependencies import get_db_session, require_permission
 from bingops.core.config import settings
-from bingops.core.exceptions import AuthenticationError, ValidationError
+from bingops.core.exceptions import AuthenticationError, NotFoundError, ValidationError
 from bingops.core.response import paginated_response, success_response
 from bingops.models.user import User
 from bingops.schemas.alert import (
@@ -95,6 +95,21 @@ async def get_agent_config(
 
 
 # ── 事件列表 ─────────────────────────────────────────────────────────────────
+
+
+@router.get("/events/{event_id}")
+async def get_alert_event(
+    event_id: int,
+    session: AsyncSession = Depends(get_db_session),
+    _user: User = require_permission("alert:list"),
+) -> dict:
+    """单事件详情（飞书卡片「事件详情」按钮的落地依赖）。"""
+    from bingops.repositories.alert_repo import AlertEventRepo
+
+    event = await AlertEventRepo(session).get_by_id(event_id)
+    if event is None:
+        raise NotFoundError("AlertEvent", str(event_id))
+    return success_response(data=event_to_response(event))
 
 
 @router.get("/events")
