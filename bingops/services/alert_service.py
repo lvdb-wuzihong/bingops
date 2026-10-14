@@ -13,7 +13,7 @@ import json
 import logging
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -26,6 +26,7 @@ from bingops.core.exceptions import (
 )
 from bingops.models.alert import (
     AlertEvent,
+    AlertMute,
     AlertRule,
     MonitoringSource,
     NotifyChannel,
@@ -35,6 +36,7 @@ from bingops.models.ticket import Ticket
 from bingops.models.user import User
 from bingops.repositories.alert_repo import (
     AlertEventRepo,
+    AlertMuteRepo,
     AlertRuleRepo,
     MonitoringSourceRepo,
     NotifyChannelRepo,
@@ -45,6 +47,8 @@ from bingops.schemas.alert import (
     AgentNotifyChannel,
     AgentRuleConfig,
     AgentSourceConfig,
+    AlertMuteCreate,
+    AlertMuteUpdate,
     AlertRuleCreate,
     AlertRuleUpdate,
     AlertWebhookPayload,
@@ -136,16 +140,15 @@ async def handle_webhook_event(
                 "error_message": (payload.error or "")[:200],
             },
         )
-        logger.warning(
-            "Alert evaluation error recorded",
-            extra={
-                "source": payload.source,
-                "rule_code": payload.rule_code,
-                "error_message": (payload.error or "")[:200],
-            },
-        )
         # error 每轮独立事件；飞书通知去重由执行器的 Redis 共享限流器负责
-        # （平台侧基于「上一条事件时间」的节流会被事件流自身污染而恒 false）
+        # （平台侧基于「上一条事件时间」的节流会被事件流自身污染而恒 false）；
+        # 屏蔽命中则硬抑制（如变更窗口屏蔽 CH 查询超时的 error 刷屏）
+        muted = await _mute_suppressed(
+            session, event.id, rule_code=payload.rule_code,
+            labels=_merged_labels(rule, payload.labels), now=now,
+        )
+        if muted is not None:
+            return muted
         return _webhook_result(event.id, notify=True)
 
     # resolved 直传（仅夜莺等自带恢复语义的来源）
@@ -198,7 +201,14 @@ async def handle_webhook_event(
         # DB 串行化保证并发回报时恰好一个执行器实例拿到 notify=true）：
         # 距同规则上一条 recorded 不足 REPEAT_NOTIFY_MINUTES → notify=false，执行器跳过红卡。
         # log 类型 = 事件流水（每轮一条）；飞书通知的去重由执行器的 Redis 共享
-        # 限流器负责（平台侧基于「上一条事件时间」的节流会被流水自身污染而恒 false）
+        # 限流器负责（平台侧基于「上一条事件时间」的节流会被流水自身污染而恒 false）；
+        # 屏蔽命中则硬抑制（变更窗口静默等场景）
+        muted = await _mute_suppressed(
+            session, event.id, rule_code=payload.rule_code,
+            labels=_merged_labels(rule, payload.labels), now=now,
+        )
+        if muted is not None:
+            return muted
         return _webhook_result(event.id, notify=True)
 
     if active is not None:
@@ -219,6 +229,13 @@ async def handle_webhook_event(
                 "Alert firing repeat notification due",
                 extra={"source": payload.source, "rule_code": payload.rule_code},
             )
+            # 屏蔽命中则硬抑制（事件已续命落库，仅静音）
+            muted = await _mute_suppressed(
+                session, active.id, rule_code=payload.rule_code,
+                labels=active.labels or {}, now=now,
+            )
+            if muted is not None:
+                return muted
             return _webhook_result(active.id, notify=True)
         return _webhook_result(
             active.id, notify=False, suppress_reason="firing ongoing",
@@ -258,6 +275,14 @@ async def handle_webhook_event(
             )
         raise
 
+    # 屏蔽检查在开单联动之前：mute 命中 = 这期间别烦我，首报通知与开单一并跳过
+    muted = await _mute_suppressed(
+        session, event.id, rule_code=payload.rule_code,
+        labels=_merged_labels(rule, payload.labels), now=now,
+    )
+    if muted is not None:
+        return muted
+
     await _try_open_ticket(session, event, rule)
     return _webhook_result(event.id, notify=True)
 
@@ -272,6 +297,45 @@ def _webhook_result(
         "suppress_reason": suppress_reason,
         "repeat_after_minutes": REPEAT_NOTIFY_MINUTES,
     }
+
+
+async def _find_active_mute(
+    session: AsyncSession, rule_code: str, labels: dict, now: datetime,
+) -> AlertMute | None:
+    """返回命中该事件的启用屏蔽规则；无则 None。
+
+    匹配条件（全部满足）：enabled + 时间窗包含 now
+    + rule_code 匹配（NULL = 全部规则）
+    + labels 匹配器是事件 labels 的子集（JSONB <@，空匹配器恒真）。
+    """
+    result = await session.execute(
+        select(AlertMute)
+        .where(
+            AlertMute.enabled.is_(True),
+            AlertMute.starts_at <= now,
+            AlertMute.ends_at >= now,
+            or_(AlertMute.rule_code.is_(None), AlertMute.rule_code == rule_code),
+            AlertMute.labels.contained_by(labels or {}),
+        )
+        .order_by(AlertMute.id)
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+async def _mute_suppressed(
+    session: AsyncSession, event_id: int | None,
+    *, rule_code: str, labels: dict, now: datetime,
+) -> dict | None:
+    """屏蔽命中时返回抑制响应体（硬抑制，覆盖一切既有节流结果）；未命中返回 None。"""
+    mute = await _find_active_mute(session, rule_code, labels, now)
+    if mute is None:
+        return None
+    logger.info(
+        "Alert notification muted",
+        extra={"rule_code": rule_code, "mute_name": mute.name},
+    )
+    return _webhook_result(event_id, notify=False, suppress_reason=f"muted:{mute.name}")
 
 
 def _merged_labels(rule: AlertRule | None, payload_labels: dict) -> dict:
@@ -865,3 +929,57 @@ async def delete_channel(session: AsyncSession, channel_id: int) -> None:
     await NotifyChannelRepo(session).delete(channel)
     await session.commit()
     logger.info("Notify channel deleted", extra={"channel_id": channel_id})
+
+
+# ── 告警屏蔽规则 CRUD（时间窗内命中仅抑制通知，事件照常落库） ─────────────────
+
+
+async def list_mutes(session: AsyncSession) -> list[AlertMute]:
+    return await AlertMuteRepo(session).list_all()
+
+
+async def create_mute(
+    session: AsyncSession, payload: AlertMuteCreate, operator_id: int | None,
+) -> AlertMute:
+    mute = await AlertMuteRepo(session).create(AlertMute(
+        name=payload.name,
+        rule_code=payload.rule_code,
+        labels=payload.labels,
+        starts_at=payload.starts_at,
+        ends_at=payload.ends_at,
+        note=payload.note,
+        enabled=payload.enabled,
+        created_by=operator_id,
+    ))
+    await session.commit()
+    logger.info("Alert mute created", extra={"mute_name": mute.name})
+    return mute
+
+
+async def update_mute(
+    session: AsyncSession, mute_id: int, payload: AlertMuteUpdate,
+) -> AlertMute:
+    mute = await AlertMuteRepo(session).get_by_id(mute_id)
+    if mute is None:
+        raise NotFoundError("AlertMute", str(mute_id))
+
+    data = payload.model_dump(exclude_unset=True)
+    for field, value in data.items():
+        setattr(mute, field, value)
+    # 单端提供时间时合并后校验窗口有效性
+    if mute.ends_at <= mute.starts_at:
+        raise ValidationError("ends_at must be after starts_at")
+
+    mute = await AlertMuteRepo(session).update(mute)
+    await session.commit()
+    logger.info("Alert mute updated", extra={"mute_id": mute_id})
+    return mute
+
+
+async def delete_mute(session: AsyncSession, mute_id: int) -> None:
+    mute = await AlertMuteRepo(session).get_by_id(mute_id)
+    if mute is None:
+        raise NotFoundError("AlertMute", str(mute_id))
+    await AlertMuteRepo(session).delete(mute)
+    await session.commit()
+    logger.info("Alert mute deleted", extra={"mute_id": mute_id})

@@ -21,6 +21,8 @@ from bingops.models.user import User
 from bingops.schemas.alert import (
     VALID_GROUP_BYS,
     VALID_RULE_KINDS,
+    AlertMuteCreate,
+    AlertMuteUpdate,
     AlertRuleCreate,
     AlertRuleUpdate,
     AlertWebhookPayload,
@@ -30,6 +32,7 @@ from bingops.schemas.alert import (
     NotifyChannelUpdate,
     channel_to_response,
     event_to_response,
+    mute_to_response,
     rule_to_response,
     source_to_response,
 )
@@ -194,6 +197,53 @@ async def create_alert_rule(
     """创建规则映射。code 须与执行器侧 rule_code 对齐（人工纪律）。"""
     rule = await alert_service.create_rule(session, payload)
     return success_response(data=rule_to_response(rule), message="created")
+
+
+# ── 告警屏蔽规则（时间窗内命中仅抑制通知，事件照常落库） ────────────────────
+
+
+@router.get("/mutes")
+async def list_alert_mutes(
+    session: AsyncSession = Depends(get_db_session),
+    _user: User = require_permission("alert_mute:list"),
+) -> dict:
+    """屏蔽规则列表（含已过期，便于回看历史）。"""
+    mutes = await alert_service.list_mutes(session)
+    return success_response(data=[mute_to_response(m) for m in mutes])
+
+
+@router.post("/mutes")
+async def create_alert_mute(
+    payload: AlertMuteCreate,
+    session: AsyncSession = Depends(get_db_session),
+    user: User = require_permission("alert_mute:create"),
+) -> dict:
+    """创建屏蔽规则；rule_code 空 = 屏蔽全部规则，labels 空 = 不过滤标签。"""
+    mute = await alert_service.create_mute(session, payload, operator_id=user.id)
+    return success_response(data=mute_to_response(mute), message="created")
+
+
+@router.put("/mutes/{mute_id}")
+async def update_alert_mute(
+    mute_id: int,
+    payload: AlertMuteUpdate,
+    session: AsyncSession = Depends(get_db_session),
+    _user: User = require_permission("alert_mute:update"),
+) -> dict:
+    """更新屏蔽规则（部分更新；时间窗单端提供时与旧值合并后校验）。"""
+    mute = await alert_service.update_mute(session, mute_id, payload)
+    return success_response(data=mute_to_response(mute))
+
+
+@router.delete("/mutes/{mute_id}")
+async def delete_alert_mute(
+    mute_id: int,
+    session: AsyncSession = Depends(get_db_session),
+    _user: User = require_permission("alert_mute:delete"),
+) -> dict:
+    """删除屏蔽规则。"""
+    await alert_service.delete_mute(session, mute_id)
+    return success_response(message="deleted")
 
 
 @router.put("/rules/{rule_id}")

@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bingops.core.exceptions import ConflictError
 from bingops.models.alert import (
     AlertEvent,
+    AlertMute,
     AlertRule,
     MonitoringSource,
     NotifyChannel,
@@ -331,5 +332,40 @@ class NotifyChannelRepo:
     async def list_all(self) -> list[NotifyChannel]:
         result = await self.session.execute(
             select(NotifyChannel).order_by(NotifyChannel.id)
+        )
+        return list(result.scalars().all())
+
+
+class AlertMuteRepo:
+    """告警屏蔽规则仓储（CRUD；命中判定在 service 层 webhook 链路）。"""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self.session = session
+
+    async def create(self, mute: AlertMute) -> AlertMute:
+        self.session.add(mute)
+        try:
+            await self.session.flush()
+        except IntegrityError as exc:
+            raise ConflictError(f"alert mute already exists: {mute.name}") from exc
+        return mute
+
+    async def update(self, mute: AlertMute) -> AlertMute:
+        await self.session.flush()
+        return mute
+
+    async def delete(self, mute: AlertMute) -> None:
+        await self.session.delete(mute)
+        await self.session.flush()
+
+    async def get_by_id(self, mute_id: int) -> AlertMute | None:
+        result = await self.session.execute(
+            select(AlertMute).where(AlertMute.id == mute_id)
+        )
+        return result.scalar_one_or_none()
+
+    async def list_all(self) -> list[AlertMute]:
+        result = await self.session.execute(
+            select(AlertMute).order_by(AlertMute.id)
         )
         return list(result.scalars().all())

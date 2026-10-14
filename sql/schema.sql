@@ -711,6 +711,20 @@ CREATE TABLE alert_rules (
     CONSTRAINT uq_alert_rules_source_code UNIQUE (source, code)
 );
 
+CREATE TABLE alert_mutes (
+    id         BIGSERIAL PRIMARY KEY,
+    name       VARCHAR(64)  NOT NULL UNIQUE,   -- 屏蔽规则名称（suppress_reason 引用）
+    rule_code  VARCHAR(128),                   -- NULL = 全部规则；非空 = 精确匹配
+    labels     JSONB NOT NULL DEFAULT '{}',    -- 匹配器：事件 labels 须包含全部键值对；{} = 不过滤
+    starts_at  TIMESTAMPTZ NOT NULL,
+    ends_at    TIMESTAMPTZ NOT NULL,
+    note       TEXT,                           -- 屏蔽原因（变更单号/操作人说明等）
+    enabled    BOOLEAN NOT NULL DEFAULT TRUE,
+    created_by BIGINT,                         -- 创建人 users.id（逻辑引用）
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 -- ============================================================================
 -- 触发器：自动维护 updated_at
 -- ============================================================================
@@ -738,7 +752,7 @@ BEGIN
             'runbooks', 'job_executions', 'job_steps',
             'change_freezes',
             'ticket_catalog', 'ticket_groups', 'oncall_schedules',
-            'monitoring_sources', 'alert_events', 'alert_rules',
+            'monitoring_sources', 'alert_events', 'alert_rules', 'alert_mutes',
             'notify_channels'
         ])
     LOOP
@@ -891,7 +905,11 @@ INSERT INTO permissions (code, name) VALUES
 ('notify_channel:list',   '查看通知渠道'),
 ('notify_channel:create', '创建通知渠道'),
 ('notify_channel:update', '更新通知渠道'),
-('notify_channel:delete', '删除通知渠道')
+('notify_channel:delete', '删除通知渠道'),
+('alert_mute:list',   '查看告警屏蔽规则'),
+('alert_mute:create', '创建告警屏蔽规则'),
+('alert_mute:update', '更新告警屏蔽规则'),
+('alert_mute:delete', '删除告警屏蔽规则')
 ON CONFLICT (code) DO NOTHING;
 
 -- admin 角色分配所有权限（须在全部权限插入后执行）

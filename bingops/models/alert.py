@@ -134,6 +134,29 @@ class NotifyChannel(BaseMixin, Base):
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
 
+class AlertMute(BaseMixin, Base):
+    """告警屏蔽规则（时间窗内命中的事件照常落库，仅抑制通知）。
+
+    匹配语义：rule_code NULL=全部规则；labels {}=不过滤，非空=事件 labels
+    须包含其全部键值对（JSONB <@）。生效点在 webhook 链路 notify 计算。
+    """
+
+    __tablename__ = "alert_mutes"
+
+    name: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    rule_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    labels: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    starts_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False,
+    )
+    ends_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False,
+    )
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+
 class AlertRule(BaseMixin, Base):
     """告警规则（二期起为分发源：绑定数据源 + 评估契约字段）。
 

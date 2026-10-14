@@ -11,7 +11,13 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
-from bingops.models.alert import AlertEvent, AlertRule, MonitoringSource, NotifyChannel
+from bingops.models.alert import (
+    AlertEvent,
+    AlertMute,
+    AlertRule,
+    MonitoringSource,
+    NotifyChannel,
+)
 
 VALID_SOURCES = ("ck-log-alert", "n9e", "bingops")
 # 平台原生规则的默认告警来源标识（夜莺退役后新规则统一用此值）
@@ -414,4 +420,78 @@ def channel_to_response(channel: NotifyChannel) -> dict:
         enabled=channel.enabled,
         created_at=channel.created_at,
         updated_at=channel.updated_at,
+    ).model_dump(mode="json")
+
+
+# ── 告警屏蔽规则 DTO（时间窗内命中仅抑制通知，事件照常落库） ─────────────────
+
+
+class AlertMuteCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=64)
+    rule_code: str | None = Field(
+        default=None, max_length=128,
+        description="精确匹配规则 code；空 = 屏蔽全部规则",
+    )
+    labels: dict = Field(
+        default_factory=dict,
+        description="事件 labels 匹配器（须包含全部键值对）；空 = 不过滤 labels",
+    )
+    starts_at: datetime
+    ends_at: datetime
+    note: str | None = Field(default=None, max_length=512)
+    enabled: bool = True
+
+    @model_validator(mode="after")
+    def _check_window(self) -> AlertMuteCreate:
+        if self.ends_at <= self.starts_at:
+            raise ValueError("ends_at must be after starts_at")
+        return self
+
+
+class AlertMuteUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=64)
+    rule_code: str | None = Field(default=None, max_length=128)
+    labels: dict | None = None
+    starts_at: datetime | None = None
+    ends_at: datetime | None = None
+    note: str | None = Field(default=None, max_length=512)
+    enabled: bool | None = None
+
+    @model_validator(mode="after")
+    def _check_window(self) -> AlertMuteUpdate:
+        # 两端同时提供时预校验；单端提供由 service 合并旧值后再校验
+        if self.starts_at is not None and self.ends_at is not None:
+            if self.ends_at <= self.starts_at:
+                raise ValueError("ends_at must be after starts_at")
+        return self
+
+
+class AlertMuteResponse(BaseModel):
+    id: int
+    name: str
+    rule_code: str | None
+    labels: dict
+    starts_at: datetime
+    ends_at: datetime
+    note: str | None
+    enabled: bool
+    created_by: int | None
+    created_at: datetime
+    updated_at: datetime
+
+
+def mute_to_response(mute: AlertMute) -> dict:
+    """ORM 屏蔽规则转响应字典。"""
+    return AlertMuteResponse(
+        id=mute.id,
+        name=mute.name,
+        rule_code=mute.rule_code,
+        labels=mute.labels or {},
+        starts_at=mute.starts_at,
+        ends_at=mute.ends_at,
+        note=mute.note,
+        enabled=mute.enabled,
+        created_by=mute.created_by,
+        created_at=mute.created_at,
+        updated_at=mute.updated_at,
     ).model_dump(mode="json")
