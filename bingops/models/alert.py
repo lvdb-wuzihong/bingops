@@ -113,6 +113,8 @@ class MonitoringSource(BaseMixin, Base):
     username: Mapped[str | None] = mapped_column(String(64), nullable=True)  # 只读账号
     password_ref: Mapped[str] = mapped_column(String(128), nullable=False)
     secure: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)  # TLS
+    # victoria/prometheus 完整查询地址（含可能的 vmauth 反代路径）；clickhouse 用 host/port
+    url: Mapped[str | None] = mapped_column(Text, nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
 

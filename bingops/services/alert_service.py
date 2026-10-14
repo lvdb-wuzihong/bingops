@@ -683,6 +683,7 @@ async def create_source(
         username=payload.username,
         password_ref=payload.password_ref,
         secure=payload.secure,
+        url=payload.url,
         enabled=payload.enabled,
     ))
     await session.commit()
@@ -750,6 +751,11 @@ async def build_agent_config(
     pairs = await AlertRuleRepo(session).list_agent_rules()
     rules: list[AgentRuleConfig] = []
     for rule, src, channel in pairs:
+        # VM/PR 下发完整 url（登记值优先，缺失按 host/port/secure 拼接）
+        ds_url = src.url or (
+            f"{'https' if src.secure else 'http'}://{src.host}:{src.port}"
+            if src.type != "clickhouse" else None
+        )
         rules.append(AgentRuleConfig(
             id=rule.id,
             source=rule.source,
@@ -779,6 +785,7 @@ async def build_agent_config(
                 username=src.username,
                 password_ref=src.password_ref,
                 secure=src.secure,
+                url=ds_url,
             ),
             # 渠道被禁用时置 None：通知由执行器默认处理（评估与回报照常）
             notify_channel=(

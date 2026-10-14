@@ -252,6 +252,10 @@ class MonitoringSourceCreate(BaseModel):
                     "数据源无认证时填 NO_AUTH（仅限内网/白名单可达）",
     )
     secure: bool = False
+    url: str | None = Field(
+        default=None, max_length=512,
+        description="victoria/prometheus 查询地址（如 http://vm:8428）；留空按 host/port 拼接",
+    )
     enabled: bool = True
 
 
@@ -262,6 +266,7 @@ class MonitoringSourceUpdate(BaseModel):
     username: str | None = None
     password_ref: str | None = Field(default=None, max_length=128)
     secure: bool | None = None
+    url: str | None = None
     enabled: bool | None = None
 
 
@@ -275,6 +280,7 @@ class MonitoringSourceResponse(BaseModel):
     username: str | None
     password_ref: str
     secure: bool
+    url: str | None
     enabled: bool
     created_at: datetime
     updated_at: datetime
@@ -292,6 +298,7 @@ def source_to_response(src: MonitoringSource) -> dict:
         username=src.username,
         password_ref=src.password_ref,
         secure=src.secure,
+        url=src.url,
         enabled=src.enabled,
         created_at=src.created_at,
         updated_at=src.updated_at,
@@ -312,6 +319,9 @@ class AgentSourceConfig(BaseModel):
     username: str | None
     password_ref: str
     secure: bool
+    url: str | None = Field(
+        description="victoria/prometheus 完整查询地址；平台按 host/port/secure 拼接或取登记值",
+    )
 
 
 class AgentNotifyChannel(BaseModel):
