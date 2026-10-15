@@ -141,8 +141,11 @@ ROLES: list[tuple[str, str, str, bool]] = [
     ("ai_agent", "AI Agent", "AI 编排层系统账号（只读取数 + 受控写）", False),
 ]
 
-# ai_agent 角色权限码：巡检 pipeline 取数（sources 直连 REST）所需最小集
-AI_AGENT_PERMISSION_CODES = ("cmdb_resource:list", "cmdb_app:list", "ticket:list", "job:list")
+# ai_agent 角色权限码：巡检取数（sources 直连 REST）与告警数据面（E 组工具）所需最小集
+AI_AGENT_PERMISSION_CODES = (
+    "cmdb_resource:list", "cmdb_app:list", "ticket:list", "job:list",
+    "alert:list", "alert_mute:list",
+)
 
 
 async def init_data() -> None:
@@ -218,7 +221,9 @@ async def init_data() -> None:
             logger.info("ai_agent role permissions ensured")
 
             agent_password = os.environ.get("BINGOPS_AGENT_PASSWORD", "")
-            agent_user_result = await session.execute(select(User).where(User.username == "ai_agent"))
+            agent_user_result = await session.execute(
+                select(User).where(User.username == "ai_agent")
+            )
             if agent_user_result.scalar_one_or_none() is None:
                 if not agent_password:
                     logger.warning(
