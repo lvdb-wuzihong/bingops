@@ -20,9 +20,9 @@
 | 项 | 进度 | 说明 |
 |-----|------|------|
 | 分类 | 5 个 ✅ | 阿里云 / K8S / 谷歌云 / DNS / AWS（2026-09-09 已建）；中间件分组用到再建 |
-| 模型 | 43 个 ✅ | 库内全部已录（34 原有 + AWS 批次 9）；apisix_route 缓做（§3.1）；selfhosted_* 在用哪个建哪个（§3.2） |
-| 字段 | 241 个 ✅ | §2 修正项清零；AWS 批次 38 字段；RDS 四连接字段 + Redis bandwidth（v22/v23） |
-| 关系约束 | **71/71 已录** | 全部正确；apisix 的 3 条随缓做不占坑；模型种子 SQL 已入库仓（`sql/seed_cmdb_models.sql`，含 layer 列，幂等） |
+| 模型 | 45 个 ✅ | 库内全部已录（34 原有 + AWS 批次 9）；apisix_route 缓做（§3.1）；selfhosted_* 在用哪个建哪个（§3.2） |
+| 字段 | 250 个 ✅ | §2 修正项清零；AWS 批次 38 字段；RDS 四连接字段 + Redis bandwidth（v22/v23） |
+| 关系约束 | **73/73 已录** | 全部正确（#72/#73 随 AWS subnet/lambda 批次新增，#60 父级变更）；apisix 的 3 条随缓做不占坑；模型种子 SQL 已入库仓（`sql/seed_cmdb_models.sql`，含 layer 列，幂等） |
 | 模型分层 | ✅ v24 | `cmdb_models.layer` 七层枚举（access/service/middleware/storage/host/network/infra），43 模型全覆盖 0 未分层；总览/拓扑/搜索自动带出（附录 B #38） |
 | 应用主数据 | ✅ v24 | 业务域表（业务域→应用→资源 三层归属）+ dependencies 依赖声明（internal/external，写入校验 internal app_code 存在性）+ 被依赖反查（附录 B #38） |
 | 变更流 | ✅ v24 | `GET /cmdb/changes?scope=all\|mine\|high_risk`：mine=我关注的资源（收藏 join）；high_risk=入口/中间件/存储层变更（layer 判定）（附录 B #38） |
@@ -170,7 +170,7 @@ ConfigMap/Secret 待“配置影响面分析”立项再议。
 | 53 | gcp_cloudsql | gcp_vpc | n:1 | 网络归属 |
 | 54 | gcp_disk | gcp_account | n:1 | 账号归属（游离盘无实例父，挂账号） |
 | 59 | aws_vpc | aws_account | n:1 | 账号归属（AWS 批次） |
-| 60 | aws_ec2 | aws_vpc | n:1 | 网络归属（AWS 批次） |
+| 60 | aws_ec2 | aws_subnet | n:1 | 网络归属（AWS 批次；v26 变更——父级由 aws_vpc 改为 aws_subnet，subnet 批次层级补全，存量 EC2 由下一轮同步自动重挂） |
 | 61 | aws_security_group | aws_vpc | n:1 | 网络归属（AWS 批次） |
 | 62 | aws_elb | aws_vpc | n:1 | 网络归属（AWS 批次） |
 | 63 | aws_alb | aws_vpc | n:1 | 网络归属（AWS 批次） |
@@ -206,6 +206,8 @@ ConfigMap/Secret 待“配置影响面分析”立项再议。
 | 68 | aws_alb | aws_ec2 | n:n | 负载均衡后端（AWS 批次；target group targets 解析，对齐 #30） |
 | 70 | aws_eip | aws_ec2 | n:n | 绑定（AWS 批次；kind=bind，对齐 #31 直绑语义；DNAT 暴露随 AWS NAT GW 未来扩展） |
 | 71 | aws_cloudfront | aws_s3 | n:n | 分发源（AWS 批次；origins[].domain_name 解析桶名匹配 S3 provider_id；origin 为 ALB DNS 名时匹配 aws_alb 同语义扩展，不占新号） |
+| 72 | aws_subnet | aws_vpc | n:1 | 网络归属（subnet 批次；对齐 #13/#12 跨云同构） |
+| 73 | aws_lambda | aws_account | n:1 | 账号归属（subnet 批次；serverless 无承载层，对齐 #57 s3） |
 | 55 | gcp_disk | gcp_compute | n:n | 挂载于（users 列表匹配） |
 | 56 | k8s_pv | gcp_disk | 1:1 | CSI 桥接（kind=csi） |
 | 45 | dns_record | aliyun_eip | n:n | 解析目标（A 记录按 IP） |
@@ -389,10 +391,10 @@ ConfigMap/Secret 待“配置影响面分析”立项再议。
 | 公网 IP | public_ip | string | 网络配置 | 否 | 跨云同名 |
 | 创建时间 | creation_time | date | 基础信息 | 否 | launch_time；对齐 aliyun_ecs 同 code |
 | VPC ID | vpc_id | string | 同步保留 | 否 | 建边依据（孤儿认领） |
-| 子网 ID | subnet_id | string | 同步保留 | 否 | 不建 subnet 模型，锚点保留 |
+| 子网 ID | subnet_id | string | 同步保留 | 否 | v26 起建 aws_subnet 模型——本字段降级为冗余锚点（parent 边按它挂 subnet） |
 | AMI ID | image_id | string | 同步保留 | 否 | os 兜底推断源 |
 
-从属：aws_ec2 belongs_to aws_vpc (n:1，网络归属)。
+从属：aws_ec2 belongs_to aws_subnet (n:1，网络归属；v26 变更，原挂 aws_vpc)。
 关联：aws_ec2 → aws_security_group relates_to (n:n，绑定安全组)；aws_elb/alb → aws_ec2 relates_to (n:n，负载均衡后端)；k8s_node → aws_ec2 (1:1，承载于) 为 EKS 预留缓录。
 
 ### aws_security_group
@@ -460,6 +462,33 @@ ConfigMap/Secret 待“配置影响面分析”立项再议。
 
 从属：aws_alb belongs_to aws_vpc (n:1，网络归属)。
 关联：aws_alb → aws_ec2 relates_to (n:n，负载均衡后端；target group targets type=instance 解析；ip 型 target 可能是 Pod IP，二期)。
+
+### aws_subnet（v26 新增，2026-10-15）
+
+| 字段名 | code | 类型 | 分组 | 必填 | 说明 |
+|--------|------|------|------|------|------|
+| CIDR 块 | cidr_block | string | 基础信息 | 是 | 跨云同名（aliyun_vswitch/gcp_subnet 同 code） |
+| VPC ID | vpc_id | string | 同步保留 | 否 | 建边依据（孤儿认领）；is_builtin |
+| 可用 IP 数 | available_ip_count | number | 基础信息 | 否 | AvailableIpAddressCount；容量余量审计 |
+
+> layer=network；provider_id = SubnetId（全局唯一裸用）；AZ 走 zone 通用列（subnet 是 AZ 级资源，同 aliyun_vswitch 纪律）；状态 available/pending 真实。describe_subnets 分页 NextToken（wheel 核对）。层级：aws_subnet belongs_to aws_vpc（#72），aws_ec2 的父级由 vpc 改挂 subnet（#60 变更），跨云层级链对齐（三家均为 资源→子网→VPC 三层）。
+
+从属：aws_subnet belongs_to aws_vpc (n:1，网络归属)。
+
+### aws_lambda（v26 新增，2026-10-15）
+
+| 字段名 | code | 类型 | 分组 | 必填 | 说明 |
+|--------|------|------|------|------|------|
+| 运行时 | runtime | string | 基础信息 | 是 | python3.12/nodejs20.x 等 |
+| 入口处理器 | handler | string | 基础信息 | 否 | |
+| 超时(秒) | timeout | number | 基础信息 | 否 | |
+| 内存(MB) | memory_size | number | 基础信息 | 否 | |
+| 版本 | version | string | 基础信息 | 否 | list_functions 返回的 $LATEST/发布版本 |
+| 最近修改时间 | last_modified | string | 基础信息 | 否 | AWS 返回字符串时间戳，原样保留 |
+
+> layer=service（跑代码的计算单元，与 k8s_workload 同层；对应阿里云 FC/GCP Cloud Functions）；provider_id = **{region}/{FunctionName}**（函数名仅 region 内唯一，撞键纪律同 elb/alb）；status=None（无生命周期状态，对齐 s3/eip）；无 AZ。用户确认全部 Lambda 不在 VPC 内——不挂 subnet，VPC 内运行时再加 vpc_subnet_ids 锚点。
+
+从属：aws_lambda belongs_to aws_account (n:1，账号归属，#73；对齐 s3 #57)。
 
 ---
 
