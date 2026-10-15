@@ -7,7 +7,8 @@
 飞书侧前置条件：
 1. 应用开通「机器人」能力；
 2. 开通 im:message:send_as_bot（以应用的身份发消息）权限并发布版本；
-3. 接收人在应用可用范围内；群聊（chat_id）场景机器人需已在群内。
+3. 接收人在应用可用范围内；群聊（chat_id）场景机器人需已在群内；
+4. 更新卡片（流式输出）依赖同一消息权限域，若飞书侧拒绝需核对「更新应用发送的消息」权限项。
 """
 
 from __future__ import annotations
@@ -25,6 +26,8 @@ logger = logging.getLogger(f"bingops.{__name__}")
 
 TENANT_TOKEN_URL = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
 MESSAGE_SEND_URL = "https://open.feishu.cn/open-apis/im/v1/messages"
+# 更新已发送消息（卡片）用；仅能更新本应用发送的消息
+MESSAGE_UPDATE_URL_TEMPLATE = "https://open.feishu.cn/open-apis/im/v1/messages/{message_id}"
 
 _HTTP_TIMEOUT = 10.0
 # tenant_access_token 进程内缓存：飞书侧有效期 2h，提前 60s 刷新
@@ -61,8 +64,8 @@ async def _get_tenant_access_token() -> str:
     return token
 
 
-async def _post_message(receive_id_type: str, receive_id: str, msg_type: str, content: str) -> None:
-    """以应用身份调 IM API 发消息（receive_id_type: open_id | chat_id）。"""
+async def _post_message(receive_id_type: str, receive_id: str, msg_type: str, content: str) -> str:
+    """以应用身份调 IM API 发消息（receive_id_type: open_id | chat_id），返回 message_id。"""
     token = await _get_tenant_access_token()
 
     async with httpx.AsyncClient() as client:
@@ -87,23 +90,66 @@ async def _post_message(receive_id_type: str, receive_id: str, msg_type: str, co
         )
         raise ExternalServiceError("feishu", "Failed to send im message")
 
-    logger.info("Feishu message sent", extra={"receive_id_type": receive_id_type})
+    message_id = str((data.get("data") or {}).get("message_id", ""))
+    logger.info(
+        "Feishu message sent", extra={"receive_id_type": receive_id_type, "message_id": message_id},
+    )
+    return message_id
 
 
-async def send_interactive(open_id: str, card: dict) -> None:
-    """向指定用户（open_id 定位）发送交互卡片私聊消息。"""
-    await _post_message("open_id", open_id, "interactive", json.dumps(card, ensure_ascii=False))
+async def send_interactive(open_id: str, card: dict) -> str:
+    """向指定用户（open_id 定位）发送交互卡片私聊消息，返回 message_id。"""
+    return await _post_message(
+        "open_id", open_id, "interactive", json.dumps(card, ensure_ascii=False),
+    )
 
 
-async def send_interactive_to_chat(chat_id: str, card: dict) -> None:
-    """向指定群（chat_id 定位）发送交互卡片；前置：机器人已在群内。"""
-    await _post_message("chat_id", chat_id, "interactive", json.dumps(card, ensure_ascii=False))
+async def send_interactive_to_chat(chat_id: str, card: dict) -> str:
+    """向指定群（chat_id 定位）发送交互卡片（前置：机器人已在群内），返回 message_id。"""
+    return await _post_message(
+        "chat_id", chat_id, "interactive", json.dumps(card, ensure_ascii=False),
+    )
 
 
-async def send_text(target_type: str, target_id: str, text: str) -> None:
+async def send_interactive_card(target_type: str, target_id: str, card: dict) -> str:
+    """通用卡片发送（target_type: open_id | chat_id），返回 message_id 供后续更新。"""
+    if target_type not in ("open_id", "chat_id"):
+        raise ValidationError(f"unsupported target_type: {target_type}")
+    return await _post_message(
+        target_type, target_id, "interactive", json.dumps(card, ensure_ascii=False),
+    )
+
+
+async def update_message(message_id: str, card: dict) -> None:
+    """更新已发送的卡片消息（流式输出用）；仅能更新本应用发送的消息。
+
+    飞书契约：PATCH body 仅需 content（卡片 JSON 的二次序列化字符串），不重传 msg_type。
+    """
+    token = await _get_tenant_access_token()
+
+    async with httpx.AsyncClient() as client:
+        resp = await client.patch(
+            MESSAGE_UPDATE_URL_TEMPLATE.format(message_id=message_id),
+            headers={"Authorization": f"Bearer {token}"},
+            json={"content": json.dumps(card, ensure_ascii=False)},
+            timeout=_HTTP_TIMEOUT,
+        )
+        data = resp.json()
+
+    if data.get("code") != 0:
+        logger.error(
+            "Failed to update feishu message",
+            extra={"message_id": message_id, "response": data},
+        )
+        raise ExternalServiceError("feishu", "Failed to update im message")
+
+    logger.info("Feishu message updated", extra={"message_id": message_id})
+
+
+async def send_text(target_type: str, target_id: str, text: str) -> str:
     """发送文本消息（target_type: open_id | chat_id）；供 MCP 写工具等通用场景。"""
     if target_type not in ("open_id", "chat_id"):
         raise ValidationError(f"unsupported target_type: {target_type}")
-    await _post_message(
+    return await _post_message(
         target_type, target_id, "text", json.dumps({"text": text}, ensure_ascii=False),
     )
