@@ -701,6 +701,7 @@ CREATE TABLE alert_rules (
     threshold             BIGINT     NOT NULL DEFAULT 1,
     interval_minutes      INT        NOT NULL DEFAULT 1,
     eval_interval_seconds INT        NOT NULL DEFAULT 60,  -- 规则级扫描间隔（秒），与查询窗口独立
+    repeat_notify_minutes INT        NOT NULL DEFAULT 1,   -- 指标告警重复提醒间隔（分钟）
     for_rounds            INT        NOT NULL DEFAULT 1,  -- 连续 M 轮达标才报 firing
     detail_limit          INT        NOT NULL DEFAULT 10,
     grafana_url           TEXT,

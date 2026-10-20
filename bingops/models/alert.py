@@ -192,6 +192,8 @@ class AlertRule(BaseMixin, Base):
     interval_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     # 规则级扫描间隔（秒）：执行器按它调度本规则；与 interval_minutes（查询窗口）独立
     eval_interval_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=60)
+    # 活跃 metric firing 的重复提醒间隔（分钟）；log 流水每轮直发不读本字段
+    repeat_notify_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     for_rounds: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     detail_limit: Mapped[int] = mapped_column(Integer, nullable=False, default=10)
     grafana_url: Mapped[str | None] = mapped_column(Text, nullable=True)

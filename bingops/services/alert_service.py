@@ -60,8 +60,8 @@ from bingops.schemas.alert import (
 
 logger = logging.getLogger(f"bingops.{__name__}")
 
-# 活跃 firing 重复提醒间隔（夜莺 repeat notify 同款）：1min = 同分钟内多副本去重，
-# 跨分钟照常提醒（用户决策 2026-09-13：解决的是短时重复，不是长静默）
+# 活跃 firing 重复提醒间隔默认值（分钟，夜莺 repeat notify 同款）；规则级可用
+# repeat_notify_minutes 覆盖——1min = 同分钟内多副本去重，跨分钟照常提醒
 REPEAT_NOTIFY_MINUTES = 1
 # 无规则映射的 firing 的默认 stale 恢复窗口（有映射时取规则 stale_minutes）
 DEFAULT_STALE_MINUTES = 15
@@ -212,10 +212,14 @@ async def handle_webhook_event(
         return _webhook_result(event.id, notify=True)
 
     if active is not None:
-        # repeat 判断必须在更新 updated_at 之前（updated_at ≈ 上次通知基准）
+        # repeat 判断必须在更新 updated_at 之前（updated_at ≈ 上次通知基准）；
+        # 间隔取规则级配置（未配置时回退平台默认）
+        repeat_minutes = (
+            rule.repeat_notify_minutes if rule else REPEAT_NOTIFY_MINUTES
+        )
         repeat_due = (
             now - active.updated_at
-        ).total_seconds() >= REPEAT_NOTIFY_MINUTES * 60
+        ).total_seconds() >= repeat_minutes * 60
         active.last_seen_at = now
         if payload.total_count is not None:
             active.total_count = payload.total_count
@@ -236,7 +240,9 @@ async def handle_webhook_event(
             )
             if muted is not None:
                 return muted
-            return _webhook_result(active.id, notify=True)
+            return _webhook_result(
+                active.id, notify=True, repeat_after_minutes=repeat_minutes,
+            )
         return _webhook_result(
             active.id, notify=False, suppress_reason="firing ongoing",
         )
@@ -284,18 +290,24 @@ async def handle_webhook_event(
         return muted
 
     await _try_open_ticket(session, event, rule)
-    return _webhook_result(event.id, notify=True)
+    return _webhook_result(
+        event.id, notify=True,
+        repeat_after_minutes=(
+            rule.repeat_notify_minutes if rule else REPEAT_NOTIFY_MINUTES
+        ),
+    )
 
 
 def _webhook_result(
     event_id: int | None, *, notify: bool, suppress_reason: str | None = None,
+    repeat_after_minutes: int = REPEAT_NOTIFY_MINUTES,
 ) -> dict:
     """组装 notify 协议响应体。"""
     return {
         "event_id": event_id,
         "notify": notify,
         "suppress_reason": suppress_reason,
-        "repeat_after_minutes": REPEAT_NOTIFY_MINUTES,
+        "repeat_after_minutes": repeat_after_minutes,
     }
 
 
@@ -607,6 +619,7 @@ async def create_rule(session: AsyncSession, payload: AlertRuleCreate) -> AlertR
         threshold=payload.threshold,
         interval_minutes=payload.interval_minutes,
         eval_interval_seconds=payload.eval_interval_seconds,
+        repeat_notify_minutes=payload.repeat_notify_minutes,
         for_rounds=payload.for_rounds,
         detail_limit=payload.detail_limit,
         grafana_url=payload.grafana_url,

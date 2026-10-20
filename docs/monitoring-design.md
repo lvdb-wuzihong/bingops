@@ -117,7 +117,7 @@ sql/migrations/v21_alert_events.sql
 
 `notify` 语义：`false` = 本轮通知被平台抑制，执行器跳过飞书发送；**回报失败 / 超时 / 响应不可解析时执行器默认发**——主路自动退化为现状行为，宁多勿漏。抑制来源两类：① repeat 窗口内（活跃 firing 已提醒过，防短时重复）；② 屏蔽命中（§12 alert_mutes，变更窗口等场景静音）。`suppress_reason` 为人读字符串（如 `"muted:{屏蔽规则名}"` / `"firing ongoing"`），执行器仅用于日志，不做逻辑分支。执行器消费现状：firing（metric 拆卡）/ recorded（log 流水）路径已消费（`notify=false` 跳过）；error 橙卡路径待补消费（见 §12 屏蔽对接分工）。
 
-`repeat_after_minutes`：夜莺 repeat notify 同款——活跃 firing 持续期间，距上次通知超过该间隔时响应 `notify:true` 重发提醒（防遗忘），未超时返回 `notify:false`。一期协议预留，执行器可选读。
+`repeat_after_minutes`：夜莺 repeat notify 同款——活跃 metric firing 持续期间，距上次通知超过该间隔时响应 `notify:true` 重发提醒（防遗忘），未超时返回 `notify:false`。**间隔取规则级 `repeat_notify_minutes`（默认 1，v28 起可配）；log 流水每轮直发，不读本字段。执行器不消费该字段（仅可观测）**。
 
 ### 4.3 错误语义与幂等
 
@@ -288,6 +288,7 @@ def report_event(cfg: dict, rule: dict, status: str, total: int,
 | 字段 | CH 日志规则 | VM 指标规则 |
 |---|---|---|
 | `eval_interval_seconds` | 扫描间隔（秒，多久评一次） | 同左 |
+| `repeat_notify_minutes` | 不参与（日志每轮直发） | 活跃 firing 重复提醒间隔（分钟，默认 1） |
 | `interval_minutes` | 查询窗口（SQL `{window_minutes}` 占位） | 不参与（窗口写进 PromQL `[5m]`） |
 | `threshold` | 判定阈值（error_count ≥ threshold） | 不参与（比较写进表达式） |
 | `for_rounds` | 连续 M 轮达标才报 firing（防抖） | 同左（vector 非空计轮） |
@@ -367,6 +368,16 @@ firing（metric 拆卡）/ recorded（log 流水）路径已天然生效（`data
 - **鉴权：屏蔽管理必须走标准 JWT + `alert_mute:*` 权限码（已实现），不豁免**——屏蔽是「让告警闭嘴」的操作，误操作/越权屏蔽 = 故障静默，属运维高危动作（与 webhook/agent 的 X-Agent-Token 机器对机器鉴权是两套体系，互不替代）；值班便捷性的正确解法是**角色授权放宽**（把 `alert_mute:create` 授予 operator 角色），而不是绕过鉴权；
 - **访问链路与权限渲染**：卡片「事件详情」→ 浏览器打开详情页（未登录走飞书 SSO 后回跳原页）→「屏蔽」按钮按权限码 `alert_mute:create` 渲染（无权限隐藏/置灰），后端 `require_permission` 403 兜底（绕过前端直调 API 也会被拒）。角色默认分配按 init_data 规则：operator 应获得 `alert_mute:*` 全部（值班可屏蔽），viewer/auditor 仅 `alert_mute:list`（只读可看不可建）；**生产库 role_permissions 表非空时 init_data 不补绑新权限码**——需在角色管理界面（或 SQL）手工把 `alert_mute:*` 授予 operator，否则 operator 也点不了。
 
+**认领与处置标注（设计，待实施）**：
+
+定位：认领是**轻闭环**（日常告警的处置载体），工单是**重闭环**（严重事件），分级兼容不互斥——99% 的告警用认领就够（点一下、无流程负担、拉式协作），severity=1 等严重事件才需工单的推式派单与正式留痕。当前 `BINGOPS_ALERT_TICKET_ENABLED=false`（总闸关），认领是唯一缺失的处置闭环。
+
+- **数据模型**：`alert_events` 加 `claimed_by BIGINT / claimed_at TIMESTAMPTZ / verdict VARCHAR(16)`；verdict 建议值域 `valid`（有效）| `false_positive`（误报）| `duplicate`（重复）——最终枚举待拍板；
+- **API**：`POST /api/v1/alerts/events/{id}/claim`（认领）、`/release`（放手）、`/verdict`（标注处置结论），权限码 `alert:claim`；
+- **notify 联动**：活跃 firing 已认领时平台在 webhook 响应返回 `notify=false, suppress_reason="claimed"`——**执行器零改动**（与屏蔽同构，走现成 notify 消费分支）；响应可透传 `claimed_by` 供卡片展示（可选增强）；
+- **与工单兼容（锚点已就位）**：`alert_events.ticket_id` 一期已留——认领的事件将来升级开单时回填 ticket_id，认领与工单共存于同一事件；总闸将来开启时分级策略用现成控制面：按 severity 阈值（severity=1 自动开单）或规则级配置；log 类永远不开单（逐条开单会淹没工单系统）；MTTA 口径取「最早人工动作」（有工单取工单首响，只有认领取 claimed_at）；
+- **看板价值**：MTTA、告警准确率、按时响应率三个 KPI 全部依赖认领/verdict 数据；前端在事件详情页加认领/放手/verdict 按钮，列表页显示认领人。
+
 **对齐结论**：显示形态可对齐夜莺卡片约 90%（红色 header/名称/级别/labels 平铺/触发值逐样本/时间/查看曲线均已支撑或小改可支撑）；「屏蔽」为其中唯一需平台新功能的项，已实施（v27）。
 
 **实现状态（2026-10-14，执行器已落地）**：
@@ -403,7 +414,7 @@ firing（metric 拆卡）/ recorded（log 流水）路径已天然生效（`data
 |---|---|---|
 | AlertRule.for_duration 防抖 / pending | 规则 `for_rounds`（连续 M 轮达标才报 firing），执行器侧实现，平台无 pending 态 | 执行器侧，二期字段化 |
 | severity 1/2/3 | payload 可选 + alert_events.severity + 工单优先级映射 | 一期 |
-| repeat notify | 响应体 `repeat_after_minutes` 活跃 firing 重发提醒 | 一期协议预留 |
+| repeat notify | 响应体 `repeat_after_minutes` 活跃 firing 重发提醒（间隔=规则级 `repeat_notify_minutes`） | **已实施（v28 规则级化）** |
 | AlertMute 屏蔽 | `alert_mutes`（labels 匹配 + 时间窗），与变更封禁窗口联动 | **已实施（v27）** |
 | v8 告警规则/通知规则分离 | alert_rules 检测字段与通知字段分组演进 | 二期表结构 |
 | WatchAlert escalation | firing 持续未响应升级通知 | 二期候选 |

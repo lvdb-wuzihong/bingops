@@ -101,6 +101,10 @@ class AlertRuleCreate(BaseModel):
     eval_interval_seconds: int = Field(
         default=60, ge=10, description="规则级扫描间隔（秒），执行器按它调度本规则",
     )
+    repeat_notify_minutes: int = Field(
+        default=1, ge=1,
+        description="活跃指标告警的重复提醒间隔（分钟）；日志告警每轮直发不读本字段",
+    )
     for_rounds: int = Field(default=1, ge=1, description="连续 M 轮达标才报 firing（防抖）")
     detail_limit: int = Field(default=10, ge=1)
     grafana_url: str | None = None
@@ -123,6 +127,7 @@ class AlertRuleUpdate(BaseModel):
     threshold: int | None = Field(default=None, ge=1)
     interval_minutes: int | None = Field(default=None, ge=1)
     eval_interval_seconds: int | None = Field(default=None, ge=10)
+    repeat_notify_minutes: int | None = Field(default=None, ge=1)
     for_rounds: int | None = Field(default=None, ge=1)
     detail_limit: int | None = Field(default=None, ge=1)
     grafana_url: str | None = None
