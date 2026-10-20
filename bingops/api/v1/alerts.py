@@ -25,6 +25,7 @@ from bingops.schemas.alert import (
     AlertMuteUpdate,
     AlertRuleCreate,
     AlertRuleUpdate,
+    AlertVerdictRequest,
     AlertWebhookPayload,
     MonitoringSourceCreate,
     MonitoringSourceUpdate,
@@ -113,6 +114,42 @@ async def get_alert_event(
     if event is None:
         raise NotFoundError("AlertEvent", str(event_id))
     return success_response(data=event_to_response(event))
+
+
+@router.post("/events/{event_id}/claim")
+async def claim_alert_event(
+    event_id: int,
+    session: AsyncSession = Depends(get_db_session),
+    user: User = require_permission("alert:claim"),
+) -> dict:
+    """认领活跃 firing 事件（轻闭环：有人在管了；认领后暂停重复提醒）。"""
+    event = await alert_service.claim_event(session, event_id, user)
+    return success_response(data=event_to_response(event), message="claimed")
+
+
+@router.post("/events/{event_id}/release")
+async def release_alert_event(
+    event_id: int,
+    session: AsyncSession = Depends(get_db_session),
+    user: User = require_permission("alert:claim"),
+) -> dict:
+    """放弃认领（本人或超管；未认领时幂等返回）。"""
+    event = await alert_service.release_event(session, event_id, user)
+    return success_response(data=event_to_response(event), message="released")
+
+
+@router.post("/events/{event_id}/verdict")
+async def set_alert_event_verdict(
+    event_id: int,
+    payload: AlertVerdictRequest,
+    session: AsyncSession = Depends(get_db_session),
+    _user: User = require_permission("alert:claim"),
+) -> dict:
+    """标注处置结论（valid/false_positive/duplicate；resolved 后可复盘补标）。"""
+    event = await alert_service.set_event_verdict(
+        session, event_id, payload.verdict,
+    )
+    return success_response(data=event_to_response(event), message="verdict set")
 
 
 @router.get("/events")

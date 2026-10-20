@@ -28,6 +28,8 @@ VALID_GROUP_BYS = ("source", "rule_code", "group_id", "day")
 VALID_SOURCE_TYPES = ("clickhouse", "victoria", "prometheus")
 VALID_CHANNEL_TYPES = ("feishu_webhook",)
 VALID_RULE_KINDS = ("log", "metric")
+# 处置结论值域（准确率统计原料）：有效 / 误报 / 重复
+VALID_VERDICTS = ("valid", "false_positive", "duplicate")
 # 凭据约定：password_ref/secret_ref 填此值 = 数据源无认证（执行器连接时不带凭据）；
 # 仅限内网/白名单可达的数据源使用，加认证后应改为 env 变量名
 NO_AUTH_REF = "NO_AUTH"
@@ -151,6 +153,7 @@ class AlertRuleResponse(BaseModel):
     threshold: int
     interval_minutes: int
     eval_interval_seconds: int
+    repeat_notify_minutes: int
     for_rounds: int
     detail_limit: int
     grafana_url: str | None
@@ -184,6 +187,10 @@ class AlertEventResponse(BaseModel):
     # 告警类型：log（事件型）| metric（状态型）；写入时定型（规则绑定数据源 type 推导）
     rule_kind: str | None
     monitoring_source_id: int | None
+    # 认领与处置标注（v29）：认领人/时间（MTTA 起点）+ 结论（准确率原料）
+    claimed_by: int | None
+    claimed_at: datetime | None
+    verdict: str | None
     ticket_id: int | None
     group_id: int | None
     created_at: datetime
@@ -212,11 +219,22 @@ def event_to_response(event: AlertEvent) -> dict:
         error=event.error,
         rule_kind=event.rule_kind,
         monitoring_source_id=event.monitoring_source_id,
+        claimed_by=event.claimed_by,
+        claimed_at=event.claimed_at,
+        verdict=event.verdict,
         ticket_id=event.ticket_id,
         group_id=event.group_id,
         created_at=event.created_at,
         updated_at=event.updated_at,
     ).model_dump(mode="json")
+
+
+class AlertVerdictRequest(BaseModel):
+    """处置结论标注请求（准确率统计原料；resolved 后可复盘补标）。"""
+
+    verdict: Literal["valid", "false_positive", "duplicate"] = Field(
+        description="valid(有效) | false_positive(误报) | duplicate(重复)",
+    )
 
 
 def rule_to_response(rule: AlertRule) -> dict:
@@ -237,6 +255,7 @@ def rule_to_response(rule: AlertRule) -> dict:
         threshold=rule.threshold,
         interval_minutes=rule.interval_minutes,
         eval_interval_seconds=rule.eval_interval_seconds,
+        repeat_notify_minutes=rule.repeat_notify_minutes,
         for_rounds=rule.for_rounds,
         detail_limit=rule.detail_limit,
         grafana_url=rule.grafana_url,

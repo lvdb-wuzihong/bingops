@@ -128,6 +128,7 @@ PERMISSIONS: list[tuple[str, str]] = [
     ("alert_mute:create", "创建告警屏蔽规则"),
     ("alert_mute:update", "更新告警屏蔽规则"),
     ("alert_mute:delete", "删除告警屏蔽规则"),
+    ("alert:claim", "认领告警事件与标注处置结论"),
     # AI agent 编排层取数所需（与 CMDB 种子 SQL 中的码同名，按 code 幂等去重）
     ("cmdb_resource:list", "查看 CMDB 资源与关系"),
     ("cmdb_app:list", "查看业务应用与应用资源"),

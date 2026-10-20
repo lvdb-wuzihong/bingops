@@ -670,6 +670,9 @@ CREATE TABLE alert_events (
     error          TEXT,
     monitoring_source_id BIGINT,   -- 事件的数据源归属（规则绑定源；直报为 NULL）
     rule_kind      VARCHAR(8),     -- 告警类型：log(事件型) | metric(状态型)，写入时定型
+    claimed_by     BIGINT,         -- 认领人 users.id（v29）
+    claimed_at     TIMESTAMPTZ,    -- 认领时间（MTTA 起点）
+    verdict        VARCHAR(16),    -- 处置结论：valid | false_positive | duplicate
     ticket_id      BIGINT,                                  -- 逻辑引用 tickets.id
     group_id       BIGINT,
     created_at     TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
@@ -910,7 +913,8 @@ INSERT INTO permissions (code, name) VALUES
 ('alert_mute:list',   '查看告警屏蔽规则'),
 ('alert_mute:create', '创建告警屏蔽规则'),
 ('alert_mute:update', '更新告警屏蔽规则'),
-('alert_mute:delete', '删除告警屏蔽规则')
+('alert_mute:delete', '删除告警屏蔽规则'),
+('alert:claim',       '认领告警事件与标注处置结论')
 ON CONFLICT (code) DO NOTHING;
 
 -- admin 角色分配所有权限（须在全部权限插入后执行）

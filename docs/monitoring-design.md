@@ -368,15 +368,17 @@ firing（metric 拆卡）/ recorded（log 流水）路径已天然生效（`data
 - **鉴权：屏蔽管理必须走标准 JWT + `alert_mute:*` 权限码（已实现），不豁免**——屏蔽是「让告警闭嘴」的操作，误操作/越权屏蔽 = 故障静默，属运维高危动作（与 webhook/agent 的 X-Agent-Token 机器对机器鉴权是两套体系，互不替代）；值班便捷性的正确解法是**角色授权放宽**（把 `alert_mute:create` 授予 operator 角色），而不是绕过鉴权；
 - **访问链路与权限渲染**：卡片「事件详情」→ 浏览器打开详情页（未登录走飞书 SSO 后回跳原页）→「屏蔽」按钮按权限码 `alert_mute:create` 渲染（无权限隐藏/置灰），后端 `require_permission` 403 兜底（绕过前端直调 API 也会被拒）。角色默认分配按 init_data 规则：operator 应获得 `alert_mute:*` 全部（值班可屏蔽），viewer/auditor 仅 `alert_mute:list`（只读可看不可建）；**生产库 role_permissions 表非空时 init_data 不补绑新权限码**——需在角色管理界面（或 SQL）手工把 `alert_mute:*` 授予 operator，否则 operator 也点不了。
 
-**认领与处置标注（设计，待实施）**：
+**认领与处置标注——已实施（2026-10-20，v29）**：
 
 定位：认领是**轻闭环**（日常告警的处置载体），工单是**重闭环**（严重事件），分级兼容不互斥——99% 的告警用认领就够（点一下、无流程负担、拉式协作），severity=1 等严重事件才需工单的推式派单与正式留痕。当前 `BINGOPS_ALERT_TICKET_ENABLED=false`（总闸关），认领是唯一缺失的处置闭环。
 
-- **数据模型**：`alert_events` 加 `claimed_by BIGINT / claimed_at TIMESTAMPTZ / verdict VARCHAR(16)`；verdict 建议值域 `valid`（有效）| `false_positive`（误报）| `duplicate`（重复）——最终枚举待拍板；
-- **API**：`POST /api/v1/alerts/events/{id}/claim`（认领）、`/release`（放手）、`/verdict`（标注处置结论），权限码 `alert:claim`；
-- **notify 联动**：活跃 firing 已认领时平台在 webhook 响应返回 `notify=false, suppress_reason="claimed"`——**执行器零改动**（与屏蔽同构，走现成 notify 消费分支）；响应可透传 `claimed_by` 供卡片展示（可选增强）；
-- **与工单兼容（锚点已就位）**：`alert_events.ticket_id` 一期已留——认领的事件将来升级开单时回填 ticket_id，认领与工单共存于同一事件；总闸将来开启时分级策略用现成控制面：按 severity 阈值（severity=1 自动开单）或规则级配置；log 类永远不开单（逐条开单会淹没工单系统）；MTTA 口径取「最早人工动作」（有工单取工单首响，只有认领取 claimed_at）；
-- **看板价值**：MTTA、告警准确率、按时响应率三个 KPI 全部依赖认领/verdict 数据；前端在事件详情页加认领/放手/verdict 按钮，列表页显示认领人。
+- **数据模型（已落地）**：`alert_events.claimed_by / claimed_at / verdict`（v29）；verdict 值域定稿 `valid`（有效）| `false_positive`（误报）| `duplicate`（重复）；
+- **API（已上线）**：`POST /api/v1/alerts/events/{id}/claim`（仅 firing；本人重复幂等、他人已认领 409）、`/release`（未认领幂等；本人或超管）、`/verdict`（任意状态可标，resolved 后复盘补标、覆盖更新），权限码 `alert:claim`；响应体（列表/详情）已返回认领与结论字段；
+- **notify 联动（已实现）**：metric 活跃 firing 已认领时，repeat_due 到点平台返回 `notify=false, suppress_reason="claimed"`——**执行器零改动**（与屏蔽同构，走现成 notify 消费分支）；认领抑制优先于 mute/正常 repeat；
+- **与工单兼容（锚点不变）**：`alert_events.ticket_id` 一期已留——认领的事件将来升级开单时回填 ticket_id，认领与工单共存于同一事件；总闸将来开启时分级策略用现成控制面：按 severity 阈值（severity=1 自动开单）或规则级配置；log 类永远不开单；MTTA 口径取「最早人工动作」（有工单取工单首响，只有认领取 claimed_at）；
+- **前端对接清单**：事件详情页加「认领 / 放手 / 标注结论（valid|false_positive|duplicate）」三个按钮（权限码 `alert:claim`，无权限隐藏）；列表页显示认领人与 verdict 徽标；认领后按 `alert:claim` 权限渲染放手按钮（本人或超管可放手）；
+- **上线步骤**：跑 `v29_alert_claim.sql` → 重启后端 → 角色管理把 `alert:claim` 授予 operator（init_data 在 role_permissions 非空时不补绑）；
+- **看板价值**：MTTA、告警准确率、按时响应率三个 KPI 全部依赖认领/verdict 数据（准确率 = valid / 已标注总数）。
 
 **对齐结论**：显示形态可对齐夜莺卡片约 90%（红色 header/名称/级别/labels 平铺/触发值逐样本/时间/查看曲线均已支撑或小改可支撑）；「屏蔽」为其中唯一需平台新功能的项，已实施（v27）。
 

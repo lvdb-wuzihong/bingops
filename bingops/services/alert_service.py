@@ -43,6 +43,7 @@ from bingops.repositories.alert_repo import (
 )
 from bingops.schemas.alert import (
     VALID_SEVERITIES,
+    VALID_VERDICTS,
     AgentConfigResponse,
     AgentNotifyChannel,
     AgentRuleConfig,
@@ -229,6 +230,17 @@ async def handle_webhook_event(
         await repo.update(active)
         await session.commit()
         if repeat_due:
+            # 认领抑制：已有人处理 → 不再催（事件照常续命，仅静默提醒）
+            if active.claimed_at is not None:
+                logger.info(
+                    "Alert repeat notification suppressed by claim",
+                    extra={
+                        "source": payload.source, "rule_code": payload.rule_code,
+                    },
+                )
+                return _webhook_result(
+                    active.id, notify=False, suppress_reason="claimed",
+                )
             logger.info(
                 "Alert firing repeat notification due",
                 extra={"source": payload.source, "rule_code": payload.rule_code},
@@ -528,6 +540,88 @@ async def _after_resolved(session: AsyncSession, event: AlertEvent) -> None:
         "Alert ticket resolved",
         extra={"event_id": event.id, "ticket_id": event.ticket_id},
     )
+
+
+# ── 认领与处置标注（v29：轻闭环，与工单重闭环分级兼容） ──────────────────────
+
+
+async def claim_event(
+    session: AsyncSession, event_id: int, operator: User,
+) -> AlertEvent:
+    """认领活跃 firing 事件（「有人在管了」的协作信号）。
+
+    本人重复认领幂等；他人已认领 → 冲突。流水（recorded）与已恢复事件无认领语义。
+
+    Raises:
+        NotFoundError: 事件不存在。
+        ValidationError: 非 firing 事件。
+        ConflictError: 已被其他用户认领。
+    """
+    repo = AlertEventRepo(session)
+    event = await repo.get_by_id(event_id)
+    if event is None:
+        raise NotFoundError("AlertEvent", str(event_id))
+    if event.status != "firing":
+        raise ValidationError("只有活跃 firing 事件可认领")
+    if event.claimed_by is not None:
+        if event.claimed_by == operator.id:
+            return event
+        raise ConflictError(f"alert event already claimed by user {event.claimed_by}")
+
+    event.claimed_by = operator.id
+    event.claimed_at = datetime.now(UTC)
+    await repo.update(event)
+    await session.commit()
+    logger.info(
+        "Alert event claimed",
+        extra={"event_id": event_id, "claimed_by": operator.id},
+    )
+    return event
+
+
+async def release_event(
+    session: AsyncSession, event_id: int, operator: User,
+) -> AlertEvent:
+    """放弃认领（本人或超管；未认领时幂等返回）。"""
+    repo = AlertEventRepo(session)
+    event = await repo.get_by_id(event_id)
+    if event is None:
+        raise NotFoundError("AlertEvent", str(event_id))
+    if event.claimed_by is None:
+        return event
+    if event.claimed_by != operator.id and not operator.is_superuser:
+        raise PermissionDeniedError("只有认领人或超级管理员可以释放认领")
+
+    event.claimed_by = None
+    event.claimed_at = None
+    await repo.update(event)
+    await session.commit()
+    logger.info(
+        "Alert event released",
+        extra={"event_id": event_id, "released_by": operator.id},
+    )
+    return event
+
+
+async def set_event_verdict(
+    session: AsyncSession, event_id: int, verdict: str,
+) -> AlertEvent:
+    """标注处置结论（任意状态可标；resolved 后可复盘补标，重复标注覆盖）。"""
+    if verdict not in VALID_VERDICTS:
+        raise ValidationError(f"invalid verdict: {verdict}")
+    repo = AlertEventRepo(session)
+    event = await repo.get_by_id(event_id)
+    if event is None:
+        raise NotFoundError("AlertEvent", str(event_id))
+
+    event.verdict = verdict
+    await repo.update(event)
+    await session.commit()
+    logger.info(
+        "Alert event verdict set",
+        extra={"event_id": event_id, "verdict": verdict},
+    )
+    return event
 
 
 # ── stale 扫描后台任务 ───────────────────────────────────────────────────────

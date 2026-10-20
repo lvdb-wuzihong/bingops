@@ -92,6 +92,13 @@ class AlertEvent(BaseMixin, Base):
     monitoring_source_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     # 告警类型：log（CH 事件型，恢复=自动关闭语义）| metric（状态型，恢复=状态回归语义）；写入时定型
     rule_kind: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    # 认领与处置标注（v29）：MTTA 起点（最早人工动作）+ 准确率统计原料
+    claimed_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    claimed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+    # 处置结论：valid | false_positive | duplicate（resolved 后复盘补标）
+    verdict: Mapped[str | None] = mapped_column(String(16), nullable=True)
     ticket_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)  # 逻辑引用 tickets.id
     group_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
