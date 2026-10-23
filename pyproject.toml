@@ -20,6 +20,8 @@ dependencies = [
     "email-validator>=2.0,<3",
     "aiokafka>=0.12,<1",
     "mcp>=1.9,<2",
+    # 工单附件 OSS 存储（同步 SDK，调用侧统一走 asyncio.to_thread）
+    "oss2>=2.18,<3",
 ]
 
 [project.optional-dependencies]

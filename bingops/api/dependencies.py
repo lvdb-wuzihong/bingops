@@ -80,7 +80,7 @@ def has_permissions(user: User, *permissions: str) -> bool:
 
 # 工单利害关系人（创建人/处理人）免角色权限的动作白名单；
 # approve/assign/delete 仍为角色专属，不开放免底
-TICKET_STAKEHOLDER_ACTIONS = {"ticket:list", "ticket:update", "ticket:create"}
+TICKET_STAKEHOLDER_ACTIONS = {"ticket:list", "ticket:update", "ticket:create", "ticket:attachment"}
 
 
 def require_ticket_permission(*permissions: str):

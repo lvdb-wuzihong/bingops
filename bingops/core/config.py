@@ -69,6 +69,18 @@ class Settings(BaseSettings):
     # 前端工单详情页基址（如 https://bingops.example.com/tickets）；非空时通知卡片带「查看工单」跳转按钮
     ticket_notify_web_base_url: str = ""
 
+    # 工单附件（OSS 私有桶 + 平台代理下载）
+    # 总闸默认关闭：未配置 OSS 时附件端点直接 503 而非静默失败
+    ticket_attachment_enabled: bool = False
+    oss_endpoint: str = ""          # 如 oss-cn-hangzhou.aliyuncs.com（不带 scheme）
+    oss_bucket: str = ""
+    # 平台自身出站凭据（RAM 子账号，仅该桶 PutObject/GetObject/DeleteObject），
+    # 与业务密钥分层：业务密钥走 Vault 引用，平台自身集成凭据走环境变量（同飞书 app_secret）
+    oss_access_key_id: str = ""
+    oss_access_key_secret: str = ""
+    oss_attachment_prefix: str = "ticket-attachments"
+    ticket_attachment_max_mb: int = 20
+
     # Agent 编排层桥接（飞书事件唯一入口在平台，命中分流的消息转发编排层；
     # 拓扑见编排层 docs/project-charter.md §1.1）
     agent_callback_url: str = ""    # 编排层接收端点；空 = 不转发（兼容现状）

@@ -87,6 +87,7 @@ PERMISSIONS: list[tuple[str, str]] = [
     ("ticket:assign", "指派工单"),
     ("ticket:delete", "删除工单"),
     ("ticket:approve", "审批工单"),
+    ("ticket:attachment", "上传/删除工单附件"),
     ("change_freeze:list", "查看变更封禁窗口"),
     ("change_freeze:create", "创建变更封禁窗口"),
     ("change_freeze:delete", "删除变更封禁窗口"),
@@ -185,8 +186,10 @@ async def init_data() -> None:
             for code, filter_fn in [
                 ("admin", lambda _: True),
                 ("operator", lambda c: not c.startswith("user:") and not c.startswith("role:")),
-                ("viewer", lambda c: c.endswith(":list") or c.endswith(":get") or c == "ticket:create"),
-                ("auditor", lambda c: c.endswith(":list") or c.endswith(":get") or c.startswith("audit:")),
+                ("viewer", lambda c: c.endswith(":list") or c.endswith(":get")
+                 or c == "ticket:create"),
+                ("auditor", lambda c: c.endswith(":list") or c.endswith(":get")
+                 or c.startswith("audit:")),
             ]:
                 role_result = await session.execute(select(Role).where(Role.code == code))
                 role = role_result.scalar_one()

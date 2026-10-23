@@ -322,11 +322,26 @@ class OncallResponse(BaseModel):
     updated_at: datetime
 
 
+class TicketAttachmentResponse(BaseModel):
+    """工单附件响应（下载走平台代理端点，不下发 OSS 签名 URL）。"""
+
+    id: int
+    ticket_id: int
+    filename: str
+    size: int
+    content_type: str | None = None
+    uploaded_by: int
+    uploader_name: str | None = None
+    download_url: str
+    created_at: datetime
+
+
 class TicketDetailResponse(TicketResponse):
-    """工单详情响应（含流转记录、审批记录、关联任务）。"""
+    """工单详情响应（含流转记录、审批记录、关联任务、附件）。"""
 
     comments: list[TicketCommentResponse] = Field(default_factory=list)
     approvals: list[ApprovalResponse] = Field(default_factory=list)
+    attachments: list[TicketAttachmentResponse] = Field(default_factory=list)
     job_execution: dict | None = Field(
         default=None, description="审批通过后自动创建的任务执行摘要",
     )

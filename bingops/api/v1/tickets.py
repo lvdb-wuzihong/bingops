@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from datetime import date
+from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, File, Query, Response, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bingops.api.dependencies import (
@@ -14,6 +15,7 @@ from bingops.api.dependencies import (
     require_permission,
     require_ticket_permission,
 )
+from bingops.core.config import settings
 from bingops.core.exceptions import ValidationError
 from bingops.core.response import paginated_response, success_response
 from bingops.models.ticket import ChangeFreeze, Ticket, TicketApproval, TicketComment
@@ -26,6 +28,7 @@ from bingops.schemas.ticket import (
     FreezeCreate,
     FreezeResponse,
     TicketAssignRequest,
+    TicketAttachmentResponse,
     TicketCommentCreate,
     TicketCommentResponse,
     TicketCreate,
@@ -34,7 +37,11 @@ from bingops.schemas.ticket import (
     TicketStatusRequest,
     TicketUpdate,
 )
-from bingops.services import change_freeze_service, ticket_service
+from bingops.services import (
+    change_freeze_service,
+    ticket_attachment_service,
+    ticket_service,
+)
 
 router = APIRouter(prefix="/api/v1/tickets", tags=["tickets"])
 
@@ -251,10 +258,11 @@ async def get_ticket(
     session: AsyncSession = Depends(get_db_session),
     _user: User = require_ticket_permission("ticket:list"),
 ):
-    """获取工单详情（含流转记录、审批记录、关联任务执行）。"""
+    """获取工单详情（含流转记录、审批记录、关联任务执行、附件）。"""
     ticket = await ticket_service.get_ticket(session, ticket_id)
     comments = await ticket_service.list_comments(session, ticket_id)
     approvals = await ticket_service.list_approvals(session, ticket_id)
+    attachment_rows = await ticket_attachment_service.list_attachments(session, ticket_id)
     execution = await JobExecutionRepo(session).get_latest_by_ticket(ticket_id)
     job_summary = None
     if execution is not None:
@@ -271,6 +279,9 @@ async def get_ticket(
         **_to_response(ticket),
         comments=[_comment_to_response(c) for c in comments],
         approvals=[_approval_to_response(a) for a in approvals],
+        attachments=[
+            _attachment_to_response(a, uploader_name) for a, uploader_name in attachment_rows
+        ],
         job_execution=job_summary,
     )
     return success_response(data=detail.model_dump(mode="json"))
@@ -380,3 +391,106 @@ async def add_ticket_comment(
     return success_response(
         data=_comment_to_response(comment), message="Ticket comment added", http_status=201,
     )
+
+
+# ── 附件（元数据入库 + OSS 私有桶，平台代理下载） ────────────────────────
+
+
+def _attachment_to_response(attachment, uploader_name: str | None) -> dict:
+    """ORM 附件转响应字典（download_url 指向平台代理端点）。"""
+    return TicketAttachmentResponse(
+        id=attachment.id,
+        ticket_id=attachment.ticket_id,
+        filename=attachment.filename,
+        size=attachment.size,
+        content_type=attachment.content_type,
+        uploaded_by=attachment.uploaded_by,
+        uploader_name=uploader_name,
+        download_url=ticket_attachment_service.build_download_url(
+            attachment.ticket_id, attachment.id,
+        ),
+        created_at=attachment.created_at,
+    ).model_dump(mode="json")
+
+
+@router.get("/{ticket_id}/attachments")
+async def list_ticket_attachments(
+    ticket_id: int,
+    session: AsyncSession = Depends(get_db_session),
+    _user: User = require_ticket_permission("ticket:list"),
+):
+    """工单附件列表（含上传者与代理下载地址）。"""
+    await ticket_service.get_ticket(session, ticket_id)  # 工单不存在 → 404
+    rows = await ticket_attachment_service.list_attachments(session, ticket_id)
+    return success_response(
+        data=[_attachment_to_response(a, name) for a, name in rows],
+    )
+
+
+@router.post("/{ticket_id}/attachments", status_code=201)
+async def upload_ticket_attachment(
+    ticket_id: int,
+    file: UploadFile = File(description="附件（multipart/form-data，字段名 file）"),
+    session: AsyncSession = Depends(get_db_session),
+    current_user: User = require_ticket_permission("ticket:attachment"),
+):
+    """上传工单附件：扩展名白名单 + 体积上限，对象存 OSS 私有桶。"""
+    ticket = await ticket_service.get_ticket(session, ticket_id)
+    max_bytes = settings.ticket_attachment_max_mb * 1024 * 1024
+    if file.size is not None and file.size > max_bytes:
+        raise ValidationError(
+            f"file too large: {file.size} bytes (max {settings.ticket_attachment_max_mb} MB)",
+        )
+    data = await file.read()
+    attachment = await ticket_attachment_service.upload_attachment(
+        session,
+        ticket,
+        filename=file.filename or "",
+        content_type=file.content_type,
+        data=data,
+        operator=current_user,
+    )
+    uploader_name = current_user.display_name or current_user.username
+    return success_response(
+        data=_attachment_to_response(attachment, uploader_name),
+        message="Attachment uploaded",
+        http_status=201,
+    )
+
+
+@router.get("/{ticket_id}/attachments/{attachment_id}/download")
+async def download_ticket_attachment(
+    ticket_id: int,
+    attachment_id: int,
+    session: AsyncSession = Depends(get_db_session),
+    _user: User = require_ticket_permission("ticket:list"),
+):
+    """下载附件（平台代理流式输出；二进制响应不走统一信封）。"""
+    attachment, data = await ticket_attachment_service.get_attachment_for_download(
+        session, ticket_id, attachment_id,
+    )
+    return Response(
+        content=data,
+        media_type=attachment.content_type or "application/octet-stream",
+        headers={
+            "Content-Disposition": (
+                f"attachment; filename*=UTF-8''{quote(attachment.filename)}"
+            ),
+            "Content-Length": str(len(data)),
+        },
+    )
+
+
+@router.delete("/{ticket_id}/attachments/{attachment_id}")
+async def delete_ticket_attachment(
+    ticket_id: int,
+    attachment_id: int,
+    session: AsyncSession = Depends(get_db_session),
+    current_user: User = require_ticket_permission("ticket:attachment"),
+):
+    """删除附件（仅上传者或超管；终态工单只读）。"""
+    ticket = await ticket_service.get_ticket(session, ticket_id)
+    await ticket_attachment_service.delete_attachment(
+        session, ticket, attachment_id, current_user,
+    )
+    return success_response(message="Attachment deleted")

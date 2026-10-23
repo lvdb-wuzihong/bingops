@@ -1,8 +1,8 @@
 # 工单系统（Tickets）设计文档
 
 > 状态：v3 已实现（v1 协作流转 + P3 审批挂接 + v15 服务目录/值班派单） | 维护者：BingOps Team
-> 相关代码：`bingops/models/ticket.py`、`bingops/services/ticket_service.py`、`bingops/api/v1/tickets.py`、`bingops/services/change_freeze_service.py`、`bingops/core/feishu_bot.py`
-> 数据库脚本：`sql/migrations/v4_tickets.sql` + `sql/migrations/v14_ticket_approval.sql`（已同步 `sql/schema.sql`）
+> 相关代码：`bingops/models/ticket.py`、`bingops/services/ticket_service.py`、`bingops/services/ticket_attachment_service.py`、`bingops/api/v1/tickets.py`、`bingops/services/change_freeze_service.py`、`bingops/core/feishu_bot.py`、`bingops/core/oss_client.py`
+> 数据库脚本：`sql/schema.sql`（权威源）+ `sql/migrations/`（增量迁移，最新 v38 工单附件）
 
 ## 1. 定位
 
@@ -426,4 +426,97 @@ admin 全量；operator 管理但无删除；viewer/auditor 只读。目录删�
 | `BINGOPS_FEISHU_EVENT_ENCRYPT_KEY` | 空 | 回调报文解密（事件与回调 → 加密策略）；未配置拒绝全部回调 |
 | `BINGOPS_FEISHU_EVENT_VERIFICATION_TOKEN` | 空 | 回调验签；未配置拒绝全部回调 |
 
-飞书侧订阅矩阵（最小集）：事件 `im.message.receive_v1` + 权限 `im:message.p2p:readonly`；回调配置订阅 `card.action.trigger`（请求地址与事件同 URL）；机器人菜单（发送文字消息「建单」）为可选入口装饰。群 @ 建单预留 `im:message.group_at_msg:readonly`（二期，`chat_type != p2p` 当前静默忽略）。明确不订阅：消息已读、消息资源文件、机器人进退群、飞书审批应用事件（平台工单走自身数据表）。
+飞书侧订阅矩阵（最小集）：事件 `im.message.receive_v1` + 权限 `im:message.p2p:readonly`；回调配置订阅 `card.action.trigger`（请求地址与事件同 URL）；机器人菜单（发送文字消息「建单」）为可选入口装饰。群 @ 建单预留 `im.message.group_at_msg:readonly`（二期，`chat_type != p2p` 当前静默忽略）。明确不订阅：消息已读、消息资源文件、机器人进退群、飞书审批应用事件（平台工单走自身数据表）。
+
+---
+
+## 17. 工单附件（v38，已实现）
+
+附件对象实体存 **OSS 私有桶**，数据库只存元数据；下载一律经**平台代理端点**鉴权后流出，**不下发 OSS 签名 URL**（签名会过期且绕过 RBAC）。
+
+### 17.1 存储与约束
+
+| 项 | 约定 |
+|----|------|
+| 元数据表 | `ticket_attachments`（ticket_id / filename / size / content_type / oss_key / uploaded_by / created_at），工单删除级联 |
+| 对象键 | `{BINGOPS_OSS_ATTACHMENT_PREFIX}/ticket/{ticket_id}/{uuid}/{filename}`（中间 `ticket/` 段为对象类别命名空间，便于 RAM 按类别授权） |
+| 体积 | 单文件 ≤ `BINGOPS_TICKET_ATTACHMENT_MAX_MB`（默认 20MB）；单工单 ≤ 50 个 |
+| 类型白名单 | 图片 `png/jpg/jpeg/gif/webp/bmp`、文本 `txt/log/json/csv/md/yaml/yml/sql`、文档包 `pdf/zip/gz/tgz/tar` |
+| 状态闸 | 仅 `open` / `pending_approval` / `in_progress` 可上传/删除；**终态（resolved/closed/cancelled）只读**防篡改 |
+| 删除权 | 仅**上传者本人**或超管 |
+
+### 17.2 API 契约
+
+| 端点 | 权限 | 说明 |
+|------|------|------|
+| `GET /api/v1/tickets/{ticket_id}/attachments` | `ticket:list`（利害关系人免底） | 附件列表 |
+| `POST /api/v1/tickets/{ticket_id}/attachments` | `ticket:attachment`（利害关系人免底） | 上传，`multipart/form-data`，字段名 **`file`** |
+| `GET /api/v1/tickets/{ticket_id}/attachments/{attachment_id}/download` | `ticket:list`（利害关系人免底） | 下载（**二进制流，不走统一信封**） |
+| `DELETE /api/v1/tickets/{ticket_id}/attachments/{attachment_id}` | `ticket:attachment`（利害关系人免底） | 删除（上传者/超管 + 非终态） |
+
+附件对象结构（工单详情 `attachments` 数组同此形状）：
+
+```json
+{
+  "id": 12,
+  "ticket_id": 7,
+  "filename": "变更前截图.png",
+  "size": 184320,
+  "content_type": "image/png",
+  "uploaded_by": 3,
+  "uploader_name": "绿豆饼",
+  "download_url": "/api/v1/tickets/7/attachments/12/download",
+  "created_at": "2026-10-23T09:12:31Z"
+}
+```
+
+`GET /api/v1/tickets/{ticket_id}` 的响应已内嵌 `attachments` 数组，详情页无需再单独请求列表。
+
+### 17.3 前端对接说明（重要）
+
+1. **上传必须在建单之后**：附件表依赖 `ticket_id`。建单流程 = `POST /tickets` 拿到 `id` → 再调上传端点。建单弹窗建议提交成功后切到“补充附件”步骤（或跳详情页上传）。
+2. **下载必须用 `fetch` + blob，不能用 `<a href>` 直链**：下载端点需要 `Authorization` 头，浏览器直接跳转带不上 → 会 401。正确写法：
+
+```ts
+const res = await fetch(att.download_url, { headers: { Authorization: `Bearer ${token}` } });
+const blob = await res.blob();
+// 用 URL.createObjectURL(blob) + 临时 <a download> 触发保存
+```
+
+3. **上传示例**：
+
+```ts
+const fd = new FormData();
+fd.append("file", file);            // 字段名固定为 file
+await fetch(`/api/v1/tickets/${ticketId}/attachments`, {
+  method: "POST",
+  headers: { Authorization: `Bearer ${token}` },   // 不要手动设 Content-Type
+  body: fd,
+});
+```
+
+4. **按钮可见性**：上传/删除按钮仅在 `status ∈ {open, pending_approval, in_progress}` 且当前用户为**创建人/处理人**或拥有 `ticket:attachment` 权限时显示；终态工单隐藏全部写操作，只留下载。
+5. **前端预校验**：提交前检查扩展名白名单与体积（≤20MB），避免无谓请求；后端仍会二次校验（422 与错误信息直出）。
+6. **OSS 未启用时端点返 503**：前端应展示“附件存储未启用，请联系管理员”而非报网络错误；功能开关见 17.4。
+7. 附件支持**前端预览**（无需后端改动）：用现有下载端点 `fetch` 成 blob 后，图片置 `URL.createObjectURL(blob)` 到 `<img>`、PDF 置 `<iframe src>`、文本用 `blob.text()` 渲染。注意 `Content-Disposition: attachment` 只影响浏览器**直接导航**，对 fetch+blob 路径不生效，所以不影响预览。若要“新标签直接打开”或 `img src` 秒开，需后续加预签名 URL 端点（要求 OSS 公网可达）。
+
+### 17.4 配置与部署（运维）
+
+| 环境变量 | 默认 | 说明 |
+|----------|------|------|
+| `BINGOPS_TICKET_ATTACHMENT_ENABLED` | `false` | 总闸；关闭时附件端点直接 503（fail-closed） |
+| `BINGOPS_OSS_ENDPOINT` | 空 | 如 `oss-cn-hangzhou.aliyuncs.com`（不带 scheme） |
+| `BINGOPS_OSS_BUCKET` | 空 | 私有桶名 |
+| `BINGOPS_OSS_ACCESS_KEY_ID` / `BINGOPS_OSS_ACCESS_KEY_SECRET` | 空 | **平台自身出站凭据**（RAM 子账号，仅该桶 PutObject/GetObject/DeleteObject）；与业务密钥分层：业务密钥走 Vault 引用由 runner 解析，平台自身集成凭据走环境变量（同飞书 app_secret） |
+| `BINGOPS_OSS_ATTACHMENT_PREFIX` | `ticket-attachments` | 对象键前缀 |
+| `BINGOPS_TICKET_ATTACHMENT_MAX_MB` | `20` | 单文件上限 |
+
+部署步骤：
+
+1. 执行迁移（建表 + 权限种子 + admin/operator 授权）：
+   ```bash
+   psql -v ON_ERROR_STOP=1 --single-transaction -U <user> -d <dbname> \
+     -f sql/migrations/v38_ticket_attachments.sql
+   ```
+2. 配置上述环境变量并重启服务；桶保持**私有**读写（不要开公共读）。
+3. 已有环境的其他角色需要 `ticket:attachment` 时，在角色管理界面手工勾选（init_data 的角色授权是总量幂等，重跑不会补入新码）。

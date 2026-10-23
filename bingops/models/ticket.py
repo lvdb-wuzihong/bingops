@@ -203,3 +203,27 @@ class OncallSchedule(BaseMixin, Base):
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     group: Mapped[TicketGroup] = relationship()
+
+
+class TicketAttachment(Base):
+    """工单附件元数据（不可变，仅 created_at；对象实体存 OSS 私有桶）。"""
+
+    __tablename__ = "ticket_attachments"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    ticket_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("tickets.id", ondelete="CASCADE"), nullable=False,
+    )
+    filename: Mapped[str] = mapped_column(String(256), nullable=False)
+    size: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    content_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # 对象键：{prefix}/{ticket_id}/{uuid}/{filename}；不存签名 URL（会过期）
+    oss_key: Mapped[str] = mapped_column(String(512), nullable=False)
+    uploaded_by: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("users.id"), nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )

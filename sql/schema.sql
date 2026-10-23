@@ -518,6 +518,21 @@ CREATE TABLE ticket_comments (
 CREATE INDEX idx_ticket_comment_ticket ON ticket_comments (ticket_id);
 CREATE INDEX idx_ticket_comment_time   ON ticket_comments (created_at);
 
+-- 工单附件表（不可变，仅 created_at；对象实体存 OSS 私有桶，本表只存元数据）
+CREATE TABLE ticket_attachments (
+    id           BIGSERIAL PRIMARY KEY,
+    ticket_id    BIGINT       NOT NULL REFERENCES tickets(id) ON DELETE CASCADE,
+    filename     VARCHAR(256) NOT NULL,
+    size         BIGINT       NOT NULL,
+    content_type VARCHAR(128),
+    oss_key      VARCHAR(512) NOT NULL,             -- {prefix}/{ticket_id}/{uuid}/{filename}
+    uploaded_by  BIGINT       NOT NULL REFERENCES users(id),
+    created_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_ticket_attachment_ticket ON ticket_attachments (ticket_id);
+CREATE INDEX idx_ticket_attachment_time   ON ticket_attachments (created_at);
+
 -- 工单审批记录表（不可变，仅 created_at；P3 审批挂接）
 CREATE TABLE ticket_approvals (
     id          BIGSERIAL PRIMARY KEY,
@@ -874,6 +889,7 @@ INSERT INTO permissions (code, name) VALUES
 ('ticket:assign',  '指派工单'),
 ('ticket:delete',  '删除工单'),
 ('ticket:approve', '审批工单'),
+('ticket:attachment', '上传/删除工单附件'),
 ('runbook:list',   '查看 Runbook 列表'),
 ('runbook:get',    '查看 Runbook 详情'),
 ('runbook:create', '创建 Runbook'),
