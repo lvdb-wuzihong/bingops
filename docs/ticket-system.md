@@ -523,7 +523,11 @@ await fetch(`/api/v1/tickets/${ticketId}/attachments`, {
 
 ---
 
-## 18. SQL 变更工单（设计稿，P1 未实现）
+## 18. SQL 变更工单（P1-a/P1-b 已实现；P1-c 待做）
+
+> **已落地（P1-a，v39）**：`change_sql` / `sql_hash` / `rollback_sql` / `rollback_kind` / `ddl_strategy` / `snapshot_ref` 字段；`ticket_catalog.requires_sql` / `sql_scope`；sqlglot 校验器（`services/sql_change_service.py`）与建单集成（不可逆变更强制回滚方案）。
+> **已落地（P1-b）**：下发弹窗重贴 SQL 并与 `sql_hash` 比对（不一致 422，需重新审批）；`ddl_strategy` 枚举校验与引擎适配（PolarDB 拒绝 ptosc/ghost）。
+> **待做**：P1-c（runner 侧环境预检 / binlog 位点采集与反解）。
 
 ### 18.1 定位与三原则
 
@@ -535,7 +539,7 @@ SQL 变更是**工单类型插件**而非独立模块（不拆：审批/状态�
 | **回滚分层** | 可逆语句自动生成（auto）/ 不可逆强制人工方案（manual）/ 执行前快照兜底（snapshot） |
 | **执行方式可声明** | `ddl_strategy` 区分直执行 / pt-osc / gh-ost / 人工，不同策略对应不同回滚路径 |
 
-### 18.2 数据模型（计划 v39）
+### 18.2 数据模型（v39 已落地）
 
 | 表 | 新增列 | 说明 |
 |----|--------|------|
@@ -546,6 +550,17 @@ SQL 变更是**工单类型插件**而非独立模块（不拆：审批/状态�
 | | `ddl_strategy` VARCHAR(16) | `direct` / `ptosc` / `ghost` / `manual`（默认 direct） |
 | | `snapshot_ref` VARCHAR(512) | 执行前快照引用（OSS key 或 job_step 标识） |
 | `ticket_catalog` | `requires_sql` BOOLEAN | 该事项是否必须填 SQL（DDL/DML 类事项） |
+| | `sql_scope` VARCHAR(8)（可选） | `dml` / `ddl` / `both`（默认 both）；「数据订正」设 `dml` 拦截 DDL |
+
+**目录侧怎么配（不新建分类体系）**：SQL 工单不是新模块、也不是新菜单，而是在现有服务目录事项上打标记：
+
+| 事项 | 分类 | `requires_sql` | `sql_scope` |
+|------|------|---------------|------------|
+| 数据库DDL/DML变更 | 发布与配置变更 | ✅ | both |
+| 数据订正 | 故障与排查 | ✅ | dml |
+| 其他（计算资源申请/应用发布等） | — | ❌ | — |
+
+判定标准：**执行载体是否为一条 SQL**。是 → 打标记（表单出现 SQL 区、执行走 sql-exec）；否 → 不打（仍走下发时选 runbook 的通用路径）。拆分粒度按“审批人 / 风险等级 / 语句范围是否不同”决定，**禁止按具体 SQL 内容建事项**（事项是服务类型，不是变更内容）。
 
 ### 18.3 流程
 
@@ -689,6 +704,39 @@ SQL 变更是**工单类型插件**而非独立模块（不拆：审批/状态�
 
 | 阶段 | 内容 | 仓库 |
 |------|------|------|
-| P1-a | v39 迁移 + 字段/校验器（sqlglot）+ 提单与审批展示 | bingops |
-| P1-b | DispatchRequest 携带 SQL + hash 比对拦截 | bingops |
+| P1-a | v39 迁移 + 字段/校验器（sqlglot）+ 提单与审批展示（后端✅） | bingops |
+| P1-b | DispatchRequest 携带 SQL + hash 比对拦截（✅） | bingops |
 | P1-c | runner step0 环境探测 / step1 位点 / step2 执行 / step3 反解回传 | bingops-runner |
+
+### 18.13 前端对接说明
+
+#### 字段映射
+
+| 字段 | 出现位置 | 控件 | 约束 |
+|------|---------|------|------|
+| `change_sql` | 新建工单（仅 `requires_sql=true` 的事项） | 代码编辑器（Monaco，MySQL 高亮 + 行号） | 必填；服务端做 18.4 校验，前端只做非空 |
+| `rollback_sql` | 新建工单（仅当服务端返回 `rollback_kind=manual`）、审批页只读 | 代码编辑器 / 只读展示 | `manual` 时必填；`auto` 时由系统生成 |
+| `ddl_strategy` | 下发弹窗 | 下拉：direct / ptosc / ghost / manual | 引擎为 PolarDB 时只能选 direct/manual；预检判定大表时禁选 direct |
+| `sql_hash` | 前端不展示 | — | 下发时重贴 SQL，服务端比对，不一致 → 422 |
+| 预检结果 | 工单详情、下发弹窗提示区 | 键值表 + 警告条 | 硬失败项（binlog 非 ROW / row_image 非 FULL）→ 禁止下发 |
+
+#### 四个页面的交互要求
+
+1. **新建工单**：选事项后根据 `requires_sql` 动态显示 SQL 区；提交失败（422）时把服务端 `message` 里的违规规则原样展示（如“无 WHERE 的 UPDATE 已拦截”）；`rollback_kind=manual` 时展开“回滚方案”必填区。
+2. **审批页**：SQL 只读全文（行号 + 语法高亮 + 一键复制）、校验结论（语句类型/影响表/是否无 WHERE）、回滚方案（auto 展示生成的 SQL，manual 展示人工填写的）——**审批人必须能看到完整 SQL 与回滚方案才能点通过**。
+3. **下发弹窗（运维）**：runbook(sql-exec) + 目标 DB 资源选择器（限 DB 类模型）+ `db_user` 输入 + `db_password` 凭据下拉（credentials 中 `kind=db_password`）+ **重贴 SQL（`change_sql`，服务端 hash 比对）** + `ddl_strategy`；选 ptosc/ghost 后展开工具参数（表名/chunk-size/max-lag）；预检硬失败时禁用提交并提示原因。
+4. **工单详情**：SQL 面板双栏（变更 SQL / 回滚 SQL）+ 预检结果卡 + 执行记录（affected_rows / binlog 位点 / 回滚生成状态）；「执行回滚」按钮仅 `status=open` 且在 `rollback_sql` 非空时显示，点击弹二次确认并提示“回滚将覆盖变更后的写入，请确认无业务写入”。
+
+#### 列表与状态
+
+- 工单列表加「SQL 变更」Tab（筛选 `requires_sql` 事项），列建议：单号 / 标题 / 目标库 / 风险等级 / 审批状态 / 回滚可用性（auto / manual / 不可用）。
+- 执行中的回滚生成属**异步**（job step），前端不能同步等：提交后轮询工单详情（或监听飞书通知），回滚 SQL 就绪后再刷新面板。
+
+#### 错误码处理
+
+| 响应 | 场景 | 前端动作 |
+|------|------|---------|
+| 422 | 高危语法 / hash 不一致 / 预检硬失败 | 原样展示 `message`（已含具体原因与规则名） |
+| 409 | 封禁窗口命中 / 目标并发锁 | 展示冲突原因与持有者 |
+| 502 | OSS 或外部服务失败（已带 OSS 错误码与 request_id） | 展示“存储/外部服务异常”并附 message |
+| 503 | 附件存储未启用 | 提示联系管理员开启开关 |

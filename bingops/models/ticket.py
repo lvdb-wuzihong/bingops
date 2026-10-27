@@ -72,6 +72,15 @@ class Ticket(BaseMixin, Base):
         BigInteger, ForeignKey("cmdb_business_apps.id"), nullable=True,
     )
     business_app: Mapped[CmdbBusinessApp | None] = relationship(CmdbBusinessApp)
+    # SQL 变更（P1）：变更 SQL 与回滚方案
+    change_sql: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sql_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    rollback_sql: Mapped[str | None] = mapped_column(Text, nullable=True)
+    rollback_kind: Mapped[str | None] = mapped_column(String(16), nullable=True)  # auto|manual|none
+    ddl_strategy: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="direct",
+    )  # direct|ptosc|ghost|manual
+    snapshot_ref: Mapped[str | None] = mapped_column(String(512), nullable=True)
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
@@ -165,6 +174,9 @@ class TicketCatalog(BaseMixin, Base):
     default_group_id: Mapped[int | None] = mapped_column(
         BigInteger, ForeignKey("ticket_groups.id"), nullable=True,
     )
+    # SQL 变更：该事项是否必须填变更 SQL 与允许的语句范围
+    requires_sql: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    sql_scope: Mapped[str] = mapped_column(String(8), nullable=False, default="both")
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 

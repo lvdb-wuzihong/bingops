@@ -456,6 +456,8 @@ CREATE TABLE ticket_catalog (
     default_risk       VARCHAR(16)  NOT NULL DEFAULT 'low',     -- low|medium|high
     default_type       VARCHAR(32)  NOT NULL DEFAULT 'request', -- 语义 ticket_type
     default_group_id   BIGINT       REFERENCES ticket_groups(id), -- 默认处理组（路由配置化）
+    requires_sql       BOOLEAN      NOT NULL DEFAULT FALSE,     -- 该事项是否必须填变更 SQL
+    sql_scope          VARCHAR(8)   NOT NULL DEFAULT 'both',    -- dml|ddl|both
     is_active          BOOLEAN      NOT NULL DEFAULT TRUE,
     sort_order         INT          NOT NULL DEFAULT 0,
     created_at         TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
@@ -490,6 +492,12 @@ CREATE TABLE tickets (
     started_at          TIMESTAMPTZ,                             -- 开始处理时间（响应时长计算）
     target_resource_ids JSONB        NOT NULL DEFAULT '[]',      -- 执行目标资源 ID 列表（运维下发时填写，多选唯一入口）
     business_app_id     BIGINT       REFERENCES cmdb_business_apps(id), -- 关联业务应用（上下文；申请类开通归属）
+    change_sql          TEXT,                                  -- SQL 变更：变更 SQL（审批对象）
+    sql_hash            VARCHAR(64),                           -- sha256(规范化 SQL)，审批↔执行锚点
+    rollback_sql        TEXT,                                  -- 回滚 SQL（自动生成或人工填写）
+    rollback_kind       VARCHAR(16),                           -- auto|manual|none
+    ddl_strategy        VARCHAR(16)  NOT NULL DEFAULT 'direct', -- direct|ptosc|ghost|manual
+    snapshot_ref        VARCHAR(512),                          -- 执行前快照引用（OSS key / job_step）
     resolved_at         TIMESTAMPTZ,
     closed_at           TIMESTAMPTZ,
     created_at          TIMESTAMPTZ  NOT NULL DEFAULT NOW(),

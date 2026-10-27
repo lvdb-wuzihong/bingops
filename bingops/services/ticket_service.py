@@ -48,12 +48,16 @@ from bingops.repositories.ticket_repo import (
 from bingops.repositories.user_repo import UserRepo
 from bingops.schemas.jobs import ExecutionCreate
 from bingops.schemas.ticket import ChangeContextResource, TicketCreate, TicketUpdate
-from bingops.services import job_service
+from bingops.services import job_service, sql_change_service
 
 logger = logging.getLogger(f"bingops.{__name__}")
 
 VALID_TICKET_TYPES = ("general", "request", "change", "incident")
 VALID_PRIORITIES = ("low", "medium", "high", "urgent")
+
+# SQL 变更执行策略（P1-b）：在线 DDL 工具类在 PolarDB 上被拒绝
+VALID_DDL_STRATEGIES = ("direct", "ptosc", "ghost", "manual")
+DDL_ONLINE_TOOL_STRATEGIES = ("ptosc", "ghost")
 
 # P3 审批挂接：风险阈值见 job_service.APPROVAL_RISK_LEVELS（低危自动直通）
 VALID_APPROVAL_ACTIONS = ("approve", "reject")
@@ -214,6 +218,25 @@ async def create_ticket(session: AsyncSession, payload: TicketCreate, operator: 
     risk_level = catalog_item.default_risk if catalog_item is not None else "low"
     needs_approval = risk_level in job_service.APPROVAL_RISK_LEVELS
 
+    # SQL 变更预审：requires_sql 事项必须携 SQL；不可逆变更必须给回滚方案
+    sql_check = None
+    if (
+        catalog_item is not None
+        and catalog_item.requires_sql
+        and not (payload.change_sql or "").strip()
+    ):
+        raise ValidationError("该服务目录事项要求填写变更 SQL（change_sql）")
+    if (payload.change_sql or "").strip():
+        sql_check = sql_change_service.check_change_sql(
+            payload.change_sql,
+            sql_scope=catalog_item.sql_scope if catalog_item is not None else "both",
+        )
+        if sql_check.rollback_kind == "manual" and not (payload.rollback_sql or "").strip():
+            raise ValidationError(
+                f"{sql_check.statement_type.upper()} 变更无法自动生成回滚语句，"
+                "必须填写回滚方案（rollback_sql）",
+            )
+
     # 值班自动派单：未显式指派且带处理组时，按当日值班 tier1 轮转
     assignee_id = payload.assignee_id
     auto_assigned = False
@@ -238,6 +261,10 @@ async def create_ticket(session: AsyncSession, payload: TicketCreate, operator: 
         difficulty=catalog_item.difficulty if catalog_item is not None else None,
         target_resource_ids=_extract_target_ids(payload),
         business_app_id=payload.business_app_id,
+        change_sql=payload.change_sql,
+        sql_hash=sql_check.sql_hash if sql_check is not None else None,
+        rollback_sql=payload.rollback_sql,
+        rollback_kind=sql_check.rollback_kind if sql_check is not None else None,
     )
     ticket = await repo.create(ticket)
     ticket.ticket_no = f"TK-{ticket.id:08d}"
@@ -349,6 +376,25 @@ async def _dispatch_attached_job(
     )
 
 
+async def _assert_engine_supports_strategy(
+    session: AsyncSession, resource_ids: list[int], strategy: str,
+) -> None:
+    """PolarDB 拒绝 pt-osc/gh-ost：官方建议用内核并行 DDL / 秒级加列。"""
+    if strategy not in DDL_ONLINE_TOOL_STRATEGIES or not resource_ids:
+        return
+    result = await session.execute(
+        select(CmdbModel.code)
+        .join(CmdbResource, CmdbResource.model_id == CmdbModel.id)
+        .where(CmdbResource.id.in_(resource_ids))
+    )
+    codes = [row[0] for row in result.all() if row[0]]
+    polar = sorted({code for code in codes if "polar" in code.lower()})
+    if polar:
+        raise ValidationError(
+            f"PolarDB 目标（{polar}）不支持 {strategy}：请使用 direct（内核并行 DDL）或 manual",
+        )
+
+
 async def dispatch_ticket_job(
     session: AsyncSession,
     ticket_id: int,
@@ -357,11 +403,14 @@ async def dispatch_ticket_job(
     params: dict,
     operator: User,
     target_resource_ids: list[int] | None = None,
+    change_sql: str | None = None,
+    ddl_strategy: str | None = None,
 ) -> Ticket:
     """运维选定 runbook 并补齐执行配置下发（角色分离：提单人不接触执行层）。
 
     前置：工单须 open（中高危已审批）；同一工单存在活跃执行时拒绝重复下发。
     执行目标：本次传入优先，否则用工单已有目标；两者皆空拒绝（无目标不可执行）。
+    SQL 变更单：必须重贴 SQL 且与服务端 sql_hash 一致（审批所见即所执行）。
     """
     ticket = await _get_ticket_or_fail(session, ticket_id)
 
@@ -397,9 +446,28 @@ async def dispatch_ticket_job(
             "target_resource_ids is required to dispatch (select execution targets)",
         )
 
+    # SQL 变更单：执行 SQL 必须与审批版本一致（hash 锁定，防"批 A 执行 B"）
+    if (ticket.change_sql or "").strip():
+        if not (change_sql or "").strip():
+            raise ValidationError(
+                "该工单为 SQL 变更单，下发时必须重贴变更 SQL（change_sql）",
+            )
+        if ticket.sql_hash and sql_change_service.sql_hash_of(change_sql) != ticket.sql_hash:
+            raise ValidationError(
+                "变更 SQL 与审批版本不一致（hash 不匹配），请重新提交审批后再下发",
+            )
+
+    strategy = (ddl_strategy or ticket.ddl_strategy or "direct").strip().lower()
+    if strategy not in VALID_DDL_STRATEGIES:
+        raise ValidationError(
+            f"ddl_strategy must be one of: {', '.join(VALID_DDL_STRATEGIES)}",
+        )
+    await _assert_engine_supports_strategy(session, targets, strategy)
+
     ticket.runbook_id = runbook_id
     ticket.code_ref = code_ref
     ticket.target_resource_ids = targets
+    ticket.ddl_strategy = strategy
     merged_params = dict(ticket.job_params or {})
     merged_params["params"] = params
     ticket.job_params = merged_params

@@ -74,6 +74,8 @@ async def create_catalog_item(session: AsyncSession, payload: CatalogCreate) -> 
         default_risk="low" if is_category else payload.default_risk,
         default_type="request" if is_category else payload.default_type,
         default_group_id=payload.default_group_id,
+        requires_sql=False if is_category else payload.requires_sql,
+        sql_scope="both" if is_category else payload.sql_scope,
         sort_order=payload.sort_order,
     )
     item = await repo.create(item)
@@ -102,7 +104,7 @@ async def update_catalog_item(
         raise ValidationError(f"default_risk must be one of: {VALID_RISKS}")
     if item.parent_id is None:
         # 一级分类：事项级属性无意义，更新时屏蔽
-        for key in ("difficulty", "default_risk", "default_type"):
+        for key in ("difficulty", "default_risk", "default_type", "requires_sql", "sql_scope"):
             data.pop(key, None)
     for field, value in data.items():
         setattr(item, field, value)

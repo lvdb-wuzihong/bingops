@@ -31,6 +31,12 @@ class TicketCreate(BaseModel):
         default_factory=list,
         description="执行目标资源 ID 列表（通常由运维下发时填写；建单传值视为运维 API 路径）",
     )
+    change_sql: str | None = Field(
+        default=None, description="变更 SQL（requires_sql 事项必填，服务端做高危校验）",
+    )
+    rollback_sql: str | None = Field(
+        default=None, description="回滚方案（rollback_kind=manual 时必填）",
+    )
 
 
 class TicketUpdate(BaseModel):
@@ -65,6 +71,13 @@ class DispatchRequest(BaseModel):
 
     runbook_id: int = Field(description="执行所选 Runbook（同一事项可对应多个 runbook）")
     code_ref: str = Field(min_length=1, max_length=128, description="git tag 快照")
+    change_sql: str | None = Field(
+        default=None,
+        description="SQL 变更单必填：重贴变更 SQL，服务端与审批版本 hash 比对",
+    )
+    ddl_strategy: str | None = Field(
+        default=None, description="执行策略: direct|ptosc|ghost|manual（默认 direct）",
+    )
     params: dict = Field(
         default_factory=dict, description="执行参数（按 runbook params_schema 校验）",
     )
@@ -186,6 +199,12 @@ class TicketResponse(BaseModel):
     target_resource_ids: list[int] = Field(default_factory=list)
     business_app_id: int | None = None
     business_app_name: str | None = None
+    change_sql: str | None = None
+    sql_hash: str | None = None
+    rollback_sql: str | None = None
+    rollback_kind: str | None = None
+    ddl_strategy: str = "direct"
+    snapshot_ref: str | None = None
     resolved_at: datetime | None = None
     closed_at: datetime | None = None
     created_at: datetime
@@ -202,6 +221,8 @@ class CatalogCreate(BaseModel):
     default_risk: str = Field(default="low", description="low|medium|high")
     default_type: str = Field(default="request", description="语义 ticket_type")
     default_group_id: int | None = Field(default=None, description="默认处理组（路由配置化）")
+    requires_sql: bool = Field(default=False, description="该事项是否必须填变更 SQL")
+    sql_scope: str = Field(default="both", description="dml|ddl|both")
     sort_order: int = 0
 
 
@@ -213,6 +234,8 @@ class CatalogUpdate(BaseModel):
     default_risk: str | None = None
     default_type: str | None = None
     default_group_id: int | None = None
+    requires_sql: bool | None = None
+    sql_scope: str | None = None
     is_active: bool | None = None
     sort_order: int | None = None
 
@@ -236,6 +259,8 @@ class ItemCreate(BaseModel):
     default_risk: str = Field(default="low", description="low|medium|high")
     default_type: str = Field(default="request", description="语义 ticket_type")
     default_group_id: int | None = Field(default=None, description="覆盖分类的默认处理组")
+    requires_sql: bool = Field(default=False, description="该事项是否必须填变更 SQL")
+    sql_scope: str = Field(default="both", description="dml|ddl|both")
     sort_order: int = 0
 
 
@@ -250,6 +275,8 @@ class CatalogResponse(BaseModel):
     default_risk: str
     default_type: str
     default_group_id: int | None = None
+    requires_sql: bool = False
+    sql_scope: str = "both"
     is_active: bool
     sort_order: int
     created_at: datetime

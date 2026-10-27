@@ -87,6 +87,12 @@ def _to_response(ticket: Ticket) -> dict:
         target_resource_ids=ticket.target_resource_ids or [],
         business_app_id=ticket.business_app_id,
         business_app_name=ticket.business_app.name if ticket.business_app else None,
+        change_sql=ticket.change_sql,
+        sql_hash=ticket.sql_hash,
+        rollback_sql=ticket.rollback_sql,
+        rollback_kind=ticket.rollback_kind,
+        ddl_strategy=ticket.ddl_strategy,
+        snapshot_ref=ticket.snapshot_ref,
         resolved_at=ticket.resolved_at,
         closed_at=ticket.closed_at,
         created_at=ticket.created_at,
@@ -349,6 +355,7 @@ async def dispatch_ticket(
     ticket = await ticket_service.dispatch_ticket_job(
         session, ticket_id, payload.runbook_id, payload.code_ref, payload.params,
         current_user, target_resource_ids=payload.target_resource_ids or None,
+        change_sql=payload.change_sql, ddl_strategy=payload.ddl_strategy,
     )
     return success_response(data=_to_response(ticket), message="Ticket dispatched")
 

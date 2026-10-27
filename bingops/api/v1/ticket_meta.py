@@ -42,6 +42,8 @@ def _catalog_to_response(item: TicketCatalog) -> dict:
         default_risk=item.default_risk,
         default_type=item.default_type,
         default_group_id=item.default_group_id,
+        requires_sql=item.requires_sql,
+        sql_scope=item.sql_scope,
         is_active=item.is_active,
         sort_order=item.sort_order,
         created_at=item.created_at,
