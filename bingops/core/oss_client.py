@@ -22,6 +22,34 @@ logger = logging.getLogger(f"bingops.{__name__}")
 
 _bucket: oss2.Bucket | None = None
 
+# OSS 错误码 → 可操作的排查提示（阿里云侧问题，无需改代码）
+_OSS_HINTS = {
+    "AccessDenied": "OSS 拒绝访问：检查该 RAM 用户是否已绑定 PutObject/GetObject/DeleteObject "
+                    "策略、Resource 是否覆盖目标前缀；若桶与 AK 跨账号，需在桶上加 Bucket Policy",
+    "InvalidAccessKeyId": (
+        "AK 不存在：检查 BINGOPS_OSS_ACCESS_KEY_ID 是否为当前账号下的有效 RAM 用户"
+    ),
+    "SignatureDoesNotMatch": (
+        "签名不匹配：检查 BINGOPS_OSS_ACCESS_KEY_SECRET 是否完整（无首尾空格）"
+    ),
+    "NoSuchBucket": "桶不存在：检查 BINGOPS_OSS_BUCKET 与 BINGOPS_OSS_ENDPOINT 的地域是否匹配",
+    "NoSuchKey": "对象不存在：可能是 OSS 对象被外部删除或 oss_key 记录不一致",
+}
+
+
+def _oss_detail(exc: Exception) -> str:
+    """抽取 OSS 错误的关键信息（code / message / request_id），便于直接定位。"""
+    code = getattr(exc, "code", None) or "OssError"
+    message = getattr(exc, "message", None) or str(exc)
+    request_id = getattr(exc, "request_id", None)
+    hint = _OSS_HINTS.get(code)
+    parts = [f"{code}: {message}"]
+    if hint:
+        parts.append(hint)
+    if request_id:
+        parts.append(f"request_id={request_id}")
+    return " | ".join(parts)
+
 
 def _get_bucket() -> oss2.Bucket:
     """惰性构造 bucket 句柄；未启用/配置缺失直接 503。"""
@@ -68,11 +96,12 @@ async def put_object(key: str, data: bytes, content_type: str | None = None) -> 
     try:
         await asyncio.to_thread(bucket.put_object, key, data, headers=headers)
     except oss2.exceptions.OssError as exc:
+        detail = _oss_detail(exc)
         logger.error(
             "OSS put object failed",
-            extra={"key": key, "status": getattr(exc, "status", None)},
+            extra={"key": key, "status": getattr(exc, "status", None), "detail": detail},
         )
-        raise ExternalServiceError("oss", "failed to store attachment") from exc
+        raise ExternalServiceError("oss", f"failed to store attachment: {detail}") from exc
 
 
 async def get_object(key: str) -> bytes:
@@ -84,11 +113,12 @@ async def get_object(key: str) -> bytes:
     except oss2.exceptions.NoSuchKey as exc:
         raise NotFoundError("AttachmentObject", key) from exc
     except oss2.exceptions.OssError as exc:
+        detail = _oss_detail(exc)
         logger.error(
             "OSS get object failed",
-            extra={"key": key, "status": getattr(exc, "status", None)},
+            extra={"key": key, "status": getattr(exc, "status", None), "detail": detail},
         )
-        raise ExternalServiceError("oss", "failed to read attachment") from exc
+        raise ExternalServiceError("oss", f"failed to read attachment: {detail}") from exc
 
 
 async def delete_object(key: str) -> None:
@@ -99,8 +129,9 @@ async def delete_object(key: str) -> None:
     except oss2.exceptions.NoSuchKey:
         return
     except oss2.exceptions.OssError as exc:
+        detail = _oss_detail(exc)
         logger.error(
             "OSS delete object failed",
-            extra={"key": key, "status": getattr(exc, "status", None)},
+            extra={"key": key, "status": getattr(exc, "status", None), "detail": detail},
         )
-        raise ExternalServiceError("oss", "failed to delete attachment") from exc
+        raise ExternalServiceError("oss", f"failed to delete attachment: {detail}") from exc

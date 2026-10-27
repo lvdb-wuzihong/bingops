@@ -151,7 +151,9 @@ async def bingops_error_handler(request: Request, exc: BingOpsError) -> JSONResp
         NotFoundError: 404,
         ConflictError: 409,
     }
-    status_code = status_map.get(type(exc), 500)
+    # 已显式映射的保留既有响应；其余（ExternalServiceError / InternalError 等）
+    # 回落到异常自带 http_status，避免上游依赖故障（如 OSS/飞书 500）被误报成平台内部错误
+    status_code = status_map.get(type(exc), exc.http_status)
     logger.warning(
         "Business exception handled",
         extra={

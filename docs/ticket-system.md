@@ -520,3 +520,175 @@ await fetch(`/api/v1/tickets/${ticketId}/attachments`, {
    ```
 2. 配置上述环境变量并重启服务；桶保持**私有**读写（不要开公共读）。
 3. 已有环境的其他角色需要 `ticket:attachment` 时，在角色管理界面手工勾选（init_data 的角色授权是总量幂等，重跑不会补入新码）。
+
+---
+
+## 18. SQL 变更工单（设计稿，P1 未实现）
+
+### 18.1 定位与三原则
+
+SQL 变更是**工单类型插件**而非独立模块（不拆：审批/状态机/封禁/审计/通知/权限/统计七套能力工单已有）。
+
+| 原则 | 含义 |
+|------|------|
+| **审批所见即所执行** | `sql_hash` 锁定：审批的 SQL 与执行的 SQL 字符串不一致 → 422，必须重新审批 |
+| **回滚分层** | 可逆语句自动生成（auto）/ 不可逆强制人工方案（manual）/ 执行前快照兜底（snapshot） |
+| **执行方式可声明** | `ddl_strategy` 区分直执行 / pt-osc / gh-ost / 人工，不同策略对应不同回滚路径 |
+
+### 18.2 数据模型（计划 v39）
+
+| 表 | 新增列 | 说明 |
+|----|--------|------|
+| `tickets` | `change_sql` TEXT | 变更 SQL（审批对象） |
+| | `sql_hash` VARCHAR(64) | sha256(规范化 SQL)，审批↔执行一致性锚点 |
+| | `rollback_sql` TEXT | 回滚 SQL（自动生成或人工填写） |
+| | `rollback_kind` VARCHAR(16) | `auto` / `manual` / `none` |
+| | `ddl_strategy` VARCHAR(16) | `direct` / `ptosc` / `ghost` / `manual`（默认 direct） |
+| | `snapshot_ref` VARCHAR(512) | 执行前快照引用（OSS key 或 job_step 标识） |
+| `ticket_catalog` | `requires_sql` BOOLEAN | 该事项是否必须填 SQL（DDL/DML 类事项） |
+
+### 18.3 流程
+
+```
+① 提单（开发/测试）  选 requires_sql 事项 → 表单出现 SQL 编辑区
+                    → 服务端校验（18.4）→ 落 change_sql + sql_hash
+                    → risk=high 进 pending_approval
+② 审批（DBA/架构师） SQL 全文 + 校验结果 + 回滚方案（auto 预览 / manual 必填）
+③ 下发（运维）       选 runbook(sql-exec) + 目标 DB 资源 + db_user + db_password 凭据
+                    + 重贴 SQL（hash 比对）→ 创建 job
+④ 执行（runner）     step0 环境探测 → step1 记录 binlog 位点 → step2 执行 → step3 反解回滚
+⑤ 归档               rollback_sql 回填工单；大脚本/快照走 §17 附件通道
+⑥ 回滚（人工）       工单展示 rollback_sql → 运维确认后作为新 execution 执行（不自动回滚）
+```
+
+### 18.4 静态校验器
+
+- 依赖：**引入 `sqlglot`**（纯 Python 解析库，支持 MySQL/PG 方言）；**不引入 goInception**（MySQL-only 常驻服务，且其回滚依赖自身执行通道，与 runner 执行链冲突）。
+- 用途：语句类型判定、表名提取、有无 WHERE 判定、DDL 逆向预审。
+- 规则：
+
+| 规则 | 动作 |
+|------|------|
+| `DROP DATABASE/SCHEMA`、`TRUNCATE` | 拒绝（422） |
+| `UPDATE`/`DELETE` 无 `WHERE` | 拒绝 |
+| 语句数超限（默认 1 条） | 拒绝 |
+| `DROP COLUMN` / 改类型 / `DROP TABLE` | 放行但 `rollback_kind=manual`，强制人工回滚方案 + 执行前快照 |
+| `CREATE TABLE` / `CREATE INDEX` / `ADD COLUMN` / `RENAME` | `rollback_kind=auto`（AST 逆向） |
+| `INSERT` / 带 WHERE 的 `UPDATE`/`DELETE` | `rollback_kind=auto`（binlog 反解） |
+
+> sqlglot 只做解析与预审；**DML 的回滚值以 binlog before image 为唯一事实源**，绝不以静态解析推断。
+
+### 18.5 回滚能力矩阵
+
+**DML（MySQL 系列，binlog 反解）**
+
+| 正向 | 反向生成 | 依据 |
+|------|---------|------|
+| `INSERT` | `DELETE WHERE pk IN (...)` | after image 主键 |
+| `UPDATE` | `UPDATE ... SET 旧值 WHERE pk` | **before image**（含触发器/级联连带修改） |
+| `DELETE` | `INSERT ... VALUES (完整旧行)` | before image 全列 |
+
+**DDL（按可逆性三档）**
+
+| DDL | 回滚 | 自动 |
+|-----|------|------|
+| `CREATE TABLE` | `DROP TABLE` | ✅ |
+| `CREATE INDEX` | `DROP INDEX` | ✅ |
+| `ADD COLUMN` | `DROP COLUMN` | ⚠️ 结构可逆，但变更后已写入该列的数据会丢，需人工确认 |
+| `RENAME TABLE` | 反向 RENAME | ✅ |
+| `DROP COLUMN` | `ADD COLUMN` 只能恢复结构 | ❌ 数据必须靠执行前快照 |
+| `MODIFY COLUMN`（改类型/长度） | — | ❌ 截断/溢出不可逆 |
+| `DROP TABLE` / `TRUNCATE` | — | ❌ 只能备份恢复 |
+
+### 18.6 执行方式（`ddl_strategy`）与引擎适配
+
+| 策略 | 适用 | 回滚方式 |
+|------|------|---------|
+| `direct` | 小表直接 DML/DDL | binlog 反解 / AST 逆向 |
+| `ptosc` | RDS MySQL / 自建 MySQL 大表 DDL | **保留旧表 + RENAME 回切**（非 binlog 反解） |
+| `ghost` | 同上（不依赖触发器） | 同上（从 cut-over 日志取表名映射） |
+| `manual` | PolarDB 内核 DDL / DBA 自行执行 | 人工回滚方案 |
+
+**大表判定（runner step0）**：`SELECT table_rows FROM information_schema.tables` + 数据体积，超阈值（建议 100 万行 / 10GB）→ 拒绝 `direct`，要求改选在线 DDL 策略。
+
+### 18.6.1 环境预检（版本与 binlog 配置）
+
+预检分两级，共用同一份**只读**脚本（`sql-precheck`）：
+
+| 级别 | 时机 | 作用 |
+|------|------|------|
+| **前置预检**（推荐） | dispatch 之前单独跑一条只读 job | 提前暴露“该库无法自动回滚”，避免执行完才发现；结果回填工单决定 `rollback_kind` |
+| **执行复检** | sql-exec 的 step0 | 防配置漂移（执行前一刻再确认一次） |
+
+**检查项（MySQL 8.0 专项）**：
+
+| 检查 | 通过条件 | 不满足时 |
+|------|---------|---------|
+| `SELECT VERSION()` | 命中已验证支持矩阵（当前以 8.0 为主） | 未验证版本 → 告警但可降级快照 |
+| `binlog_format` | 必须 `ROW` | 硬失败（无法反解） |
+| `binlog_row_image` | 必须 `FULL` | 硬失败（DELETE→INSERT 会缺列） |
+| `binlog_row_metadata`（8.0 新增，默认 MINIMAL） | `FULL` 最佳；`MINIMAL` → 用 information_schema 补全列定义 | 降级：靠元数据补全 |
+| `binlog_transaction_compression`（8.0.20+，默认 OFF） | 建议 `OFF` | 开启时需解析库支持压缩事件，否则拒绝自动回滚 |
+| `binlog_expire_logs_seconds`（8.0 变量名，勿用 5.7 的 `expire_logs_days`） | ≥ 回滚窗口（建议 7 天） | 回滚窗口内 binlog 可能已被清理 → 快照兜底 |
+| 复制权限 | `REPLICATION SLAVE` + `REPLICATION CLIENT` | 无权限 → 快照路线 |
+| 连接驱动依赖 | 认证插件为 `caching_sha2_password` 时，runner 需 `cryptography` 包 | 缺依赖 → 连接直接失败，镜像需预装 |
+
+预检结果以 JSON 落 `job_steps` 输出（版本/各项配置/大表判定/是否可自动回滚），供前端展示与工单归档。
+
+### 18.7 pt-osc / gh-ost 的引用方式
+
+**平台不内置、不捆绑这两个工具**，只做三件事：
+
+1. **策略声明**：工单 `ddl_strategy=ptosc|ghost`，runbook `sql-exec` 的 params 携带工具参数（表名、chunk-size、max-lag 等）。
+2. **参数强制校验**（服务层 + runner 双重）：
+   - pt-osc 必须带 `--no-drop-old-table`（否则旧表被删，回滚彻底失去依据）
+   - gh-ost 不得启用 `--ok-to-drop-table`，且指定 `--cut-over` 后退保留旧表名映射
+   - 两者都必须声明 `--alter` 与目标表，且与 `change_sql` 语义一致
+3. **回滚生成**：从工具输出中解析旧表名（pt-osc: `_<table>_old`；gh-ost: `_<table>_ghc`/`_del`）→ 生成 `RENAME TABLE <old> TO <table>, <table> TO <tmp>` 回切脚本，写入 `rollback_sql`（`rollback_kind=auto`）。
+
+> 注意：工具执行期间会产生大量影子表 binlog，**该策略下禁止走 binlog 反解**（否则生成的回滚 SQL 全是影子表噪声）。
+
+### 18.8 PolarDB 的策略差异
+
+| 维度 | PolarDB MySQL 版处理 |
+|------|---------------------|
+| **大表 DDL** | **不需要 pt-osc/gh-ost**——阿里云官方明确：PolarDB 支持**并行 DDL**与**表末尾秒级加列**，内核方式性能远优于第三方拷表工具。`ddl_strategy` 应限定 `direct`（内核 DDL）/`manual`，**拒绝 ptosc/ghost** |
+| **binlog 反解** | DMS 对 PolarDB MySQL 提供“精确备份”（binlog 反解），说明可行性成立；但**自研 runner 脚本需实测兼容性**（PolarDB binlog 由内核生成，事件细节与开源 MySQL 存在差异），列待确认项 |
+| **兜底** | 拿不准时退“通用备份”（执行前快照受影响行 → 生成恢复脚本），与 PG 同构 |
+| **判定依据** | CMDB 目标资源的引擎/型号字段（`model_code`/`engine`）。**待确认：CMDB 是否已录入 PolarDB 模型**（当前 schema.sql 未见 polar 相关种子） |
+
+### 18.9 PostgreSQL（P2，参考 DMS 通用备份）
+
+| 正向 | 自动生成的恢复脚本 |
+|------|-------------------|
+| `UPDATE` | 执行前快照 → `UPDATE t a SET ... FROM bak b WHERE a.pk=b.pk` |
+| `DELETE` | `INSERT INTO t SELECT * FROM bak ON CONFLICT DO NOTHING` |
+| `INSERT` | 执行时 `RETURNING pk` → `DELETE WHERE pk IN (...)` |
+| DDL | 不可自动，强制人工 + `pg_dump --schema-only` 结构快照 |
+
+### 18.10 风险清单
+
+| 风险 | 应对 |
+|------|------|
+| **热表回滚覆盖** | 回滚会抹掉窗口内的合法后续写入 → 回滚前提示差异，建议停写/维护窗口，或按 `updated_at > 变更时间` 排除 |
+| binlog 保留期不足 | 执行前 step0 校验保留时长；超出 → 只能快照兜底 |
+| 无 REPLICATION 权限 | 退快照路线（与 PG 同构），不影响工单流程 |
+| MySQL 8.0 事件兼容 | 引入 binlog 解析前先做版本矩阵验证用例 |
+| 大事务回滚 SQL 膨胀 | 上限（如 5MB）超出则不回填工单字段，只存 §17 附件供下载 |
+| 大表直接 DDL 锁表 | step0 大表判定 → 拒绝 `direct`，要求在线 DDL 策略 |
+
+### 18.11 待确认项
+
+1. MySQL 实例能否提供 `REPLICATION SLAVE/CLIENT` 账号（决定 binlog 路线是否可行）
+2. runner 镜像能否安装 `binlog2sql`/`pymysqlreplication`
+3. runner 到目标 DB 的网络路径（直连 / 经跳板）
+4. CMDB 是否已录入 PolarDB 模型（决定引擎判定依据）
+5. PolarDB binlog 与开源解析工具的兼容性实测
+
+### 18.12 实施拆分
+
+| 阶段 | 内容 | 仓库 |
+|------|------|------|
+| P1-a | v39 迁移 + 字段/校验器（sqlglot）+ 提单与审批展示 | bingops |
+| P1-b | DispatchRequest 携带 SQL + hash 比对拦截 | bingops |
+| P1-c | runner step0 环境探测 / step1 位点 / step2 执行 / step3 反解回传 | bingops-runner |
