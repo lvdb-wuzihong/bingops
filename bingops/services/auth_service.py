@@ -24,7 +24,7 @@ from bingops.core.security import (
     create_access_token,
     create_mfa_ticket,
     create_refresh_token,
-    decrypt_secret,
+    decrypt_secret_with_rotation,
     encrypt_secret,
     generate_totp_secret,
     hash_password,
@@ -113,14 +113,18 @@ async def _user_from_ticket(session: AsyncSession, ticket: str, *, purpose: str)
 
 
 def _user_totp_secret(user: User) -> str:
-    """解密用户 TOTP secret；密钥轮换/数据损坏时提示重新绑定。"""
+    """解密用户 TOTP secret；旧密钥解开的密文自动用当前密钥重写（无感轮换）。"""
     if not user.totp_secret:
         raise ValidationError("MFA is not configured")
     try:
-        return decrypt_secret(user.totp_secret)
+        plain, needs_rewrite = decrypt_secret_with_rotation(user.totp_secret)
     except InvalidToken:
         logger.error("MFA secret decrypt failed", extra={"user_id": user.id})
         raise ValidationError("MFA secret is invalid, contact administrator to rebind")
+    if needs_rewrite:
+        user.totp_secret = encrypt_secret(plain)
+        logger.info("MFA secret re-encrypted with current key", extra={"user_id": user.id})
+    return plain
 
 
 async def _complete_login(session: AsyncSession, user: User) -> TokenResponse:

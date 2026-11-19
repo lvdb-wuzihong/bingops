@@ -10,7 +10,7 @@ from typing import Any
 
 import bcrypt
 import pyotp
-from cryptography.fernet import Fernet
+from cryptography.fernet import Fernet, InvalidToken
 from jose import JWTError, jwt
 
 from bingops.core.config import settings
@@ -142,20 +142,47 @@ def verify_totp(secret: str, code: str) -> bool:
     return pyotp.TOTP(secret).verify(code.strip(), valid_window=1)
 
 
-def _fernet() -> Fernet:
-    """由 JWT secret_key 派生 Fernet 密钥（AES + HMAC，密文可安全落库）。"""
-    key = base64.urlsafe_b64encode(hashlib.sha256(settings.secret_key.encode()).digest())
+def _derive_fernet(seed: str) -> Fernet:
+    """由种子密钥派生 Fernet 密钥（AES + HMAC，密文可安全落库）。"""
+    key = base64.urlsafe_b64encode(hashlib.sha256(seed.encode()).digest())
     return Fernet(key)
 
 
+def _encryption_seed() -> str:
+    """当前加密种子：独立 MFA 密钥优先，未配置时回退 secret_key（兼容旧部署）。"""
+    return settings.mfa_encryption_key or settings.secret_key
+
+
 def encrypt_secret(plain: str) -> str:
-    """加密 TOTP secret（入库形式）。"""
-    return _fernet().encrypt(plain.encode()).decode()
+    """用当前密钥加密 TOTP secret（轮换后新写入一律用新密钥）。"""
+    return _derive_fernet(_encryption_seed()).encrypt(plain.encode()).decode()
+
+
+def decrypt_secret_with_rotation(token: str) -> tuple[str, bool]:
+    """解密 TOTP secret，返回 (明文, 是否需要重加密)。
+
+    先用当前密钥，失败再尝试旧密钥；旧密钥解开时标记需重写，
+    由调用方在登录成功后用新密钥覆盖（无感轮换）。
+
+    Raises:
+        InvalidToken: 当前与旧密钥均无法解密（密钥丢失/数据损坏）。
+    """
+    try:
+        return _derive_fernet(_encryption_seed()).decrypt(token.encode()).decode(), False
+    except InvalidToken:
+        pass
+    old = settings.mfa_encryption_key_old
+    if old:
+        try:
+            return _derive_fernet(old).decrypt(token.encode()).decode(), True
+        except InvalidToken:
+            pass
+    raise InvalidToken("MFA secret cannot be decrypted with current or old key")
 
 
 def decrypt_secret(token: str) -> str:
-    """解密库中 TOTP secret；secret_key 轮换或被篡改时抛 InvalidToken。"""
-    return _fernet().decrypt(token.encode()).decode()
+    """兼容接口：仅返回明文（需要重加密判断时用 decrypt_secret_with_rotation）。"""
+    return decrypt_secret_with_rotation(token)[0]
 
 
 def create_mfa_ticket(subject: str, *, purpose: str) -> str:

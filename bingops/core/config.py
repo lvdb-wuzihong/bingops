@@ -59,6 +59,13 @@ class Settings(BaseSettings):
     # admins_only = is_superuser 或 admin 角色；仅作用于本地账密登录，飞书 SSO 不叠加
     mfa_required: str = "off"
 
+    # MFA TOTP secret 加密密钥（Fernet 派生种子）
+    # 空 = 回退使用 secret_key（兼容旧部署）；建议独立配置，轮换 JWT 密钥不影响 MFA 数据
+    mfa_encryption_key: str = ""
+    # 旧加密密钥（仅用于解密）：轮换 mfa_encryption_key 时填入旧值，
+    # 已绑用户下次登录成功时自动用新密钥重加密（无感轮换）
+    mfa_encryption_key_old: str = ""
+
     # Kafka
     kafka_bootstrap_servers: str = "localhost:9092"
     kafka_consumer_group: str = "bingops-cmdb"
