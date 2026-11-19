@@ -57,5 +57,42 @@ class UserInfoResponse(BaseModel):
     is_active: bool
     is_superuser: bool
     has_password: bool = Field(description="是否已设置本地密码；False 时修改密码免验旧密码（首次设置）")
+    mfa_enabled: bool = Field(description="是否已绑定 MFA（TOTP）")
     roles: list[str] = Field(description="角色 code 列表")
     permissions: list[str] = Field(description="权限 code 列表")
+
+
+class MfaChallengeResponse(BaseModel):
+    """MFA 挑战响应（密码校验通过但未直接发放 JWT）。"""
+
+    mfa_required: bool = False
+    mfa_setup_required: bool = False
+    mfa_ticket: str | None = Field(default=None, description="已绑定用户：5 分钟 MFA 校验票据")
+    setup_ticket: str | None = Field(default=None, description="强制绑定用户：5 分钟绑定票据（仅可访问绑定端点）")
+
+
+class MfaVerifyRequest(BaseModel):
+    """登录第二因素校验请求。"""
+
+    mfa_ticket: str
+    otp_code: str = Field(min_length=6, max_length=8)
+
+
+class MfaSetupResponse(BaseModel):
+    """MFA 绑定初始化响应（前端渲染二维码）。"""
+
+    secret: str
+    otpauth_uri: str
+
+
+class MfaEnableRequest(BaseModel):
+    """完成 MFA 绑定请求。"""
+
+    otp_code: str = Field(min_length=6, max_length=8)
+
+
+class MfaDisableRequest(BaseModel):
+    """解绑 MFA 请求（密码 + 当前 TOTP 双验证）。"""
+
+    password: str = Field(min_length=6, max_length=128)
+    otp_code: str = Field(min_length=6, max_length=8)

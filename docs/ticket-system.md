@@ -169,7 +169,7 @@ psql -U <user> -d <dbname> -f sql/schema.sql
 
 | 变更 | 内容 |
 |------|------|
-| tickets 新增列 | `runbook_id`（执行意图）、`job_params` JSONB（含 target_resource_ids/params）、`code_ref`（git tag）、`approval_status`（none/pending/approved/rejected） |
+| tickets 新增列 | `runbook_id`（**v20 起为下发时处理人选定的执行工具，非建单意图**）、`job_params` JSONB（含 target_resource_ids/params）、`code_ref`（git tag，下发时写入）、`approval_status`（none/pending/approved/rejected） |
 | ticket_approvals 表 | 审批记录（不可变）：approver、action（approve/reject）、comment |
 | change_freezes 表 | 封禁窗口：name、reason、scope（NULL=全局，数组=模型范围）、起止时间 |
 | job_executions.ticket_id | 启用回填（工单自动下发时写入） |
@@ -527,11 +527,38 @@ await fetch(`/api/v1/tickets/${ticketId}/attachments`, {
 
 > **已落地（P1-a，v39）**：`change_sql` / `sql_hash` / `rollback_sql` / `rollback_kind` / `ddl_strategy` / `snapshot_ref` 字段；`ticket_catalog.requires_sql` / `sql_scope`；sqlglot 校验器（`services/sql_change_service.py`）与建单集成（不可逆变更强制回滚方案）。
 > **已落地（P1-b）**：下发弹窗重贴 SQL 并与 `sql_hash` 比对（不一致 422，需重新审批）；`ddl_strategy` 枚举校验与引擎适配（PolarDB 拒绝 ptosc/ghost）。
-> **待做**：P1-c（runner 侧环境预检 / binlog 位点采集与反解）。
+> **待做**：P1-c（sql-exec 单入口脚本 + 结果回写契约 + runner 镜像/网络前置）。
+
+**执行面契约对齐（2026-10 修订，与 bingops-runner 核对后）**：
+
+| 约束 | 含义 |
+|------|------|
+| **扁平单步** | runner 自 v29 起「一个 runbook = 一个步骤」，无步骤编排与跨步传值。下文「四阶段」必须在**同一 sql-exec 入口脚本内部**完成，控制面 `job_steps` 只看到 1 个 `step_key`（阶段边界靠日志段落体现） |
+| **结果回写通道** | runner 不回写业务表、无 result 字段；结构化结果通过**机器可读日志行**回传（约定见 §18.6.1）。已核实：`job_step_logs.line` 为 `Text` 无长度限制；但模型 docstring 声称的 90 天 purge **尚未实现**（全仓无清理任务），启用前需补定时清理 |
+| **依赖内置** | runner 镜像当前缺三类依赖，必须同时补齐：① Python — `pymysql` / `mysql-replication` / `cryptography`；②SQL 客户端 — `mysql-client`（镜像现只有 git/ssh/unzip/curl）；③ ansible 若走 `community.mysql` collection 则需显式安装（当前无任何 galaxy/collections 安装） |
+| **DB 直连需 runner 支持** | 跳板（`job_gateways`）只渲染 SSH `ProxyCommand`，**不代理 DB:3306**；且 `run_on=local` 的子进程环境（python/script）**拿不到 targets/connection/gateway，也无跳板钥匙**。因此隧道必须由 **runner 本体** 实现（local 模式按需取钥 + 注入 `GATEWAY_*`，或直接建隧道并改写 `DB_HOST/DB_PORT`），不能寄望“入口脚本自己读 gateway” |
+| **信任边界** | runner 不做审批/封禁/RBAC/白名单校验，只要投递 `job-dispatch` 就能执行已注册类型。这是有意设计（Kafka 内网 + 控制面唯一生产者），安全评审需知悉此前提 |
+
+> **跨仓缺口**：runner 仓的 `docs/task-system-design.md` 目前**没有 SQL 变更相关条目**（无 `change_sql` 传递约定、无 `ddl_strategy`、无验收口径）。P1-c 开工前必须先在 runner 仓补契约章节（含机器可读结果行格式、镜像依赖、工具载体），否则属于“控制面单方面约定”。
 
 ### 18.1 定位与三原则
 
 SQL 变更是**工单类型插件**而非独立模块（不拆：审批/状态机/封禁/审计/通知/权限/统计七套能力工单已有）。
+
+**与外部 DBA 平台的关系（架构边界）**：
+
+- ❌ **不做“跳转”**：工单里点一下跳到 Archery/DMS 发起变更——会导致**双状态机**（工单 + 平台两套进度）、**双审批**（要么批两遍，要么工单审批沦为摆设）、**审计断链**（SQL 与执行记录在外部平台，`sql_hash`/封禁拦截全部失效）。
+- ✅ **做“接入”**：若未来确需专业能力（审核规则库、执行计划分析、多级会签），把 DBA 平台定位为**执行器**（同 runner）：工单 dispatch 时调其 API 创建变更任务，状态回写工单；用户始终只在 BingOps 操作。
+- 触发条件（满足任一才考虑）：需多级审批矩阵（DBA+应用负责人会签）/ 需独立执行通道（不走 job_gateways）/ 需对外提供 SQL 服务（多租户 SLA）/ 团队已在用 Archery 等平台且习惯其规则。
+- 当前判断：四条均不成立，且 L1 能力（提单校验 + hash 锁定 + 下发拦截 + 策略适配）已落地，自建方案审计链完整。
+
+**执行器可替换（执行逻辑与工单解耦）**：
+
+- 已落地的 P1-a/P1-b 属于**纯流程壳**：字段（`change_sql` / `sql_hash` / `rollback_sql` / `rollback_kind` / `ddl_strategy` / `snapshot_ref`）、校验（sqlglot 高危拦截与可逆性判定）、审批（risk + 封禁）、下发拦截（hash 比对 + 策略枚举）——**均不绑定任何执行器**。
+- `snapshot_ref` 语义刻意保持通用（现存 OSS key / job_step 引用，将来可存外部平台的任务 ID）；`rollback_sql` 与执行者无关。
+- 将来换执行器（如改为外部 DBA 平台执行）只需两处：① dispatch 增加**执行器分流**（runner / dba_platform）；② 外部平台**状态回调**回写工单。工单模型、校验器、审批流、hash 锁定**一行不用改**。
+- 因此：现在上线 P1-a/b **不会形成锁定**；同时**不预埋执行器抽象**——等真实外部执行器出现，再按其接口形态（同步/异步、回调方式、状态机）抽取，避免纸上抽象抽错。
+- **部署顺序**：先跑 v39 迁移、后换新镜像（ORM 新增列而库未迁移 → 所有工单接口 500）。v39 仅新增可空列 + 2 条 catalog 标记 UPDATE，PG 11+ 为 instant 操作，幂等可重跑。
 
 | 原则 | 含义 |
 |------|------|
@@ -569,9 +596,11 @@ SQL 变更是**工单类型插件**而非独立模块（不拆：审批/状态�
                     → 服务端校验（18.4）→ 落 change_sql + sql_hash
                     → risk=high 进 pending_approval
 ② 审批（DBA/架构师） SQL 全文 + 校验结果 + 回滚方案（auto 预览 / manual 必填）
-③ 下发（运维）       选 runbook(sql-exec) + 目标 DB 资源 + db_user + db_password 凭据
-                    + 重贴 SQL（hash 比对）→ 创建 job
-④ 执行（runner）     step0 环境探测 → step1 记录 binlog 位点 → step2 执行 → step3 反解回滚
+③ 下发（运维）       选 runbook(sql-exec) + 目标 DB 资源 + db_user + db 凭据条目名
+                    + 重贴 SQL（hash 比对）→ 后端展开为 secrets → 创建 job
+④ 执行（runner）     **单个 sql-exec 入口脚本内部的四个阶段**（非四个 job step）：
+                    [precheck 环境探测] → [记录 binlog 位点] → [执行 change_sql] → [反解回滚 SQL]
+                    阶段产物以机器可读日志行回传，控制面解析后回写工单
 ⑤ 归档               rollback_sql 回填工单；大脚本/快照走 §17 附件通道
 ⑥ 回滚（人工）       工单展示 rollback_sql → 运维确认后作为新 execution 执行（不自动回滚）
 ```
@@ -624,7 +653,7 @@ SQL 变更是**工单类型插件**而非独立模块（不拆：审批/状态�
 | `ghost` | 同上（不依赖触发器） | 同上（从 cut-over 日志取表名映射） |
 | `manual` | PolarDB 内核 DDL / DBA 自行执行 | 人工回滚方案 |
 
-**大表判定（runner step0）**：`SELECT table_rows FROM information_schema.tables` + 数据体积，超阈值（建议 100 万行 / 10GB）→ 拒绝 `direct`，要求改选在线 DDL 策略。
+**大表判定（入口脚本 precheck 阶段）**：`SELECT table_rows FROM information_schema.tables` + 数据体积，超阈值（建议 100 万行 / 10GB）→ 拒绝 `direct`，要求改选在线 DDL 策略。
 
 ### 18.6.1 环境预检（版本与 binlog 配置）
 
@@ -633,7 +662,7 @@ SQL 变更是**工单类型插件**而非独立模块（不拆：审批/状态�
 | 级别 | 时机 | 作用 |
 |------|------|------|
 | **前置预检**（推荐） | dispatch 之前单独跑一条只读 job | 提前暴露“该库无法自动回滚”，避免执行完才发现；结果回填工单决定 `rollback_kind` |
-| **执行复检** | sql-exec 的 step0 | 防配置漂移（执行前一刻再确认一次） |
+| **执行复检** | sql-exec 入口脚本的 precheck 阶段 | 防配置漂移（执行前一刻再确认一次） |
 
 **检查项（MySQL 8.0 专项）**：
 
@@ -648,18 +677,54 @@ SQL 变更是**工单类型插件**而非独立模块（不拆：审批/状态�
 | 复制权限 | `REPLICATION SLAVE` + `REPLICATION CLIENT` | 无权限 → 快照路线 |
 | 连接驱动依赖 | 认证插件为 `caching_sha2_password` 时，runner 需 `cryptography` 包 | 缺依赖 → 连接直接失败，镜像需预装 |
 
-预检结果以 JSON 落 `job_steps` 输出（版本/各项配置/大表判定/是否可自动回滚），供前端展示与工单归档。
+预检结果以 JSON 回传（版本/各项配置/大表判定/是否可自动回滚），供前端展示与工单归档。
+
+**回写通道契约**：runner 不回写业务表，控制面也拿不到 result 字段，因此约定 sql-exec 入口脚本向 stdout 输出**带前缀的单行 JSON**：
+
+```
+::bingops-result::{"phase":"precheck","ok":true,"version":"8.0.36",...}
+::bingops-result::{"phase":"rollback","seq":1,"total":3,"hash":"sha256:...","sql":"UPDATE ..."}
+```
+
+**大对象必须分段，不得只回传引用**：① runner 的临时目录在 execution 结束时 `rmtree`，回传文件路径立即失效；② 控制面拿不到全文就无法写 OSS，与 §18.10“控制面落附件”互斥。
+
+**分级回传（按回滚 SQL 大小）**：
+
+| 大小 | 回传方式 | 工单落点 |
+|------|---------|---------|
+| ≤ 64KB | **单行** `::bingops-result::{json}` | 直接写 `rollback_sql` 字段 |
+| 64KB ~ 2MB | **分段多行**（`seq/total/hash`，每段 ≤32KB） | 控制面拼接 + hash 校验；超字段阈值则写 §17 附件、字段存引用 |
+| > 2MB | **不生成自动回滚** | `rollback_kind=manual` + 提示“变更范围过大，请人工准备回滚方案或分批执行” |
+
+上限取 2MB 而非 20MB 的理由：日志行是逐条 Kafka 事件（`job-events` 的 step-log），20MB 意味着 600+ 条消息，既拖慢回流又撑大 `job_step_logs`；2MB 已覆盖数万行变更，再大应分批执行。
+
+> **runner 不写 OSS**：附件桶凭据只在控制面（`BINGOPS_OSS_*`），runner 无凭据且不应持有（通用执行器拿到桶写权限会扩大攻击面，且会产生“桶里有对象、库里无记录”的孤儿）。大对象的正确链路是：**runner 回传文本 → 控制面拼接后自己写 OSS**。
+
+**存储落点（回滚 SQL 统一文件化）**：
+
+| 项 | 约定 |
+|----|------|
+| 落点 | **复用现有附件桶 + 新类别前缀**：`{prefix}/sql-change/{ticket_id}/{uuid}/rollback.sql`（不新建桶；仅合规要求隔离时才评估专用桶） |
+| 小 SQL | ≤64KB 时**同时写工单字段**（审批/详情直接展示，免下载）+ 入附件；字段与文件以 hash 对齐 |
+| 大 SQL | 控制面拼接后写附件，工单字段只存 `oss_key` 引用；前端统一按“下载回滚 SQL”入口展示 |
+| 突破 2MB 的增强（P1-c 之后） | **预签名 PUT URL**：dispatch 时控制面签发（限单对象键、限时限大小），runner 执行完直接 PUT 回滚 SQL，**不持有长期凭据**；前提是 runner 可出网到 OSS endpoint |
+
+> 说明：文件化只解决**存储形态**，不改变**传输入限**——“runner → 控制面”仍只能走日志行（Kafka），2MB 上限不变；预签名直传是绕开该瓶颈的唯一轻量路径。
+
+**预检结果的归属**：预检作为**独立 execution**（非主变更 job）运行，通过 `job_executions.ticket_id` 关联工单；控制面在**步骤终态钩子**（event 回流时）解析 `::bingops-result::` 行并回写工单（`rollback_kind` / 预检 JSON 字段）；工单详情可作为兼底轮询。
 
 ### 18.7 pt-osc / gh-ost 的引用方式
 
 **平台不内置、不捆绑这两个工具**，只做三件事：
 
 1. **策略声明**：工单 `ddl_strategy=ptosc|ghost`，runbook `sql-exec` 的 params 携带工具参数（表名、chunk-size、max-lag 等）。
-2. **参数强制校验**（服务层 + runner 双重）：
+2. **参数强制校验**（服务层 + **sql-exec 入口脚本自校验**；runner 核心是通用执行面，不承载 SQL 业务逻辑）：
    - pt-osc 必须带 `--no-drop-old-table`（否则旧表被删，回滚彻底失去依据）
    - gh-ost 不得启用 `--ok-to-drop-table`，且指定 `--cut-over` 后退保留旧表名映射
    - 两者都必须声明 `--alter` 与目标表，且与 `change_sql` 语义一致
 3. **回滚生成**：从工具输出中解析旧表名（pt-osc: `_<table>_old`；gh-ost: `_<table>_ghc`/`_del`）→ 生成 `RENAME TABLE <old> TO <table>, <table> TO <tmp>` 回切脚本，写入 `rollback_sql`（`rollback_kind=auto`）。
+
+> **工具载体（契约必选其一）**：平台不捆绑，因此必须明确——① **目标机预装** pt-osc/gh-ost（入口脚本只做调用与解析）；或 ② **runner 镜像内置**（需改 Dockerfile，所有执行节点同步升级）。当前未定，列为 P1-c 前置条件。
 
 > 注意：工具执行期间会产生大量影子表 binlog，**该策略下禁止走 binlog 反解**（否则生成的回滚 SQL 全是影子表噪声）。
 
@@ -686,19 +751,60 @@ SQL 变更是**工单类型插件**而非独立模块（不拆：审批/状态�
 | 风险 | 应对 |
 |------|------|
 | **热表回滚覆盖** | 回滚会抹掉窗口内的合法后续写入 → 回滚前提示差异，建议停写/维护窗口，或按 `updated_at > 变更时间` 排除 |
-| binlog 保留期不足 | 执行前 step0 校验保留时长；超出 → 只能快照兜底 |
+| binlog 保留期不足 | 入口脚本 precheck 校验保留时长；超出 → 只能快照兜底 |
 | 无 REPLICATION 权限 | 退快照路线（与 PG 同构），不影响工单流程 |
 | MySQL 8.0 事件兼容 | 引入 binlog 解析前先做版本矩阵验证用例 |
-| 大事务回滚 SQL 膨胀 | 上限（如 5MB）超出则不回填工单字段，只存 §17 附件供下载 |
-| 大表直接 DDL 锁表 | step0 大表判定 → 拒绝 `direct`，要求在线 DDL 策略 |
+| 大事务回滚 SQL 膨胀 | **三级分级回传**（§18.6.1）：≤64KB 单行 / 64KB~2MB 分段 / >2MB 落 `rollback_kind=manual`；控制面拼接后超字段阈值则写 §17 附件（**runner 无 OSS 凭据，不直接写桶**） |
+| 大表直接 DDL 锁表 | precheck 大表判定 → 拒绝 `direct`，要求在线 DDL 策略 |
 
-### 18.11 待确认项
+### 18.11 前置条件与待确认项
 
-1. MySQL 实例能否提供 `REPLICATION SLAVE/CLIENT` 账号（决定 binlog 路线是否可行）
-2. runner 镜像能否安装 `binlog2sql`/`pymysqlreplication`
-3. runner 到目标 DB 的网络路径（直连 / 经跳板）
-4. CMDB 是否已录入 PolarDB 模型（决定引擎判定依据）
-5. PolarDB binlog 与开源解析工具的兼容性实测
+**方案前提（五项都满足才能开工 P1-c，任一不满足 → 退快照/人工）**：
+
+| # | 前提 | 当前状态 |
+|---|------|---------|
+| 1 | **runner 能到达目标 DB:3306**（直连或经网关隧道，见 §18.11.1） | 待实测 |
+| 2 | MySQL 可提供 `REPLICATION SLAVE/CLIENT` 账号 | 待确认 |
+| 3 | **跳板钥在 `run_on=local` 模式可达**——当前 local 子进程只有 `os.environ + params + secrets`，拿不到 targets/gateway/跳板钥，**需 runner 改造**（注入 `GATEWAY_*` 环境变量或由 runner 代建隧道） | ❌ 当前不可达 |
+| 4 | **runner 镜像补齐依赖**：`pymysql` / `mysql-replication` / `cryptography`；外加 `mysql-client` 或 `community.mysql` collection（现镜像只有 git/ssh/unzip/curl，ansible 也无该 collection） | ❌ 均缺失 |
+| 5 | **大对象回传方式已定义**（§18.6.1）：三级分级（单行 / 分段 / manual），上限 2MB | ✅ 已定义 |
+
+**其余待确认项**：
+
+6. CMDB 是否已录入 PolarDB 模型（§18.8 引擎判定依据）；**RDS/PolarDB 模型是否采集 `vpc_id`**（网关选路依据，否则 dispatch 需显式传 `gateway_name`）
+7. `pt-osc`/`gh-ost` 采用“目标机预装”还是“镜像内置”（§18.7）
+8. PolarDB binlog 与开源解析工具的兼容性实测
+
+### 18.11.1 跨 VPC 的 DB 通道（网关隧道）
+
+`job_gateways` 当前只把 gateway 渲染成 ansible 的 `ProxyCommand`，**不代理数据库端口**。跨 VPC 场景下把网关扩展为 **TCP 隧道网关**（SSH 天然支持 `-L`）：
+
+```
+runner 本体（不是入口脚本！）
+  ├─ local 模式且需要连 DB 时：按 targets[].gateway 取跳板钥（Vault）
+  ├─ ssh -i <gw_key> -N -L 127.0.0.1:{临时端口}:{db_host}:3306 user@gateway
+  ├─ 向子进程注入 DB_HOST=127.0.0.1 / DB_PORT={临时端口}（或 GATEWAY_*）
+  └─ job 结束销毁隧道
+```
+
+**实现方必须是 runner**：`run_on=local` 的子进程环境不包含 `targets` / `connection` / `gateway`，也不持有跳板钥（钥只在 runner 进程内且仅在 `run_on=target` 时取出）。指望“入口脚本自己读 gateway 建隧道”不成立。
+
+| 要点 | 说明 |
+|------|------|
+| 控制面 | **零改动**——gateway 随 `targets[]` 快照下发 |
+| runner | 新增 local 模式取钥 + 隧道助手，生命周期绑 job |
+| 跳板机前提 | `AllowTcpForwarding yes`（加固配置可能关闭，需预检） |
+| 进程清理 | 必须 `ExitOnForwardFailure` + `trap` 清理；否则 step 超时 `proc.kill()` 后残留隧道与端口 |
+| 超时 | 反解可能分钟级，runbook 的 `timeout_sec` 需显式调大（缺省 600 会误杀） |
+
+**降级链（逐级退）**：直连 → 网关 TCP 隧道 → 在能连 DB 的主机跑 `mysqlbinlog --read-from-remote-server` 拉取后回传解析 → 执行前快照 / 人工回滚。最后一级任何环境可走，是保底路径。
+
+> **交互澄清**：网关选路是**平台内部行为**（按 target 的 `vpc_id` 自动匹配，v35 起），**不进入工单、也不进入下发弹窗**；只有自动选路失败时运维才需显式指定网关名（兼底手段）。同理，`sql-exec` runbook 是**建一次、所有 SQL 单复用**，不是每张工单编写；前端可在 SQL 单的下发弹窗里默认预选 `sql-exec`（建议 runbook 统一 `sql-*` 命名前缀以利于筛选）。
+
+### 18.11.2 实现级约束（不做就会踩坑）
+
+1. **SQL 传输不拼 shell**：ansible 路径下 params 会同时作为 extra-vars 与 task environment；含引号/换行的 SQL 拼进命令行必然踩转义与注入。**约定：`change_sql` 只经 environment 或 stdin 传递**，禁止字符串插值进 shell 命令。
+2. **预检结果的解析触发点**：预检是独立 execution（带 `ticket_id`），控制面在 job-events 终态回调里解析 `::bingops-result::` 行并回写工单；不要让前端轮询解析（容易漏）。
 
 ### 18.12 实施拆分
 
@@ -706,7 +812,7 @@ SQL 变更是**工单类型插件**而非独立模块（不拆：审批/状态�
 |------|------|------|
 | P1-a | v39 迁移 + 字段/校验器（sqlglot）+ 提单与审批展示（后端✅） | bingops |
 | P1-b | DispatchRequest 携带 SQL + hash 比对拦截（✅） | bingops |
-| P1-c | runner step0 环境探测 / step1 位点 / step2 执行 / step3 反解回传 | bingops-runner |
+| P1-c | sql-exec **单入口脚本**（内部四阶段）+ 机器可读结果行约定 + 控制面解析入库 | bingops-runner + bingops |
 
 ### 18.13 前端对接说明
 
@@ -724,8 +830,9 @@ SQL 变更是**工单类型插件**而非独立模块（不拆：审批/状态�
 
 1. **新建工单**：选事项后根据 `requires_sql` 动态显示 SQL 区；提交失败（422）时把服务端 `message` 里的违规规则原样展示（如“无 WHERE 的 UPDATE 已拦截”）；`rollback_kind=manual` 时展开“回滚方案”必填区。
 2. **审批页**：SQL 只读全文（行号 + 语法高亮 + 一键复制）、校验结论（语句类型/影响表/是否无 WHERE）、回滚方案（auto 展示生成的 SQL，manual 展示人工填写的）——**审批人必须能看到完整 SQL 与回滚方案才能点通过**。
-3. **下发弹窗（运维）**：runbook(sql-exec) + 目标 DB 资源选择器（限 DB 类模型）+ `db_user` 输入 + `db_password` 凭据下拉（credentials 中 `kind=db_password`）+ **重贴 SQL（`change_sql`，服务端 hash 比对）** + `ddl_strategy`；选 ptosc/ghost 后展开工具参数（表名/chunk-size/max-lag）；预检硬失败时禁用提交并提示原因。
-4. **工单详情**：SQL 面板双栏（变更 SQL / 回滚 SQL）+ 预检结果卡 + 执行记录（affected_rows / binlog 位点 / 回滚生成状态）；「执行回滚」按钮仅 `status=open` 且在 `rollback_sql` 非空时显示，点击弹二次确认并提示“回滚将覆盖变更后的写入，请确认无业务写入”。
+3. **下发弹窗（运维）**：runbook(sql-exec) + 目标 DB 资源选择器（限 DB 类模型）+ `db_user` 输入 + **数据库凭据目录条目名**（dispatch 时后端展开为 `secrets` 传给执行器）+ **重贴 SQL（`change_sql`，服务端 hash 比对）** + `ddl_strategy`；选 ptosc/ghost 后展开工具参数（表名/chunk-size/max-lag）；预检硬失败时禁用提交并提示原因。
+   - ⚠️ **通道缺口**：`ExecutionCreate` 已有 `secrets` 字段，但工单下发链路 `_dispatch_attached_job` **目前只传 `params`**。P1-b 需补一条“凭据条目名 → `secrets`”通道（或改用 runbook `secrets_schema.default_ref` 预置），否则 db 密码传不进去。
+4. **工单详情**：SQL 面板双栏（变更 SQL / 回滚 SQL）+ 预检结果卡 + 执行记录（affected_rows / binlog 位点 / 回滚生成状态）；**回滚发起方式：新建关联回滚工单**（引用原工单号与 `rollback_sql`）——变更完成后原工单常已 `resolved`/`closed`，在已终态工单上直接放“执行回滚”按钮在流程上不成立；若在原工单已 `open` 状态重跑，则需二次确认并提示“回滚将覆盖变更后的写入”。
 
 #### 列表与状态
 

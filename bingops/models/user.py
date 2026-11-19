@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Boolean, DateTime, String
+from sqlalchemy import Boolean, DateTime, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from bingops.models.base import Base, BaseMixin
@@ -39,6 +39,18 @@ class User(BaseMixin, Base):
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     is_superuser: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # 登录限流（失败窗口计数 → 锁定）
+    failed_login_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_failed_login_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+    locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # MFA（TOTP）：secret 存 Fernet 密文，禁止明文落库
+    totp_secret: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    mfa_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    mfa_bound_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     # 关联
     roles: Mapped[list[Role]] = relationship(

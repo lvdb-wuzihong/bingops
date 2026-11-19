@@ -12,7 +12,10 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     """应用全局配置。"""
 
-    model_config = {"env_prefix": "BINGOPS_", "env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
+    model_config = {
+        "env_prefix": "BINGOPS_", "env_file": ".env",
+        "env_file_encoding": "utf-8", "extra": "ignore",
+    }
 
     # 应用
     debug: bool = False
@@ -46,6 +49,15 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 180
     refresh_token_expire_days: int = 7
     jwt_algorithm: str = "HS256"
+
+    # 登录安全：失败限流（默认 10 分钟窗口内失败 5 次 → 锁定 1 小时）
+    login_fail_window_minutes: int = 10
+    login_fail_max_attempts: int = 5
+    login_lock_minutes: int = 60
+
+    # MFA（TOTP）强制策略：off | admins_only | all
+    # admins_only = is_superuser 或 admin 角色；仅作用于本地账密登录，飞书 SSO 不叠加
+    mfa_required: str = "off"
 
     # Kafka
     kafka_bootstrap_servers: str = "localhost:9092"
@@ -101,7 +113,10 @@ class Settings(BaseSettings):
 class FeishuSettings(BaseSettings):
     """飞书 SSO 配置。"""
 
-    model_config = {"env_prefix": "BINGOPS_FEISHU_", "env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
+    model_config = {
+        "env_prefix": "BINGOPS_FEISHU_", "env_file": ".env",
+        "env_file_encoding": "utf-8", "extra": "ignore",
+    }
 
     app_id: str = ""
     app_secret: str = ""

@@ -33,6 +33,14 @@ CREATE TABLE users (
     is_active       BOOLEAN      NOT NULL DEFAULT TRUE,
     is_superuser    BOOLEAN      NOT NULL DEFAULT FALSE,
     last_login_at   TIMESTAMPTZ,
+    -- 登录限流：10 分钟窗口内失败 5 次锁定 1 小时（窗口/阈值/时长见 Settings）
+    failed_login_count   INT          NOT NULL DEFAULT 0,
+    last_failed_login_at TIMESTAMPTZ,
+    locked_until         TIMESTAMPTZ,
+    -- MFA（TOTP）：totp_secret 为 Fernet 加密后的密文，不得存明文
+    totp_secret     VARCHAR(512),
+    mfa_enabled     BOOLEAN      NOT NULL DEFAULT FALSE,
+    mfa_bound_at    TIMESTAMPTZ,
     created_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     updated_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );

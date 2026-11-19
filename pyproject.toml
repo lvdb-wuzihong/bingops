@@ -24,6 +24,8 @@ dependencies = [
     "oss2>=2.18,<3",
     # SQL 变更工单静态校验（多方言 AST 解析：高危语法拦截 / 可逆性判定 / 表名提取）
     "sqlglot>=25,<30",
+    # MFA（TOTP）：RFC 6238 一次一密，兼容 Google Authenticator / 飞书验证器
+    "pyotp>=2.9,<3",
 ]
 
 [project.optional-dependencies]
